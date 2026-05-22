@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Web XRD Pattern Visualizer & Exporter</title>
+    <title>Web XRD Pattern Visualizer & Peak Fitting Tool</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.24.1/plotly.min.js"></script>
     <script>
         if (typeof Plotly === 'undefined') {
@@ -13,199 +13,64 @@
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            margin: 0;
-            padding: 0;
-            display: flex;
-            background-color: #f8f9fa;
-            height: 100vh;
+            margin: 0; padding: 0; display: flex; background-color: #f8f9fa; height: 100vh;
         }
-        /* Left Sidebar Panel Styling */
         #sidebar {
-            width: 320px;
-            background-color: #ffffff;
-            border-right: 1px solid #e9ecef;
-            padding: 25px;
-            box-sizing: border-box;
-            display: flex;
-            flex-direction: column;
-            gap: 15px;
+            width: 320px; background-color: #ffffff; border-right: 1px solid #e9ecef;
+            padding: 22px; box-sizing: border-box; display: flex; flex-direction: column; gap: 12px;
         }
-        h2 {
-            margin-top: 0;
-            font-size: 1.2rem;
-            color: #212529;
-            border-bottom: 2px solid #0d6efd;
-            padding-bottom: 8px;
-            margin-bottom: 5px;
-        }
-        .info-text {
-            font-size: 0.9rem;
-            color: #6c757d;
-            line-height: 1.4;
-            margin-bottom: 5px;
-        }
-        /* Custom styled upload block zone */
-        .upload-btn-wrapper {
-            position: relative;
-            overflow: hidden;
-            display: inline-block;
-            width: 100%;
-        }
+        h2 { margin-top: 0; font-size: 1.15rem; color: #212529; border-bottom: 2px solid #0d6efd; padding-bottom: 8px; margin-bottom: 2px; }
+        .info-text { font-size: 0.85rem; color: #6c757d; line-height: 1.4; margin-bottom: 2px; }
+        .upload-btn-wrapper { position: relative; overflow: hidden; display: inline-block; width: 100%; }
         .btn-upload {
-            border: 2px dashed #b8c2cc;
-            color: #495057;
-            background-color: #f1f3f5;
-            padding: 20px;
-            border-radius: 8px;
-            font-size: 0.95rem;
-            font-weight: bold;
-            width: 100%;
-            box-sizing: border-box;
-            cursor: pointer;
-            text-align: center;
-            transition: all 0.2s ease;
+            border: 2px dashed #b8c2cc; color: #495057; background-color: #f1f3f5; padding: 15px;
+            border-radius: 8px; font-size: 0.9rem; font-weight: bold; width: 100%; box-sizing: border-box;
+            cursor: pointer; text-align: center; transition: all 0.2s ease;
         }
-        .btn-upload:hover {
-            background-color: #e8ecef;
-            border-color: #0d6efd;
-        }
-        .upload-btn-wrapper input[type=file] {
-            font-size: 100px;
-            position: absolute;
-            left: 0;
-            top: 0;
-            opacity: 0;
-            cursor: pointer;
-        }
-        /* Clean Crop Button Styling */
-        .btn-crop {
-            background-color: #ffc107;
-            color: #212529;
-            border: none;
-            padding: 12px;
-            border-radius: 6px;
-            font-weight: bold;
-            cursor: pointer;
-            width: 100%;
-            transition: background-color 0.2s ease;
-            margin-top: 5px;
-        }
-        .btn-crop:hover {
-            background-color: #e0a800;
-        }
-        /* Clean CSV Export Button Styling */
-        .btn-export {
-            background-color: #198754;
-            color: white;
-            border: none;
-            padding: 12px;
-            border-radius: 6px;
-            font-weight: bold;
-            cursor: pointer;
-            width: 100%;
-            transition: background-color 0.2s ease;
-        }
-        .btn-export:hover {
-            background-color: #157347;
-        }
-        /* Action buttons control elements */
-        .btn-clear {
-            background-color: #dc3545;
-            color: white;
-            border: none;
-            padding: 12px;
-            border-radius: 6px;
-            font-weight: bold;
-            cursor: pointer;
-            width: 100%;
-            transition: background-color 0.2s ease;
-        }
-        .btn-clear:hover {
-            background-color: #bb2d3b;
-        }
-        /* Checkbox Container Styling */
-        .checkbox-container {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin: 5px 0;
-            font-size: 0.95rem;
-            color: #212529;
-            user-select: none;
-        }
-        .checkbox-container input {
-            cursor: pointer;
-            width: 16px;
-            height: 16px;
-        }
-        .checkbox-container label {
-            cursor: pointer;
-            font-weight: 500;
-        }
-        .status-badge {
-            background-color: #cff4fc;
-            color: #055160;
-            border: 1px solid #b6effb;
-            padding: 10px;
-            border-radius: 6px;
-            font-size: 0.85rem;
-            font-weight: 500;
-            text-align: center;
-            margin-top: 5px;
-        }
-        /* Unintrusive Version Tag Styling */
-        .version-tag {
-            font-size: 0.75rem;
-            color: #adb5bd;
-            text-align: center;
-            margin-top: auto;
-            padding-top: 10px;
-            font-family: monospace;
-        }
-        /* Main Right Window Workspace Plotting Canvas Box */
-        #main-content {
-            flex-grow: 1;
-            padding: 25px;
-            box-sizing: border-box;
-            display: flex;
-            flex-direction: column;
-        }
-        #chart-container {
-            width: 100%;
-            flex-grow: 1;
-            background: white;
-            border: 1px solid #dee2e6;
-            border-radius: 8px 8px 0 0;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.02);
-        }
-        /* Continuous Measurement Cursor Position Bar */
-        #cursor-bar {
-            background-color: #e9ecef;
-            color: #212529;
-            padding: 10px 15px;
-            border-radius: 0 0 8px 8px;
-            font-family: "Consolas", monospace;
-            font-size: 0.95rem;
-            font-weight: bold;
-            border: 1px solid #dee2e6;
-            border-top: none;
-        }
+        .btn-upload:hover { background-color: #e8ecef; border-color: #0d6efd; }
+        .upload-btn-wrapper input[type=file] { font-size: 100px; position: absolute; left: 0; top: 0; opacity: 0; cursor: pointer; }
+        .btn-fit-toggle { background-color: #6f42c1; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
+        .btn-fit-toggle.active { background-color: #ffd43b; color: #212529; }
+        .btn-run-fit { background-color: #fd7e14; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
+        .btn-run-fit:hover { background-color: #e06d0f; }
+        .btn-crop { background-color: #eef1f6; color: #333333; border: 1px solid #ced4da; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
+        .btn-crop:hover { background-color: #dfe4ec; }
+        .btn-export { background-color: #198754; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; }
+        .btn-export:hover { background-color: #157347; }
+        .btn-clear { background-color: #dc3545; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; }
+        .btn-clear:hover { background-color: #bb2d3b; }
+        .checkbox-container { display: flex; align-items: center; gap: 8px; font-size: 0.9rem; color: #212529; user-select: none; margin: 2px 0; }
+        .checkbox-container input { cursor: pointer; width: 15px; height: 15px; }
+        .status-badge { background-color: #cff4fc; color: #055160; border: 1px solid #b6effb; padding: 8px; border-radius: 6px; font-size: 0.8rem; font-weight: 500; text-align: center; }
+        .version-tag { font-size: 0.75rem; color: #adb5bd; text-align: center; margin-top: auto; padding-top: 8px; font-family: monospace; }
+        
+        #main-content { flex-grow: 1; padding: 22px; box-sizing: border-box; display: flex; flex-direction: column; }
+        #chart-container { width: 100%; flex-grow: 1; background: white; border: 1px solid #dee2e6; border-radius: 8px 8px 0 0; box-shadow: 0 4px 6px rgba(0,0,0,0.02); }
+        #cursor-bar { background-color: #e9ecef; color: #212529; padding: 10px 15px; border-radius: 0; font-family: "Consolas", monospace; font-size: 0.9rem; font-weight: bold; border: 1px solid #dee2e6; border-top: none; }
+        
+        /* Computational Coefficients Results Table Sheet Panel Window */
+        #results-dashboard { display: none; background-color: #ffffff; border: 1px solid #dee2e6; border-top: none; border-radius: 0 0 8px 8px; padding: 15px; box-sizing: border-box; max-height: 180px; overflow-y: auto; }
+        .results-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; text-align: left; }
+        .results-table th { background-color: #f1f3f5; padding: 6px; border-bottom: 2px solid #dee2e6; font-weight: bold; }
+        .results-table td { padding: 6px; border-bottom: 1px solid #eee; font-family: "Consolas", monospace; }
     </style>
 </head>
 <body>
 
     <div id="sidebar">
-        <h2>🔬 XRD Data Viewer and Converter</h2>
-        <p class="info-text">Upload single or multiple XRD datasets in native csv or xrdml format. </p>
+        <h2>🔬 XRD Data Analyzer</h2>
+        <p class="info-text">Load data tracks, isolate regions of interest, and trigger the peak optimization routines panel parameters.</p>
         
         <div class="upload-btn-wrapper">
             <div class="btn-upload">📁 Click to Select File(s)</div>
             <input type="file" id="xrd-files" accept=".csv,.xrdml" multiple onchange="handleFileSelections(event)">
         </div>
 
-        <hr style="border: 0; border-top: 1px solid #e9ecef; margin: 5px 0;">
+        <hr style="border: 0; border-top: 1px solid #e9ecef; margin: 3px 0;">
         
         <button class="btn-crop" onclick="cropToView()">✂️ Crop to View</button>
+        <button id="btn-fit-toggle" class="btn-fit-toggle" onclick="toggleFittingMode()">🎯 Peak Fitting: OFF</button>
+        <button id="btn-run-fit" class="btn-run-fit" onclick="executePeakOptimization()" style="display: none;">⚡ Run Optimised Fit</button>
         <button class="btn-export" onclick="exportPlottedToCSV()">📥 Export Plotted to CSV</button>
         <button class="btn-clear" onclick="clearCanvas()">🗑️ Clear Canvas</button>
         
@@ -214,44 +79,251 @@
             <label for="toggle-tooltip">Enable Live Tooltip</label>
         </div>
         
-        <div class="status-badge" id="status-display">
-            Active tracking profiles loaded: 0
-        </div>
-        
+        <div class="status-badge" id="status-display">Active profiles loaded: 0</div>
         <div class="version-tag" id="app-version-container"></div>
     </div>
 
     <div id="main-content">
         <div id="chart-container"></div>
         <div id="cursor-bar">Cursor Position: 2θ = --</div>
+        
+        <div id="results-dashboard">
+            <h4 style="margin: 0 0 10px 0; color:#198754;">📊 Optimized Peak Profile Coefficients Matrix</h4>
+            <table class="results-table" id="results-matrix-sheet">
+                <thead>
+                    <tr>
+                        <th>Peak ID</th>
+                        <th>Center Position (2θ)</th>
+                        <th>Amplitude Peak Max (counts)</th>
+                        <th>FWHM Line Width</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
     </div>
 
     <script>
-        // ==========================================
-        // GLOBAL CONFIGURATIONS & CONSTANTS
-        // ==========================================
         const VERSION_TAG = "v2026.05.22.1";
-
         let persistentDatasets = {};
+        
+        // Fitting variables cache matrix properties
+        let fittingModeActive = false;
+        let peakGuessesX = [];
+        let currentMouseHoverX = null;
+        let fittedOutputModels = null;
 
         window.onload = function() {
-            // Populate our version string label dynamically into the sidebar layout
             document.getElementById('app-version-container').innerText = VERSION_TAG;
             renderPlaceholderCanvas();
+            
+            // Set up context menu listener on container to log right click coordinates 
+            const chartDiv = document.getElementById('chart-container');
+            chartDiv.addEventListener('contextmenu', function(e) {
+                if (fittingModeActive && currentMouseHoverX !== null) {
+                    e.preventDefault();
+                    peakGuessesX.push(currentMouseHoverX);
+                    updateChartCanvas();
+                }
+            });
         };
+
+        function toggleFittingMode() {
+            if (Object.keys(persistentDatasets).length === 0) {
+                alert("Load standard target profiles into data memory spaces before optimizing models.");
+                return;
+            }
+            fittingModeActive = !fittingModeActive;
+            const btn = document.getElementById('btn-fit-toggle');
+            const runBtn = document.getElementById('btn-run-fit');
+            
+            if (fittingModeActive) {
+                btn.innerText = "🎯 Fitting Mode: ACTIVE";
+                btn.classList.add('active');
+                runBtn.style.display = "block";
+            } else {
+                btn.innerText = "🎯 Peak Fitting: OFF";
+                btn.classList.remove('active');
+                runBtn.style.display = "none";
+            }
+        }
+
+        /**
+         * Pure JavaScript Nelder-Mead (Simplex) Nonlinear Optimization Engine
+         * Built entirely from scratch to run fully offline without any dependencies.
+         */
+        function nelderMeadOptimization(objectiveFunc, initialGuess, maxIterations = 600, tolerance = 1e-7) {
+            const N = initialGuess.length;
+            let simplex = [];
+            
+            // Initialize the vertices of the simplex (N + 1 dimension vectors)
+            simplex.push({ params: [...initialGuess], score: objectiveFunc(initialGuess) });
+            for (let i = 0; i < N; i++) {
+                let vertex = [...initialGuess];
+                vertex[i] = vertex[i] === 0 ? 0.005 : vertex[i] * 1.05; // Apply minor dimensional perturbation
+                simplex.push({ params: vertex, score: objectiveFunc(vertex) });
+            }
+            
+            for (let iter = 0; iter < maxIterations; iter++) {
+                simplex.sort((a, b) => a.score - b.score);
+                if (Math.abs(simplex[N].score - simplex[0].score) < tolerance) break;
+                
+                // Compute centroid of all vertices except the worst one
+                let centroid = new Array(N).fill(0);
+                for (let i = 0; i < N; i++) {
+                    for (let j = 0; j < N; j++) centroid[j] += simplex[i].params[j] / N;
+                }
+                
+                // 1. Reflection Operation
+                let reflected = new Array(N);
+                for (let j = 0; j < N; j++) reflected[j] = centroid[j] + 1.0 * (centroid[j] - simplex[N].params[j]);
+                let scoreReflected = objectiveFunc(reflected);
+                
+                if (scoreReflected < simplex[0].score) {
+                    // 2. Expansion Operation
+                    let expanded = new Array(N);
+                    for (let j = 0; j < N; j++) expanded[j] = centroid[j] + 2.0 * (reflected[j] - centroid[j]);
+                    let scoreExpanded = objectiveFunc(expanded);
+                    if (scoreExpanded < scoreReflected) {
+                        simplex[N] = { params: expanded, score: scoreExpanded };
+                        continue;
+                    } else {
+                        simplex[N] = { params: reflected, score: scoreReflected };
+                        continue;
+                    }
+                }
+                
+                if (scoreReflected < simplex[N-1].score) {
+                    simplex[N] = { params: reflected, score: scoreReflected };
+                    continue;
+                }
+                
+                // 3. Contraction Operation
+                let contracted = new Array(N);
+                let sourceCoords = scoreReflected < simplex[N].score ? reflected : simplex[N].params;
+                for (let j = 0; j < N; j++) contracted[j] = centroid[j] + 0.5 * (sourceCoords[j] - centroid[j]);
+                let scoreContracted = objectiveFunc(contracted);
+                
+                if (scoreContracted < simplex[N].score) {
+                    simplex[N] = { params: contracted, score: scoreContracted };
+                    continue;
+                }
+                
+                // 4. Shrink Operation
+                for (let i = 1; i <= N; i++) {
+                    for (let j = 0; j < N; j++) {
+                        simplex[i].params[j] = simplex[0].params[j] + 0.5 * (simplex[i].params[j] - simplex[0].params[j]);
+                    }
+                    simplex[i].score = objectiveFunc(simplex[i].params);
+                }
+            }
+            simplex.sort((a, b) => a.score - b.score);
+            return simplex[0].params;
+        }
+
+        function executePeakOptimization() {
+            if (peakGuessesX.length === 0) {
+                alert("Right-click on the graph canvas plotting window to position initial peak center guides first.");
+                return;
+            }
+            
+            const firstKey = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_"))[0];
+            const rawX = persistentDatasets[firstKey].angles;
+            const rawY = persistentDatasets[firstKey].intensities;
+            
+            // Apply a high-performance smart data downsampling check (max 1200 coordinates matrices)
+            // This prevents browser thread lockups while retaining pristine mathematical peak convergence.
+            let xFit = [...rawX], yFit = [...rawY];
+            if (xFit.length > 1200) {
+                let samplingInterval = Math.ceil(xFit.length / 1200);
+                xFit = xFit.filter((_, i) => i % samplingInterval === 0);
+                yFit = yFit.filter((_, i) => i % samplingInterval === 0);
+            }
+            
+            // Build initial guess arrays structures
+            let initialGuess = [];
+            peakGuessesX.forEach(g_x => {
+                let closestIdx = 0, minDiff = Infinity;
+                for (let i = 0; i < xFit.length; i++) {
+                    let diff = Math.abs(xFit[i] - g_x);
+                    if (diff < minDiff) { minDiff = diff; closestIdx = i; }
+                }
+                let ampGuess = yFit[closestIdx];
+                initialGuess.push(ampGuess, g_x, 0.07); // [amplitude, center, width variance]
+            });
+            
+            // Define Residual Sum of Squares Objective Function
+            function sumOfSquaredErrors(params) {
+                let sse = 0;
+                for (let i = 0; i < xFit.length; i++) {
+                    let x = xFit[i];
+                    let modelY = 0;
+                    for (let p = 0; p < params.length; p += 3) {
+                        let amp = params[p];
+                        let cent = params[p+1];
+                        let wid = params[p+2];
+                        
+                        // Apply barrier penalties to prevent parameter drift errors
+                        if (amp < 0 || wid < 0.002) return Infinity; 
+                        
+                        modelY += amp * Math.exp(-Math.pow((x - cent) / wid, 2));
+                    }
+                    sse += Math.pow(yFit[i] - modelY, 2);
+                }
+                return sse;
+            }
+            
+            // Run Simplex Optimization Routine
+            const pOpt = nelderMeadOptimization(sumOfSquaredErrors, initialGuess);
+            
+            // Wipe historical fitted models keys parameters arrays
+            Object.keys(persistentDatasets).forEach(k => { if(k.startsWith("__fit_")) delete persistentDatasets[k]; });
+            
+            // Reconstruct high-resolution analytical math models functions paths outputs
+            let yFitTotal = new Array(rawX.length).fill(0);
+            let peakCounter = 1;
+            
+            const tableBody = document.querySelector("#results-matrix-sheet tbody");
+            tableBody.innerHTML = ""; // Clear existing rows
+            
+            for (let p = 0; p < pOpt.length; p += 3) {
+                let amp = pOpt[p], cent = pOpt[p+1], wid = pOpt[p+2];
+                let yPeak = [];
+                
+                for (let i = 0; i < rawX.length; i++) {
+                    let val = amp * Math.exp(-Math.pow((rawX[i] - cent) / wid, 2));
+                    yPeak.push(val);
+                    yFitTotal[i] += val;
+                }
+                
+                persistentDatasets[`__fit_peak_${peakCounter}`] = { angles: rawX, intensities: yPeak, label: `Peak ${peakCounter} Fitted Curve` };
+                
+                // Map out computed physical properties definitions parameters
+                let fwhm = 2.0 * Math.sqrt(Math.LN2) * wid;
+                let tr = document.createElement('tr');
+                tr.innerHTML = `<td>Peak ${peakCounter}</td><td>${cent.toFixed(4)}°</td><td>${amp.toFixed(1)}</td><td>${fwhm.toFixed(4)}°</td>`;
+                tableBody.appendChild(tr);
+                
+                peakCounter++;
+            }
+            
+            persistentDatasets[`__fit_composite`] = { angles: rawX, intensities: yFitTotal, label: `Overall Composite Curve Fit` };
+            
+            // Toggle Display Sheet Interface to Block View Layout
+            document.getElementById('results-dashboard').style.display = "block";
+            
+            // Force plotting views updating cycles refresh layout
+            updateChartCanvas();
+        }
 
         function handleFileSelections(event) {
             const files = event.target.files;
             if (!files.length) return;
-
             let itemsProcessed = 0;
 
             for (let i = 0; i < files.length; i++) {
                 const file = files[i];
-                if (persistentDatasets[file.name]) {
-                    itemsProcessed++;
-                    continue;
-                }
+                if (persistentDatasets[file.name]) { itemsProcessed++; continue; }
 
                 const reader = new FileReader();
                 const extension = file.name.split('.').pop().toLowerCase();
@@ -259,26 +331,15 @@
                 reader.onload = function(e) {
                     try {
                         let parsedData;
-                        if (extension === 'csv') {
-                            parsedData = parseCSV(e.target.result, file.name);
-                        } else if (extension === 'xrdml') {
-                            parsedData = parseXRDML(e.target.result, file.name);
-                        }
+                        if (extension === 'csv') parsedData = parseCSV(e.target.result, file.name);
+                        else if (extension === 'xrdml') parsedData = parseXRDML(e.target.result, file.name);
 
-                        if (parsedData) {
-                            persistentDatasets[file.name] = parsedData;
-                        }
-                    } catch (err) {
-                        alert(`Parsing structural error inside file: ${file.name}\nReason: ${err.message}`);
-                    }
+                        if (parsedData) persistentDatasets[file.name] = parsedData;
+                    } catch (err) { alert(`Parsing structural error: ${file.name}\nReason: ${err.message}`); }
 
                     itemsProcessed++;
-                    if (itemsProcessed === files.length) {
-                        updateChartCanvas();
-                        event.target.value = ''; 
-                    }
+                    if (itemsProcessed === files.length) { updateChartCanvas(); event.target.value = ''; }
                 };
-
                 reader.readAsText(file);
             }
         }
@@ -294,50 +355,31 @@
                     const parts = line.split(',');
                     if (parts[1] && parts[1].trim()) sampleId = parts[1].trim();
                 }
-                if (line.includes('[Scan points]')) {
-                    dataStartIndex = i + 2; 
-                    break;
-                }
+                if (line.includes('[Scan points]')) { dataStartIndex = i + 2; break; }
             }
+            if (dataStartIndex === -1 || dataStartIndex >= lines.length) throw new Error("Missing '[Scan points]' identifier signature tags.");
 
-            if (dataStartIndex === -1 || dataStartIndex >= lines.length) {
-                throw new Error("Missing '[Scan points]' identifier data block signature tags alignment.");
-            }
-
-            const angles = [];
-            const intensities = [];
-
+            const angles = []; const intensities = [];
             for (let i = dataStartIndex; i < lines.length; i++) {
-                const line = lines[i].trim();
-                if (!line) continue;
+                const line = lines[i].trim(); if (!line) continue;
                 const parts = line.split(',');
                 if (parts.length >= 3) {
-                    const angleVal = parseFloat(parts[0]);
-                    const intensityVal = parseFloat(parts[2]);
-                    if (!isNaN(angleVal) && !isNaN(intensityVal)) {
-                        angles.push(angleVal);
-                        intensities.push(intensityVal);
-                    }
+                    const angleVal = parseFloat(parts[0]); const intensityVal = parseFloat(parts[2]);
+                    if (!isNaN(angleVal) && !isNaN(intensityVal)) { angles.push(angleVal); intensities.push(intensityVal); }
                 }
             }
-
             return { angles, intensities, label: sampleId };
         }
 
         function parseXRDML(xmlText, filename) {
             const parser = new DOMParser();
             const xmlDoc = parser.parseFromString(xmlText, "text/xml");
-            
             let sampleId = filename.split('.')[0];
             const sampleIdEl = xmlDoc.getElementsByTagName("id")[0];
-            if (sampleIdEl && sampleIdEl.textContent) {
-                sampleId = sampleIdEl.textContent.trim();
-            }
+            if (sampleIdEl && sampleIdEl.textContent) sampleId = sampleIdEl.textContent.trim();
 
             const countsEl = xmlDoc.getElementsByTagName("counts")[0];
-            if (!countsEl || !countsEl.textContent) {
-                throw new Error("Intensity tracking counts node matrices missing.");
-            }
+            if (!countsEl || !countsEl.textContent) throw new Error("Intensity tracking counts node matrices missing.");
             const intensities = countsEl.textContent.trim().split(/\s+/).map(Number);
 
             const positionsEl = xmlDoc.getElementsByTagName("positions");
@@ -353,90 +395,80 @@
                         const startEl = node.getElementsByTagName("startPosition")[0];
                         const endEl = node.getElementsByTagName("endPosition")[0];
                         if (startEl && endEl) {
-                            const startVal = parseFloat(startEl.textContent);
-                            const endVal = parseFloat(endEl.textContent);
-                            angles = linspace(startVal, endVal, intensities.length);
+                            angles = linspace(parseFloat(startEl.textContent), parseFloat(endEl.textContent), intensities.length);
                         }
                     }
                     break;
                 }
             }
-
-            if (angles.length !== intensities.length) {
-                throw new Error(`Data alignment mismatch vector size: Angles(${angles.length}) vs Intensity(${intensities.length})`);
-            }
-
+            if (angles.length !== intensities.length) throw new Error("Vector array dimension properties mismatch.");
             return { angles, intensities, label: sampleId };
         }
 
         function linspace(start, end, num) {
             if (num === 1) return [start];
-            const arr = [];
-            const step = (end - start) / (num - 1);
-            for (let i = 0; i < num; i++) {
-                arr.push(start + (i * step));
-            }
+            const arr = []; const step = (end - start) / (num - 1);
+            for (let i = 0; i < num; i++) arr.push(start + (i * step));
             return arr;
         }
 
         function updateChartCanvas() {
             const datasetKeys = Object.keys(persistentDatasets);
-            document.getElementById('status-display').innerHTML = `Active tracking profiles loaded: <b>${datasetKeys.length}</b>`;
+            const dataKeysWithoutFits = datasetKeys.filter(k => !k.startsWith("__fit_"));
+            document.getElementById('status-display').innerHTML = `Active profiles loaded: <b>${dataKeysWithoutFits.length}</b>`;
 
-            if (datasetKeys.length === 0) {
-                renderPlaceholderCanvas();
-                return;
-            }
-
+            if (datasetKeys.length === 0) { renderPlaceholderCanvas(); return; }
             const tooltipEnabled = document.getElementById('toggle-tooltip').checked;
-
             const traces = [];
+
             datasetKeys.forEach(key => {
                 const data = persistentDatasets[key];
+                const isFitCurve = key.startsWith("__fit_");
+                
+                let lineConfig = { width: 1.5 };
+                if (key === "__fit_composite") lineConfig = { color: '#000000', width: 2.2 };
+                else if (isFitCurve) lineConfig = { width: 1.2, dash: 'dot' };
+
                 traces.push({
-                    x: data.angles,
-                    y: data.intensities,
-                    type: 'scatter',
-                    mode: 'lines',
-                    name: data.label,
-                    line: { width: 1.5 },
+                    x: data.angles, y: data.intensities, type: 'scatter', mode: 'lines',
+                    name: data.label, line: lineConfig,
                     hoverinfo: tooltipEnabled ? 'all' : 'none',
                     hovertemplate: tooltipEnabled ? '%{y:.1f} counts<extra></extra>' : null
                 });
             });
 
+            // Reconstruct guess visual line shapes parameters objects matrix array layers
+            const verticalShapes = peakGuessesX.map(x_g => ({
+                type: 'line', xref: 'x', yref: 'paper', x0: x_g, y0: 0, x1: x_g, y1: 1,
+                line: { color: '#d63384', width: 1.5, dash: 'dashdot' }
+            }));
+
             const layout = {
-                title: { text: 'XRD Diffraction Multi-Pattern Overlays', font: { size: 16, family: 'Arial, sans-serif', weight: 'bold' } },
+                title: { text: 'XRD Diffraction Multi-Pattern Overlays', font: { size: 15, family: 'Arial, sans-serif', weight: 'bold' } },
                 xaxis: { 
-                    title: '2θ Angle (degrees)', 
-                    showgrid: true, 
-                    gridcolor: '#e9ecef', 
-                    ticks: 'outside',
-                    showspikes: true,             
-                    spikemode: 'across',
-                    spikethickness: 1.2,
-                    spikedash: tooltipEnabled ? 'solid' : 'dash',
-                    spikecolor: tooltipEnabled ? '#495057' : '#dc3545'  
+                    title: '2θ Angle (degrees)', showgrid: true, gridcolor: '#e9ecef', ticks: 'outside',
+                    showspikes: true, spikemode: 'across', spikethickness: 1.0,
+                    spikedash: tooltipEnabled ? 'solid' : 'dash', spikecolor: tooltipEnabled ? '#495057' : '#dc3545'  
                 },
                 yaxis: { title: 'Intensity (counts)', showgrid: true, gridcolor: '#e9ecef', ticks: 'outside' },
                 hovermode: tooltipEnabled ? 'x unified' : 'x',
                 template: 'plotly_white',
                 legend: { orientation: 'h', yanchor: 'bottom', y: 1.02, xanchor: 'right', x: 1 },
-                margin: { l: 60, r: 30, t: 80, b: 50 }
+                margin: { l: 60, r: 30, t: 80, b: 50 },
+                shapes: verticalShapes
             };
 
-            const config = { responsive: true, displaylogo: false };
-            Plotly.newPlot('chart-container', traces, layout, config);
+            Plotly.newPlot('chart-container', traces, layout, { responsive: true, displaylogo: false });
 
             const chartDiv = document.getElementById('chart-container');
             chartDiv.on('plotly_hover', function(data) {
                 if (data && data.points && data.points.length > 0) {
-                    const xVal = data.points[0].x;
-                    document.getElementById('cursor-bar').innerHTML = `Cursor Position: 2θ = <b>${xVal.toFixed(4)}°</b>`;
+                    currentMouseHoverX = data.points[0].x;
+                    document.getElementById('cursor-bar').innerHTML = `Cursor Position: 2θ = <b>${currentMouseHoverX.toFixed(4)}°</b>`;
                 }
             });
-            
             chartDiv.on('plotly_unhover', function() {
+                currentMouseHoverX = null;
                 document.getElementById('cursor-bar').innerHTML = `Cursor Position: 2θ = --`;
             });
         }
@@ -447,7 +479,7 @@
                 yaxis: { title: 'Intensity (counts)', range: [0, 3000], gridcolor: '#f1f3f5' },
                 template: 'plotly_white',
                 annotations: [{
-                    text: "No active scans loaded. Use the control dashboard pane to browse files.",
+                    text: "No active scans loaded. Use the control panel to browse files.",
                     xref: "paper", yref: "paper", x: 0.5, y: 0.5, showarrow: false,
                     font: { size: 14, color: "#6c757d", italic: true }
                 }],
@@ -458,77 +490,51 @@
 
         function cropToView() {
             const datasetKeys = Object.keys(persistentDatasets);
-            if (datasetKeys.length === 0) {
-                alert("No active patterns loaded on the canvas to crop.");
-                return;
-            }
-
+            if (datasetKeys.length === 0) return;
             const chartDiv = document.getElementById('chart-container');
-            if (!chartDiv.layout || !chartDiv.layout.xaxis) return;
-
             let range = chartDiv.layout.xaxis.range;
-            if (!range && chartDiv._fullLayout && chartDiv._fullLayout.xaxis) {
-                range = chartDiv._fullLayout.xaxis.range;
-            }
+            if (!range && chartDiv._fullLayout && chartDiv._fullLayout.xaxis) range = chartDiv._fullLayout.xaxis.range;
+            if (!range || range.length < 2) return;
 
-            if (!range || range.length < 2) {
-                alert("Could not process layout range indices. Zoom in on a region first.");
-                return;
-            }
-
-            const xmin = range[0];
-            const xmax = range[1];
+            const xmin = range[0]; const xmax = range[1];
+            clearFittedModelsCache();
 
             datasetKeys.forEach(key => {
+                if (key.startsWith("__fit_")) { delete persistentDatasets[key]; return; }
                 const dataset = persistentDatasets[key];
-                const newAngles = [];
-                const newIntensities = [];
+                const newAngles = []; const newIntensities = [];
 
                 for (let i = 0; i < dataset.angles.length; i++) {
                     const currentAngle = dataset.angles[i];
                     if (currentAngle >= xmin && currentAngle <= xmax) {
-                        newAngles.push(currentAngle);
-                        newIntensities.push(dataset.intensities[i]);
+                        newAngles.push(currentAngle); newIntensities.push(dataset.intensities[i]);
                     }
                 }
-
-                dataset.angles = newAngles;
-                dataset.intensities = newIntensities;
+                dataset.angles = newAngles; dataset.intensities = newIntensities;
             });
 
             updateChartCanvas();
-            Plotly.relayout('chart-container', {
-                'xaxis.autorange': true,
-                'yaxis.autorange': true
-            });
+            Plotly.relayout('chart-container', { 'xaxis.autorange': true, 'yaxis.autorange': true });
         }
 
         function handleTooltipToggle() {
             const tooltipEnabled = document.getElementById('toggle-tooltip').checked;
             if (Object.keys(persistentDatasets).length > 0) {
-                const layoutUpdate = {
+                Plotly.relayout('chart-container', {
                     hovermode: tooltipEnabled ? 'x unified' : 'x',
                     'xaxis.spikedash': tooltipEnabled ? 'solid' : 'dash',
                     'xaxis.spikecolor': tooltipEnabled ? '#495057' : '#dc3545'
-                };
-                
-                const traceUpdate = {
+                });
+                Plotly.restyle('chart-container', {
                     hoverinfo: tooltipEnabled ? 'all' : 'none',
                     hovertemplate: tooltipEnabled ? '%{y:.1f} counts<extra></extra>' : null
-                };
-                
-                Plotly.relayout('chart-container', layoutUpdate);
-                Plotly.restyle('chart-container', traceUpdate);
+                });
             }
         }
 
         function exportPlottedToCSV() {
             const datasetKeys = Object.keys(persistentDatasets);
-            
-            if (datasetKeys.length === 0) {
-                alert("No active patterns loaded on the canvas to export. Please select files first.");
-                return;
-            }
+            if (datasetKeys.length === 0) return;
 
             datasetKeys.forEach(key => {
                 const dataset = persistentDatasets[key];
@@ -541,24 +547,33 @@
 
                 const csvBlob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
                 const virtualUrl = URL.createObjectURL(csvBlob);
-                
                 const downloadAnchor = document.createElement("a");
-                const cleanBaseName = key.split('.')[0];
+                const cleanBaseName = key.startsWith("__fit_") ? key.replace("__fit_", "fit_") : `clean_${key.split('.')[0]}`;
                 
                 downloadAnchor.setAttribute("href", virtualUrl);
-                downloadAnchor.setAttribute("download", `clean_${cleanBaseName}.csv`);
+                downloadAnchor.setAttribute("download", `${cleanBaseName}.csv`);
                 downloadAnchor.style.visibility = 'hidden';
-                
                 document.body.appendChild(downloadAnchor);
                 downloadAnchor.click();
-                
                 document.body.removeChild(downloadAnchor);
                 URL.revokeObjectURL(virtualUrl);
             });
         }
 
+        function clearFittedModelsCache() {
+            peakGuessesX = [];
+            Object.keys(persistentDatasets).forEach(k => { if(k.startsWith("__fit_")) delete persistentDatasets[k]; });
+            document.querySelector("#results-matrix-sheet tbody").innerHTML = "";
+            document.getElementById('results-dashboard').style.display = "none";
+        }
+
         function clearCanvas() {
             persistentDatasets = {};
+            clearFittedModelsCache();
+            fittingModeActive = false;
+            document.getElementById('btn-fit-toggle').innerText = "🎯 Peak Fitting: OFF";
+            document.getElementById('btn-fit-toggle').classList.remove('active');
+            document.getElementById('btn-run-fit').style.display = "none";
             document.getElementById('cursor-bar').innerHTML = `Cursor Position: 2θ = --`;
             updateChartCanvas();
         }
