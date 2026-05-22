@@ -77,6 +77,22 @@
             opacity: 0;
             cursor: pointer;
         }
+        /* Clean Crop Button Styling */
+        .btn-crop {
+            background-color: #ffc107;
+            color: #212529;
+            border: none;
+            padding: 12px;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            width: 100%;
+            transition: background-color 0.2s ease;
+            margin-top: 5px;
+        }
+        .btn-crop:hover {
+            background-color: #e0a800;
+        }
         /* Clean CSV Export Button Styling */
         .btn-export {
             background-color: #198754;
@@ -88,7 +104,6 @@
             cursor: pointer;
             width: 100%;
             transition: background-color 0.2s ease;
-            margin-top: 10px;
         }
         .btn-export:hover {
             background-color: #157347;
@@ -138,6 +153,15 @@
             text-align: center;
             margin-top: 5px;
         }
+        /* Unintrusive Version Tag Styling */
+        .version-tag {
+            font-size: 0.75rem;
+            color: #adb5bd;
+            text-align: center;
+            margin-top: auto;
+            padding-top: 10px;
+            font-family: monospace;
+        }
         /* Main Right Window Workspace Plotting Canvas Box */
         #main-content {
             flex-grow: 1;
@@ -181,6 +205,7 @@
 
         <hr style="border: 0; border-top: 1px solid #e9ecef; margin: 5px 0;">
         
+        <button class="btn-crop" onclick="cropToView()">✂️ Crop to View</button>
         <button class="btn-export" onclick="exportPlottedToCSV()">📥 Export Plotted to CSV</button>
         <button class="btn-clear" onclick="clearCanvas()">🗑️ Clear Canvas</button>
         
@@ -192,6 +217,8 @@
         <div class="status-badge" id="status-display">
             Active tracking profiles loaded: 0
         </div>
+        
+        <div class="version-tag" id="app-version-container"></div>
     </div>
 
     <div id="main-content">
@@ -200,9 +227,16 @@
     </div>
 
     <script>
+        // ==========================================
+        // GLOBAL CONFIGURATIONS & CONSTANTS
+        // ==========================================
+        const VERSION_TAG = "v2026.05.22.1";
+
         let persistentDatasets = {};
 
         window.onload = function() {
+            // Populate our version string label dynamically into the sidebar layout
+            document.getElementById('app-version-container').innerText = VERSION_TAG;
             renderPlaceholderCanvas();
         };
 
@@ -366,7 +400,6 @@
                     mode: 'lines',
                     name: data.label,
                     line: { width: 1.5 },
-                    // Conditional configuration isolates text popups without disrupting mouse event listeners
                     hoverinfo: tooltipEnabled ? 'all' : 'none',
                     hovertemplate: tooltipEnabled ? '%{y:.1f} counts<extra></extra>' : null
                 });
@@ -379,11 +412,11 @@
                     showgrid: true, 
                     gridcolor: '#e9ecef', 
                     ticks: 'outside',
-                    showspikes: true,             // Keeps the vertical cursor line permanently active
+                    showspikes: true,             
                     spikemode: 'across',
                     spikethickness: 1.2,
                     spikedash: tooltipEnabled ? 'solid' : 'dash',
-                    spikecolor: tooltipEnabled ? '#495057' : '#dc3545'  // Turns red when tooltip is disabled for clearer visibility
+                    spikecolor: tooltipEnabled ? '#495057' : '#dc3545'  
                 },
                 yaxis: { title: 'Intensity (counts)', showgrid: true, gridcolor: '#e9ecef', ticks: 'outside' },
                 hovermode: tooltipEnabled ? 'x unified' : 'x',
@@ -395,7 +428,6 @@
             const config = { responsive: true, displaylogo: false };
             Plotly.newPlot('chart-container', traces, layout, config);
 
-            // Establish data parsing hooks monitoring live x-coordinate shifts
             const chartDiv = document.getElementById('chart-container');
             chartDiv.on('plotly_hover', function(data) {
                 if (data && data.points && data.points.length > 0) {
@@ -424,9 +456,53 @@
             Plotly.newPlot('chart-container', [], layout, { responsive: true, displaylogo: false });
         }
 
-        /**
-         * Toggles the tooltip box visibility while preserving the vertical tracking guide line
-         */
+        function cropToView() {
+            const datasetKeys = Object.keys(persistentDatasets);
+            if (datasetKeys.length === 0) {
+                alert("No active patterns loaded on the canvas to crop.");
+                return;
+            }
+
+            const chartDiv = document.getElementById('chart-container');
+            if (!chartDiv.layout || !chartDiv.layout.xaxis) return;
+
+            let range = chartDiv.layout.xaxis.range;
+            if (!range && chartDiv._fullLayout && chartDiv._fullLayout.xaxis) {
+                range = chartDiv._fullLayout.xaxis.range;
+            }
+
+            if (!range || range.length < 2) {
+                alert("Could not process layout range indices. Zoom in on a region first.");
+                return;
+            }
+
+            const xmin = range[0];
+            const xmax = range[1];
+
+            datasetKeys.forEach(key => {
+                const dataset = persistentDatasets[key];
+                const newAngles = [];
+                const newIntensities = [];
+
+                for (let i = 0; i < dataset.angles.length; i++) {
+                    const currentAngle = dataset.angles[i];
+                    if (currentAngle >= xmin && currentAngle <= xmax) {
+                        newAngles.push(currentAngle);
+                        newIntensities.push(dataset.intensities[i]);
+                    }
+                }
+
+                dataset.angles = newAngles;
+                dataset.intensities = newIntensities;
+            });
+
+            updateChartCanvas();
+            Plotly.relayout('chart-container', {
+                'xaxis.autorange': true,
+                'yaxis.autorange': true
+            });
+        }
+
         function handleTooltipToggle() {
             const tooltipEnabled = document.getElementById('toggle-tooltip').checked;
             if (Object.keys(persistentDatasets).length > 0) {
@@ -456,6 +532,7 @@
 
             datasetKeys.forEach(key => {
                 const dataset = persistentDatasets[key];
+                if (dataset.angles.length === 0) return;
                 
                 let csvString = "Angle,Intensity\n";
                 for (let i = 0; i < dataset.angles.length; i++) {

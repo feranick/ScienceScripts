@@ -9,6 +9,11 @@ import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 
+# ==========================================
+# GLOBAL CONFIGURATIONS & CONSTANTS
+# ==========================================
+VERSION_TAG = "v2026.05.22.1"
+
 
 # ==========================================
 # PARSING ENGINE CORE LOGIC
@@ -98,8 +103,8 @@ def load_xrd_data(file_path):
 class XRDPlotterGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Additive XRD Visualizer & Exporter")
-        self.root.geometry("900x670")
+        self.root.title("Additive XRD Visualizer & Data Cropper")
+        self.root.geometry("950x670")
         self.root.minsize(750, 520)
         
         style = ttk.Style()
@@ -107,7 +112,7 @@ class XRDPlotterGUI:
         
         # In-memory dictionary to hold data matrices for exporting
         self.active_datasets = {}
-        self.cursor_line = None  # Reference tracker for our live cursor element
+        self.cursor_line = None  
         
         # --- Top Control Bar Panel ---
         control_frame = ttk.Frame(root, padding=10)
@@ -115,6 +120,9 @@ class XRDPlotterGUI:
         
         btn_select = ttk.Button(control_frame, text="Select File(s) to Plot", command=self.select_and_plot_files)
         btn_select.pack(side="left", padx=5, ipadx=3)
+        
+        btn_crop = ttk.Button(control_frame, text="Crop to View", command=self.crop_to_current_view)
+        btn_crop.pack(side="left", padx=5, ipadx=3)
         
         btn_export = ttk.Button(control_frame, text="Export Plotted to CSV", command=self.export_active_data_to_csv)
         btn_export.pack(side="left", padx=5, ipadx=3)
@@ -125,6 +133,10 @@ class XRDPlotterGUI:
         self.status_var = tk.StringVar(value="No data loaded. Select files to generate plot profiles.")
         lbl_status = ttk.Label(control_frame, textvariable=self.status_var, font=("Helvetica", 9, "italic"))
         lbl_status.pack(side="left", padx=15)
+        
+        # Dynamically reference our global constant tag safely
+        lbl_version = ttk.Label(control_frame, text=VERSION_TAG, font=("Helvetica", 8), foreground="#888888")
+        lbl_version.pack(side="right", padx=5)
         
         # --- Main Interactive Plot Canvas Panel ---
         self.plot_frame = ttk.Frame(root, padding=5, relief="groove")
@@ -142,7 +154,7 @@ class XRDPlotterGUI:
         self.toolbar.update()
         self.toolbar.pack(side="top", fill="x")
 
-        # --- Real-Time Measurement Readout Panel (Bottom of Plot Frame) ---
+        # --- Real-Time Measurement Readout Panel ---
         self.cursor_var = tk.StringVar(value="Cursor Position: 2θ = --")
         self.lbl_cursor = ttk.Label(
             self.plot_frame, 
@@ -155,7 +167,6 @@ class XRDPlotterGUI:
         )
         self.lbl_cursor.pack(side="bottom", fill="x", pady=(5, 0))
 
-        # Bind native mouse move event to canvas mapping actions
         self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
 
     def configure_axis_labels(self):
@@ -171,7 +182,6 @@ class XRDPlotterGUI:
             x = event.xdata
             self.cursor_var.set(f"Cursor Position: 2θ = {x:.4f}°")
             
-            # Reinitialize tracking vertical indicator line if it doesn't exist
             if self.cursor_line is None:
                 self.cursor_line = self.ax.axvline(x, color='red', linestyle='--', linewidth=1.2, alpha=0.7)
             else:
@@ -180,7 +190,6 @@ class XRDPlotterGUI:
                 
             self.canvas.draw_idle()
         else:
-            # Hide guide line safely if the user mouse exits the tracking area boundaries
             if self.cursor_line is not None:
                 self.cursor_line.set_visible(False)
                 self.canvas.draw_idle()
@@ -231,6 +240,37 @@ class XRDPlotterGUI:
             err_msg = "Exceptions occurred while importing data:\n\n" + "\n".join(error_logs)
             messagebox.showwarning("File Execution Warnings", err_msg)
 
+    def crop_to_current_view(self):
+        """Extracts the visual boundaries from the graph window and clips the underlying array data permanent."""
+        if not self.active_datasets:
+            messagebox.showwarning("Crop Void", "No data loaded on canvas to crop.")
+            return
+
+        xmin, xmax = self.ax.get_xlim()
+
+        for file_path, data in list(self.active_datasets.items()):
+            angles = data['angles']
+            intensities = data['intensities']
+            mask = (angles >= xmin) & (angles <= xmax)
+            data['angles'] = angles[mask]
+            data['intensities'] = intensities[mask]
+
+        self.ax.clear()
+        self.configure_axis_labels()
+        self.cursor_line = None  
+        
+        for file_path, data in self.active_datasets.items():
+            if len(data['angles']) > 0:
+                self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
+                
+        self.ax.legend(loc="upper right", frameon=True, fontsize=9)
+        self.ax.set_xlim(xmin, xmax)  
+        self.ax.relim()
+        self.ax.autoscale_view(scalex=False, scaley=True) 
+        self.canvas.draw()
+        
+        self.status_var.set(f"Spectra permanently cropped onto visible region: {xmin:.3f}° to {xmax:.3f}°.")
+
     def export_active_data_to_csv(self):
         """Iterates through current plot cache memory and saves clean individual CSV files."""
         if not self.active_datasets:
@@ -243,6 +283,8 @@ class XRDPlotterGUI:
             
         success_count = 0
         for original_path, data in self.active_datasets.items():
+            if len(data['angles']) == 0:
+                continue
             try:
                 base_name = os.path.splitext(os.path.basename(original_path))[0]
                 export_filename = f"clean_{base_name}.csv"
@@ -256,17 +298,17 @@ class XRDPlotterGUI:
                 export_df.to_csv(export_path, index=False)
                 success_count += 1
             except Exception as e:
-                messagebox.showerror("Export Exception Encounted", f"Could not extract {base_name}: {e}")
+                messagebox.showerror("Export Exception Encountered", f"Could not extract {base_name}: {e}")
                 
         messagebox.showinfo(
             "Export Operation Complete", 
-            f"Successfully normalized and saved {success_count} profile dataset(s) into:\n{output_dir}"
+            f"Successfully saved {success_count} profile dataset(s) (cropped view data only) into:\n{output_dir}"
         )
 
     def clear_canvas(self):
         """Wipes the plot canvas matrix and flushes session memory storage structures."""
         self.active_datasets.clear()
-        self.cursor_line = None  # Flush canvas object pointer references
+        self.cursor_line = None  
         self.ax.clear()
         self.configure_axis_labels()
         self.canvas.draw()
