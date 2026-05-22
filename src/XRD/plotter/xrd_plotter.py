@@ -34,6 +34,19 @@ def multi_gaussian_composite(x, *params):
         y += gaussian_profile(x, amp, cent, wid)
     return y
 
+def snip_background(y, iterations=40):
+    """Calculates the baseline background profile using the SNIP algorithm."""
+    bg = np.array(y, dtype=float)
+    n = len(bg)
+    # Dynamically bound iterations to safely prevent index crashes on tightly cropped regions
+    max_iter = min(iterations, int(n / 2) - 1)
+    if max_iter < 1:
+        return np.zeros_like(bg)
+    for p in range(1, max_iter + 1):
+        temp = np.copy(bg)
+        bg[p:-p] = np.minimum(bg[p:-p], (temp[:-2*p] + temp[2*p:]) / 2.0)
+    return bg
+
 
 # ==========================================
 # PARSING ENGINE CORE LOGIC
@@ -140,6 +153,7 @@ class XRDPlotterGUI:
         
         ttk.Button(control_frame, text="📁 Select File(s)", command=self.select_and_plot_files).pack(side="left", padx=3)
         ttk.Button(control_frame, text="✂️ Crop to View", command=self.crop_to_current_view).pack(side="left", padx=3)
+        ttk.Button(control_frame, text="✨ Subtract Background", command=self.subtract_background_profile).pack(side="left", padx=3)
         
         # Fitting Interface Mode Anchors
         self.btn_fit_toggle = ttk.Button(control_frame, text="🎯 Peak Fitting: OFF", command=self.toggle_fitting_mode)
@@ -163,7 +177,6 @@ class XRDPlotterGUI:
         self.plot_frame = ttk.Frame(self.main_container, padding=5, relief="groove")
         self.main_container.add(self.plot_frame, weight=3)
         
-        # Canvas elements binding
         self.fig = Figure(figsize=(6, 4), dpi=100)
         self.ax = self.fig.add_subplot(111)
         self.configure_axis_labels()
@@ -195,7 +208,6 @@ class XRDPlotterGUI:
         self.result_table.column("FWHM", width=180, anchor="center")
         self.result_table.pack(fill="both", expand=True)
 
-        # Bind event triggers trackers execution
         self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
         self.canvas.mpl_connect('button_press_event', self.on_canvas_click)
 
@@ -206,17 +218,16 @@ class XRDPlotterGUI:
         self.ax.grid(True, linestyle="--", alpha=0.5)
 
     def toggle_fitting_mode(self):
-        """Activates/Deactivates the right-click guide selection mode."""
         if not self.active_datasets:
             messagebox.showwarning("Execution Halted", "Load standard experimental datasets profiles before entering optimization modes.")
             return
         self.fitting_mode_active = not self.fitting_mode_active
         if self.fitting_mode_active:
-            self.btn_fit_toggle.config(text="🎯 Fitting Mode: ACTIVE", style="Accent.TButton")
+            self.btn_fit_toggle.config(text="🎯 Fitting Mode: ACTIVE")
             self.btn_run_fit.config(state="normal")
             self.status_var.set("Fitting Mode active. Right-click on the graph to map approximate peak center targets.")
         else:
-            self.btn_fit_toggle.config(text="🎯 Peak Fitting: OFF", style="TButton")
+            self.btn_fit_toggle.config(text="🎯 Peak Fitting: OFF")
             self.btn_run_fit.config(state="disabled")
             self.status_var.set("Fitting Mode deactivated.")
 
@@ -237,62 +248,77 @@ class XRDPlotterGUI:
             self.cursor_var.set("Cursor Position: 2θ = --")
 
     def on_canvas_click(self, event):
-        """Captures right-clicks on the plotting region to append initial guesses."""
         if self.fitting_mode_active and event.inaxes == self.ax and event.button == 3:
             x_guess = event.xdata
             self.peak_guesses.append(x_guess)
             
-            # Render guess visual marker dashed lines arrays
             guess_line = self.ax.axvline(x_guess, color='#d63384', linestyle=':', linewidth=1.5, label="Peak Guess" if not self.guess_lines_artists else "")
             self.guess_lines_artists.append(guess_line)
             self.canvas.draw_idle()
             self.status_var.set(f"Added peak approximation target coordinate entry near 2θ = {x_guess:.3f}°.")
 
+    def subtract_background_profile(self):
+        """Executes automated iterative SNIP background stripping across loaded patterns."""
+        if not self.active_datasets:
+            messagebox.showwarning("No Data", "No active datasets found on canvas to apply baseline corrections.")
+            return
+            
+        data_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
+        if not data_keys: return
+
+        # Wipe mathematical fits if a parameter changes baselines background profile
+        self.clear_fitted_artists()
+
+        for file_path in data_keys:
+            data = self.active_datasets[file_path]
+            intensities = data['intensities']
+            if len(intensities) < 3: continue
+            
+            bg = snip_background(intensities, iterations=40)
+            data['intensities'] = intensities - bg
+
+        # Redraw core spectra signals tracks
+        self.ax.clear()
+        self.configure_axis_labels()
+        self.cursor_line = None  
+        
+        for file_path, data in self.active_datasets.items():
+            self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
+                
+        self.ax.legend(loc="upper right", frameon=True, fontsize=9)
+        self.ax.relim()
+        self.ax.autoscale_view()
+        self.canvas.draw()
+        self.status_var.set("Baseline background successfully stripped across profiles using the SNIP filter algorithm.")
+
     def run_peak_optimization(self):
-        """Runs the nonlinear least-squares regression calculations."""
         if not self.peak_guesses:
             messagebox.showwarning("Missing Inputs", "Right-click on the graph canvas to specify peak center guesses first.")
             return
             
-        # Isolate the current data range arrays targets
         first_key = list(self.active_datasets.keys())[0]
         x_data = self.active_datasets[first_key]['angles']
         y_data = self.active_datasets[first_key]['intensities']
         
-        # Clear previous calculation graphics lines if present
-        for line in self.fitted_curves_artists:
-            line.remove()
+        for line in self.fitted_curves_artists: line.remove()
         self.fitted_curves_artists.clear()
-        
-        # Wipe previous records from dashboard tree views elements lists
-        for row in self.result_table.get_children():
-            self.result_table.delete(row)
+        for row in self.result_table.get_children(): self.result_table.delete(row)
 
-        # Assemble initial arrays boundaries guesses matrix indices
-        p0 = []
-        bounds_min = []
-        bounds_max = []
-        
+        p0 = []; bounds_min = []; bounds_max = []
         for g_x in self.peak_guesses:
             idx = np.argmin(np.abs(x_data - g_x))
             amp_guess = float(y_data[idx])
-            width_guess = 0.08  # Default initial width variance guess index
-            
-            p0.extend([amp_guess, g_x, width_guess])
-            # Impose critical boundary parameter rules constraints to prevent fitting drift errors
+            p0.extend([amp_guess, g_x, 0.08])
             bounds_min.extend([0.0, g_x - 0.4, 0.005])
             bounds_max.extend([float(np.max(y_data)) * 2.0, g_x + 0.4, 1.5])
 
         try:
             p_opt, _ = curve_fit(multi_gaussian_composite, x_data, y_data, p0=p0, bounds=(bounds_min, bounds_max))
             
-            # --- Graphical Evaluation Re-rendering ---
-            # 1. Overlay Cumulative Theoretical Fit Path Line
             y_fit_total = multi_gaussian_composite(x_data, *p_opt)
             total_fit_line, = self.ax.plot(x_data, y_fit_total, color='black', linestyle='-', linewidth=2.2, label="Overall Fit Line")
             self.fitted_curves_artists.append(total_fit_line)
             
-            # 2. Overlay Deconvoluted Subcomponents Peak Lines
             peak_counter = 1
             for i in range(0, len(p_opt), 3):
                 amp, cent, wid = p_opt[i], p_opt[i+1], p_opt[i+2]
@@ -301,24 +327,17 @@ class XRDPlotterGUI:
                 pk_line, = self.ax.plot(x_data, y_peak, linestyle='--', linewidth=1.2, label=f"Peak {peak_counter} Trace")
                 self.fitted_curves_artists.append(pk_line)
                 
-                # FWHM Evaluation Equation for Gaussian Profiles ($FWHM = 2 \times \sqrt{\ln 2} \times w \approx 1.6651 \times w$)
                 fwhm = 2.0 * np.sqrt(np.log(2)) * wid
-                
-                # Map computed results values safely out onto dashboard trees sheets
                 self.result_table.insert("", "end", values=(f"Peak {peak_counter}", f"{cent:.4f}°", f"{amp:.1f}", f"{fwhm:.4f}°"))
-                
-                # Append optimization tracking parameters data back inside session metrics directories dictionary profiles
                 self.active_datasets[f"__fit_peak_{peak_counter}"] = {'angles': x_data, 'intensities': y_peak, 'label': f"Peak {peak_counter} Fit Result"}
                 peak_counter += 1
                 
             self.active_datasets["__fit_overall_composite"] = {'angles': x_data, 'intensities': y_fit_total, 'label': "Overall Deconvoluted Curve Fit"}
-            
             self.ax.legend(loc="upper right", frameon=True, fontsize=8)
             self.canvas.draw()
             self.status_var.set("Nonlinear mathematical optimization routine completed successfully.")
-            
         except Exception as e:
-            messagebox.showerror("Optimization Convergence Exception", f"Optimization routine failed to reach a solution matrix criteria boundary: {e}")
+            messagebox.showerror("Optimization Convergence Exception", f"Optimization routine failed to converge: {e}")
 
     def select_and_plot_files(self):
         files = filedialog.askopenfilenames(
@@ -343,15 +362,13 @@ class XRDPlotterGUI:
         if loaded_count > 0:
             self.ax.legend(loc="upper right", frameon=True, fontsize=9)
             self.canvas.draw()
-            self.status_var.set(f"Added {loaded_count} patterns. Active datasets total array profiles count: {len(self.active_datasets)}.")
+            self.status_var.set(f"Added {loaded_count} patterns. Active datasets array total count: {len(self.active_datasets)}.")
         if error_logs:
             messagebox.showwarning("Import Errors", "\n".join(error_logs))
 
     def crop_to_current_view(self):
         if not self.active_datasets: return
         xmin, xmax = self.ax.get_xlim()
-
-        # Clean old fit outputs out before slicing
         self.clear_fitted_artists()
 
         for f_path, data in list(self.active_datasets.items()):
@@ -410,7 +427,7 @@ class XRDPlotterGUI:
         self.configure_axis_labels()
         self.canvas.draw()
         self.fitting_mode_active = False
-        self.btn_fit_toggle.config(text="🎯 Peak Fitting: OFF", style="TButton")
+        self.btn_fit_toggle.config(text="🎯 Peak Fitting: OFF")
         self.btn_run_fit.config(state="disabled")
         self.status_var.set("Canvas matrix dropped. System ready to receive new scan files array.")
         self.cursor_var.set("Cursor Position: 2θ = --")
