@@ -99,14 +99,15 @@ class XRDPlotterGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Additive XRD Visualizer & Exporter")
-        self.root.geometry("900x650")
-        self.root.minsize(750, 500)
+        self.root.geometry("900x670")
+        self.root.minsize(750, 520)
         
         style = ttk.Style()
         style.theme_use('clam')
         
         # In-memory dictionary to hold data matrices for exporting
         self.active_datasets = {}
+        self.cursor_line = None  # Reference tracker for our live cursor element
         
         # --- Top Control Bar Panel ---
         control_frame = ttk.Frame(root, padding=10)
@@ -141,12 +142,49 @@ class XRDPlotterGUI:
         self.toolbar.update()
         self.toolbar.pack(side="top", fill="x")
 
+        # --- Real-Time Measurement Readout Panel (Bottom of Plot Frame) ---
+        self.cursor_var = tk.StringVar(value="Cursor Position: 2θ = --")
+        self.lbl_cursor = ttk.Label(
+            self.plot_frame, 
+            textvariable=self.cursor_var, 
+            font=("Consolas", 10, "bold"), 
+            background="#e9ecef", 
+            relief="solid", 
+            borderwidth=1,
+            padding=6
+        )
+        self.lbl_cursor.pack(side="bottom", fill="x", pady=(5, 0))
+
+        # Bind native mouse move event to canvas mapping actions
+        self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
+
     def configure_axis_labels(self):
         """Sets axis labels and styling."""
         self.ax.set_xlabel(r"2$\theta$ Angle (degrees)", fontsize=10, fontweight='bold')
         self.ax.set_ylabel("Intensity (counts)", fontsize=10, fontweight='bold')
         self.ax.set_title("XRD Diffraction Pattern Analysis", fontsize=12, fontweight='bold', pad=10)
         self.ax.grid(True, linestyle="--", alpha=0.5)
+
+    def on_mouse_move(self, event):
+        """Monitors real-time mouse movement, updating tracking guides on active coordinates."""
+        if event.inaxes == self.ax and self.active_datasets:
+            x = event.xdata
+            self.cursor_var.set(f"Cursor Position: 2θ = {x:.4f}°")
+            
+            # Reinitialize tracking vertical indicator line if it doesn't exist
+            if self.cursor_line is None:
+                self.cursor_line = self.ax.axvline(x, color='red', linestyle='--', linewidth=1.2, alpha=0.7)
+            else:
+                self.cursor_line.set_xdata([x, x])
+                self.cursor_line.set_visible(True)
+                
+            self.canvas.draw_idle()
+        else:
+            # Hide guide line safely if the user mouse exits the tracking area boundaries
+            if self.cursor_line is not None:
+                self.cursor_line.set_visible(False)
+                self.canvas.draw_idle()
+            self.cursor_var.set("Cursor Position: 2θ = --")
 
     def select_and_plot_files(self):
         """Triggers file browser, layering files additively onto the canvas."""
@@ -167,14 +205,12 @@ class XRDPlotterGUI:
         error_logs = []
         
         for file_path in files:
-            # Skip if file is already loaded and active on the canvas
             if file_path in self.active_datasets:
                 continue
             try:
                 angles, intensities, label = load_xrd_data(file_path)
                 self.ax.plot(angles, intensities, label=label, linewidth=1.2)
                 
-                # Store structural variables inside the session cache map
                 self.active_datasets[file_path] = {
                     'angles': angles,
                     'intensities': intensities,
@@ -201,20 +237,17 @@ class XRDPlotterGUI:
             messagebox.showwarning("Export Void", "There are no active dataset profiles on the canvas to export.")
             return
             
-        # Prompt user to map onto an output save directory destination folder
         output_dir = filedialog.askdirectory(title="Select Output Folder for Clean CSV Files")
         if not output_dir:
-            return # Cancelled by user
+            return 
             
         success_count = 0
         for original_path, data in self.active_datasets.items():
             try:
-                # Isolate root baseline name string to build clean export handle
                 base_name = os.path.splitext(os.path.basename(original_path))[0]
                 export_filename = f"clean_{base_name}.csv"
                 export_path = os.path.join(output_dir, export_filename)
                 
-                # Construct clean frame dataframe object
                 export_df = pd.DataFrame({
                     'Angle': data['angles'],
                     'Intensity': data['intensities']
@@ -233,10 +266,12 @@ class XRDPlotterGUI:
     def clear_canvas(self):
         """Wipes the plot canvas matrix and flushes session memory storage structures."""
         self.active_datasets.clear()
+        self.cursor_line = None  # Flush canvas object pointer references
         self.ax.clear()
         self.configure_axis_labels()
         self.canvas.draw()
         self.status_var.set("Canvas matrix dropped. System ready to receive new scan files array.")
+        self.cursor_var.set("Cursor Position: 2θ = --")
 
 
 if __name__ == "__main__":

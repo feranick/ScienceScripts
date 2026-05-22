@@ -108,6 +108,25 @@
         .btn-clear:hover {
             background-color: #bb2d3b;
         }
+        /* Checkbox Container Styling */
+        .checkbox-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 5px 0;
+            font-size: 0.95rem;
+            color: #212529;
+            user-select: none;
+        }
+        .checkbox-container input {
+            cursor: pointer;
+            width: 16px;
+            height: 16px;
+        }
+        .checkbox-container label {
+            cursor: pointer;
+            font-weight: 500;
+        }
         .status-badge {
             background-color: #cff4fc;
             color: #055160;
@@ -132,8 +151,20 @@
             flex-grow: 1;
             background: white;
             border: 1px solid #dee2e6;
-            border-radius: 8px;
+            border-radius: 8px 8px 0 0;
             box-shadow: 0 4px 6px rgba(0,0,0,0.02);
+        }
+        /* Continuous Measurement Cursor Position Bar */
+        #cursor-bar {
+            background-color: #e9ecef;
+            color: #212529;
+            padding: 10px 15px;
+            border-radius: 0 0 8px 8px;
+            font-family: "Consolas", monospace;
+            font-size: 0.95rem;
+            font-weight: bold;
+            border: 1px solid #dee2e6;
+            border-top: none;
         }
     </style>
 </head>
@@ -153,6 +184,11 @@
         <button class="btn-export" onclick="exportPlottedToCSV()">📥 Export Plotted to CSV</button>
         <button class="btn-clear" onclick="clearCanvas()">🗑️ Clear Canvas</button>
         
+        <div class="checkbox-container">
+            <input type="checkbox" id="toggle-tooltip" checked onchange="handleTooltipToggle()">
+            <label for="toggle-tooltip">Enable Live Tooltip</label>
+        </div>
+        
         <div class="status-badge" id="status-display">
             Active tracking profiles loaded: 0
         </div>
@@ -160,10 +196,10 @@
 
     <div id="main-content">
         <div id="chart-container"></div>
+        <div id="cursor-bar">Cursor Position: 2θ = --</div>
     </div>
 
     <script>
-        // Global persistent storage directory mapping dataset models across updates
         let persistentDatasets = {};
 
         window.onload = function() {
@@ -318,6 +354,8 @@
                 return;
             }
 
+            const tooltipEnabled = document.getElementById('toggle-tooltip').checked;
+
             const traces = [];
             datasetKeys.forEach(key => {
                 const data = persistentDatasets[key];
@@ -328,15 +366,27 @@
                     mode: 'lines',
                     name: data.label,
                     line: { width: 1.5 },
-                    hovertemplate: '<b>2θ:</b> %{x:.4f}°<br><b>Intensity:</b> %{y:.1f} counts<extra></extra>'
+                    // Conditional configuration isolates text popups without disrupting mouse event listeners
+                    hoverinfo: tooltipEnabled ? 'all' : 'none',
+                    hovertemplate: tooltipEnabled ? '%{y:.1f} counts<extra></extra>' : null
                 });
             });
 
             const layout = {
                 title: { text: 'XRD Diffraction Multi-Pattern Overlays', font: { size: 16, family: 'Arial, sans-serif', weight: 'bold' } },
-                xaxis: { title: '2θ Angle (degrees)', showgrid: true, gridcolor: '#e9ecef', ticks: 'outside' },
+                xaxis: { 
+                    title: '2θ Angle (degrees)', 
+                    showgrid: true, 
+                    gridcolor: '#e9ecef', 
+                    ticks: 'outside',
+                    showspikes: true,             // Keeps the vertical cursor line permanently active
+                    spikemode: 'across',
+                    spikethickness: 1.2,
+                    spikedash: tooltipEnabled ? 'solid' : 'dash',
+                    spikecolor: tooltipEnabled ? '#495057' : '#dc3545'  // Turns red when tooltip is disabled for clearer visibility
+                },
                 yaxis: { title: 'Intensity (counts)', showgrid: true, gridcolor: '#e9ecef', ticks: 'outside' },
-                hovermode: 'x unified',
+                hovermode: tooltipEnabled ? 'x unified' : 'x',
                 template: 'plotly_white',
                 legend: { orientation: 'h', yanchor: 'bottom', y: 1.02, xanchor: 'right', x: 1 },
                 margin: { l: 60, r: 30, t: 80, b: 50 }
@@ -344,6 +394,19 @@
 
             const config = { responsive: true, displaylogo: false };
             Plotly.newPlot('chart-container', traces, layout, config);
+
+            // Establish data parsing hooks monitoring live x-coordinate shifts
+            const chartDiv = document.getElementById('chart-container');
+            chartDiv.on('plotly_hover', function(data) {
+                if (data && data.points && data.points.length > 0) {
+                    const xVal = data.points[0].x;
+                    document.getElementById('cursor-bar').innerHTML = `Cursor Position: 2θ = <b>${xVal.toFixed(4)}°</b>`;
+                }
+            });
+            
+            chartDiv.on('plotly_unhover', function() {
+                document.getElementById('cursor-bar').innerHTML = `Cursor Position: 2θ = --`;
+            });
         }
 
         function renderPlaceholderCanvas() {
@@ -362,9 +425,27 @@
         }
 
         /**
-         * Dynamic Client-Side CSV Generator
-         * Compiles clean (Angle, Intensity) arrays and triggers standalone browser downloads
+         * Toggles the tooltip box visibility while preserving the vertical tracking guide line
          */
+        function handleTooltipToggle() {
+            const tooltipEnabled = document.getElementById('toggle-tooltip').checked;
+            if (Object.keys(persistentDatasets).length > 0) {
+                const layoutUpdate = {
+                    hovermode: tooltipEnabled ? 'x unified' : 'x',
+                    'xaxis.spikedash': tooltipEnabled ? 'solid' : 'dash',
+                    'xaxis.spikecolor': tooltipEnabled ? '#495057' : '#dc3545'
+                };
+                
+                const traceUpdate = {
+                    hoverinfo: tooltipEnabled ? 'all' : 'none',
+                    hovertemplate: tooltipEnabled ? '%{y:.1f} counts<extra></extra>' : null
+                };
+                
+                Plotly.relayout('chart-container', layoutUpdate);
+                Plotly.restyle('chart-container', traceUpdate);
+            }
+        }
+
         function exportPlottedToCSV() {
             const datasetKeys = Object.keys(persistentDatasets);
             
@@ -376,17 +457,14 @@
             datasetKeys.forEach(key => {
                 const dataset = persistentDatasets[key];
                 
-                // Construct clean CSV text frame mapping standard headers
                 let csvString = "Angle,Intensity\n";
                 for (let i = 0; i < dataset.angles.length; i++) {
                     csvString += `${dataset.angles[i].toFixed(6)},${dataset.intensities[i].toFixed(1)}\n`;
                 }
 
-                // Compile text data straight into virtual Blob memory stream
                 const csvBlob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
                 const virtualUrl = URL.createObjectURL(csvBlob);
                 
-                // Generate a discrete download trigger anchor element
                 const downloadAnchor = document.createElement("a");
                 const cleanBaseName = key.split('.')[0];
                 
@@ -397,7 +475,6 @@
                 document.body.appendChild(downloadAnchor);
                 downloadAnchor.click();
                 
-                // Cleanup DOM footprint elements immediately post download invocation
                 document.body.removeChild(downloadAnchor);
                 URL.revokeObjectURL(virtualUrl);
             });
@@ -405,6 +482,7 @@
 
         function clearCanvas() {
             persistentDatasets = {};
+            document.getElementById('cursor-bar').innerHTML = `Cursor Position: 2θ = --`;
             updateChartCanvas();
         }
     </script>
