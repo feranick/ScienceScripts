@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web XRD Pattern Visualizer & Exporter</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.24.1/plotly.min.js"></script>
+    <script>
+        if (typeof Plotly === 'undefined') {
+            document.write('<script src="https://unpkg.com/plotly.js-dist@2.24.1/plotly.min.js"><\/script>');
+        }
+    </script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            background-color: #f8f9fa;
+            height: 100vh;
+        }
+        /* Left Sidebar Panel Styling */
+        #sidebar {
+            width: 320px;
+            background-color: #ffffff;
+            border-right: 1px solid #e9ecef;
+            padding: 25px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        h2 {
+            margin-top: 0;
+            font-size: 1.2rem;
+            color: #212529;
+            border-bottom: 2px solid #0d6efd;
+            padding-bottom: 8px;
+            margin-bottom: 5px;
+        }
+        .info-text {
+            font-size: 0.9rem;
+            color: #6c757d;
+            line-height: 1.4;
+            margin-bottom: 5px;
+        }
+        /* Custom styled upload block zone */
+        .upload-btn-wrapper {
+            position: relative;
+            overflow: hidden;
+            display: inline-block;
+            width: 100%;
+        }
+        .btn-upload {
+            border: 2px dashed #b8c2cc;
+            color: #495057;
+            background-color: #f1f3f5;
+            padding: 20px;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            font-weight: bold;
+            width: 100%;
+            box-sizing: border-box;
+            cursor: pointer;
+            text-align: center;
+            transition: all 0.2s ease;
+        }
+        .btn-upload:hover {
+            background-color: #e8ecef;
+            border-color: #0d6efd;
+        }
+        .upload-btn-wrapper input[type=file] {
+            font-size: 100px;
+            position: absolute;
+            left: 0;
+            top: 0;
+            opacity: 0;
+            cursor: pointer;
+        }
+        /* Clean CSV Export Button Styling */
+        .btn-export {
+            background-color: #198754;
+            color: white;
+            border: none;
+            padding: 12px;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            width: 100%;
+            transition: background-color 0.2s ease;
+            margin-top: 10px;
+        }
+        .btn-export:hover {
+            background-color: #157347;
+        }
+        /* Action buttons control elements */
+        .btn-clear {
+            background-color: #dc3545;
+            color: white;
+            border: none;
+            padding: 12px;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            width: 100%;
+            transition: background-color 0.2s ease;
+        }
+        .btn-clear:hover {
+            background-color: #bb2d3b;
+        }
+        .status-badge {
+            background-color: #cff4fc;
+            color: #055160;
+            border: 1px solid #b6effb;
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            text-align: center;
+            margin-top: 5px;
+        }
+        /* Main Right Window Workspace Plotting Canvas Box */
+        #main-content {
+            flex-grow: 1;
+            padding: 25px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+        }
+        #chart-container {
+            width: 100%;
+            flex-grow: 1;
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.02);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="sidebar">
+        <h2>🔬 XRD Data Viewer and Converter</h2>
+        <p class="info-text">Upload single or multiple XRD datasets in native csv or xrdml format. </p>
+        
+        <div class="upload-btn-wrapper">
+            <div class="btn-upload">📁 Click to Select File(s)</div>
+            <input type="file" id="xrd-files" accept=".csv,.xrdml" multiple onchange="handleFileSelections(event)">
+        </div>
+
+        <hr style="border: 0; border-top: 1px solid #e9ecef; margin: 5px 0;">
+        
+        <button class="btn-export" onclick="exportPlottedToCSV()">📥 Export Plotted to CSV</button>
+        <button class="btn-clear" onclick="clearCanvas()">🗑️ Clear Canvas</button>
+        
+        <div class="status-badge" id="status-display">
+            Active tracking profiles loaded: 0
+        </div>
+    </div>
+
+    <div id="main-content">
+        <div id="chart-container"></div>
+    </div>
+
+    <script>
+        // Global persistent storage directory mapping dataset models across updates
+        let persistentDatasets = {};
+
+        window.onload = function() {
+            renderPlaceholderCanvas();
+        };
+
+        function handleFileSelections(event) {
+            const files = event.target.files;
+            if (!files.length) return;
+
+            let itemsProcessed = 0;
+
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                if (persistentDatasets[file.name]) {
+                    itemsProcessed++;
+                    continue;
+                }
+
+                const reader = new FileReader();
+                const extension = file.name.split('.').pop().toLowerCase();
+
+                reader.onload = function(e) {
+                    try {
+                        let parsedData;
+                        if (extension === 'csv') {
+                            parsedData = parseCSV(e.target.result, file.name);
+                        } else if (extension === 'xrdml') {
+                            parsedData = parseXRDML(e.target.result, file.name);
+                        }
+
+                        if (parsedData) {
+                            persistentDatasets[file.name] = parsedData;
+                        }
+                    } catch (err) {
+                        alert(`Parsing structural error inside file: ${file.name}\nReason: ${err.message}`);
+                    }
+
+                    itemsProcessed++;
+                    if (itemsProcessed === files.length) {
+                        updateChartCanvas();
+                        event.target.value = ''; 
+                    }
+                };
+
+                reader.readAsText(file);
+            }
+        }
+
+        function parseCSV(text, filename) {
+            const lines = text.split(/\r?\n/);
+            let sampleId = filename.split('.')[0]; 
+            let dataStartIndex = -1;
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (line.includes('Sample identification')) {
+                    const parts = line.split(',');
+                    if (parts[1] && parts[1].trim()) sampleId = parts[1].trim();
+                }
+                if (line.includes('[Scan points]')) {
+                    dataStartIndex = i + 2; 
+                    break;
+                }
+            }
+
+            if (dataStartIndex === -1 || dataStartIndex >= lines.length) {
+                throw new Error("Missing '[Scan points]' identifier data block signature tags alignment.");
+            }
+
+            const angles = [];
+            const intensities = [];
+
+            for (let i = dataStartIndex; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
+                const parts = line.split(',');
+                if (parts.length >= 3) {
+                    const angleVal = parseFloat(parts[0]);
+                    const intensityVal = parseFloat(parts[2]);
+                    if (!isNaN(angleVal) && !isNaN(intensityVal)) {
+                        angles.push(angleVal);
+                        intensities.push(intensityVal);
+                    }
+                }
+            }
+
+            return { angles, intensities, label: sampleId };
+        }
+
+        function parseXRDML(xmlText, filename) {
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+            
+            let sampleId = filename.split('.')[0];
+            const sampleIdEl = xmlDoc.getElementsByTagName("id")[0];
+            if (sampleIdEl && sampleIdEl.textContent) {
+                sampleId = sampleIdEl.textContent.trim();
+            }
+
+            const countsEl = xmlDoc.getElementsByTagName("counts")[0];
+            if (!countsEl || !countsEl.textContent) {
+                throw new Error("Intensity tracking counts node matrices missing.");
+            }
+            const intensities = countsEl.textContent.trim().split(/\s+/).map(Number);
+
+            const positionsEl = xmlDoc.getElementsByTagName("positions");
+            let angles = [];
+
+            for (let i = 0; i < positionsEl.length; i++) {
+                const node = positionsEl[i];
+                if (node.getAttribute("axis") === "2Theta") {
+                    const listPositionEl = node.getElementsByTagName("listPosition")[0];
+                    if (listPositionEl && listPositionEl.textContent) {
+                        angles = listPositionEl.textContent.trim().split(/\s+/).map(Number);
+                    } else {
+                        const startEl = node.getElementsByTagName("startPosition")[0];
+                        const endEl = node.getElementsByTagName("endPosition")[0];
+                        if (startEl && endEl) {
+                            const startVal = parseFloat(startEl.textContent);
+                            const endVal = parseFloat(endEl.textContent);
+                            angles = linspace(startVal, endVal, intensities.length);
+                        }
+                    }
+                    break;
+                }
+            }
+
+            if (angles.length !== intensities.length) {
+                throw new Error(`Data alignment mismatch vector size: Angles(${angles.length}) vs Intensity(${intensities.length})`);
+            }
+
+            return { angles, intensities, label: sampleId };
+        }
+
+        function linspace(start, end, num) {
+            if (num === 1) return [start];
+            const arr = [];
+            const step = (end - start) / (num - 1);
+            for (let i = 0; i < num; i++) {
+                arr.push(start + (i * step));
+            }
+            return arr;
+        }
+
+        function updateChartCanvas() {
+            const datasetKeys = Object.keys(persistentDatasets);
+            document.getElementById('status-display').innerHTML = `Active tracking profiles loaded: <b>${datasetKeys.length}</b>`;
+
+            if (datasetKeys.length === 0) {
+                renderPlaceholderCanvas();
+                return;
+            }
+
+            const traces = [];
+            datasetKeys.forEach(key => {
+                const data = persistentDatasets[key];
+                traces.push({
+                    x: data.angles,
+                    y: data.intensities,
+                    type: 'scatter',
+                    mode: 'lines',
+                    name: data.label,
+                    line: { width: 1.5 },
+                    hovertemplate: '<b>2θ:</b> %{x:.4f}°<br><b>Intensity:</b> %{y:.1f} counts<extra></extra>'
+                });
+            });
+
+            const layout = {
+                title: { text: 'XRD Diffraction Multi-Pattern Overlays', font: { size: 16, family: 'Arial, sans-serif', weight: 'bold' } },
+                xaxis: { title: '2θ Angle (degrees)', showgrid: true, gridcolor: '#e9ecef', ticks: 'outside' },
+                yaxis: { title: 'Intensity (counts)', showgrid: true, gridcolor: '#e9ecef', ticks: 'outside' },
+                hovermode: 'x unified',
+                template: 'plotly_white',
+                legend: { orientation: 'h', yanchor: 'bottom', y: 1.02, xanchor: 'right', x: 1 },
+                margin: { l: 60, r: 30, t: 80, b: 50 }
+            };
+
+            const config = { responsive: true, displaylogo: false };
+            Plotly.newPlot('chart-container', traces, layout, config);
+        }
+
+        function renderPlaceholderCanvas() {
+            const layout = {
+                xaxis: { title: '2θ Angle (degrees)', range: [5, 90], gridcolor: '#f1f3f5' },
+                yaxis: { title: 'Intensity (counts)', range: [0, 3000], gridcolor: '#f1f3f5' },
+                template: 'plotly_white',
+                annotations: [{
+                    text: "No active scans loaded. Use the control dashboard pane to browse files.",
+                    xref: "paper", yref: "paper", x: 0.5, y: 0.5, showarrow: false,
+                    font: { size: 14, color: "#6c757d", italic: true }
+                }],
+                margin: { l: 60, r: 30, t: 40, b: 50 }
+            };
+            Plotly.newPlot('chart-container', [], layout, { responsive: true, displaylogo: false });
+        }
+
+        /**
+         * Dynamic Client-Side CSV Generator
+         * Compiles clean (Angle, Intensity) arrays and triggers standalone browser downloads
+         */
+        function exportPlottedToCSV() {
+            const datasetKeys = Object.keys(persistentDatasets);
+            
+            if (datasetKeys.length === 0) {
+                alert("No active patterns loaded on the canvas to export. Please select files first.");
+                return;
+            }
+
+            datasetKeys.forEach(key => {
+                const dataset = persistentDatasets[key];
+                
+                // Construct clean CSV text frame mapping standard headers
+                let csvString = "Angle,Intensity\n";
+                for (let i = 0; i < dataset.angles.length; i++) {
+                    csvString += `${dataset.angles[i].toFixed(6)},${dataset.intensities[i].toFixed(1)}\n`;
+                }
+
+                // Compile text data straight into virtual Blob memory stream
+                const csvBlob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
+                const virtualUrl = URL.createObjectURL(csvBlob);
+                
+                // Generate a discrete download trigger anchor element
+                const downloadAnchor = document.createElement("a");
+                const cleanBaseName = key.split('.')[0];
+                
+                downloadAnchor.setAttribute("href", virtualUrl);
+                downloadAnchor.setAttribute("download", `clean_${cleanBaseName}.csv`);
+                downloadAnchor.style.visibility = 'hidden';
+                
+                document.body.appendChild(downloadAnchor);
+                downloadAnchor.click();
+                
+                // Cleanup DOM footprint elements immediately post download invocation
+                document.body.removeChild(downloadAnchor);
+                URL.revokeObjectURL(virtualUrl);
+            });
+        }
+
+        function clearCanvas() {
+            persistentDatasets = {};
+            updateChartCanvas();
+        }
+    </script>
+</body>
+</html>
