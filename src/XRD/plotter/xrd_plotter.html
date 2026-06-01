@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Web XRD Pattern Visualizer & Peak Fitting Tool</title>
+    <!-- Smart Fallback Mirror Setup for Plotly.js to safeguard lab internet drops -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.24.1/plotly.min.js"></script>
     <script>
         if (typeof Plotly === 'undefined') {
@@ -61,15 +62,15 @@
 <body>
 
     <div id="sidebar">
-        <h2>🔬 XRD Data Analyzer</h2>
-        <p class="info-text">Load data tracks, isolate regions of interest, and trigger the peak optimization routines panel parameters.</p>
+        <h2>🔬 XRD Data Viewer and Converter</h2>
+        <p class="info-text">Upload single or multiple XRD datasets in native csv or xrdml format. </p>
         
         <div class="upload-btn-wrapper">
             <div class="btn-upload">📁 Click to Select File(s)</div>
             <input type="file" id="xrd-files" accept=".csv,.xrdml" multiple onchange="handleFileSelections(event)">
         </div>
 
-        <hr style="border: 0; border-top: 1px solid #e9ecef; margin: 3px 0;">
+        <hr style="border: 0; border-top: 1px solid #e9ecef; margin: 5px 0;">
         
         <button class="btn-crop" onclick="cropToView()">✂️ Crop to View</button>
         <button class="btn-bg-sub" onclick="subtractBackgroundFromPlotted()">✨ Subtract Background</button>
@@ -84,6 +85,15 @@
         </div>
         
         <div class="status-badge" id="status-display">Active profiles loaded: 0</div>
+
+        <!-- Checkbox Selector Panel (Moved BELOW Active Profiles Loaded) -->
+        <div class="checkbox-container" style="flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 5px; width: 100%;">
+            <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">🎯 Targets for Fitting:</label>
+            <div id="fit-targets-panel" style="width: 100%; max-height: 95px; overflow-y: auto; border: 1px solid #ced4da; border-radius: 6px; background-color: #fff; padding: 8px; box-sizing: border-box;">
+                <div style="color: #888888; font-size: 0.85rem; font-style: italic;">No Scans Loaded</div>
+            </div>
+        </div>
+        
         <div class="version-tag" id="app-version-container"></div>
     </div>
 
@@ -96,6 +106,7 @@
             <table class="results-table" id="results-matrix-sheet">
                 <thead>
                     <tr>
+                        <th>Dataset / Sample</th>
                         <th>Peak ID</th>
                         <th>Center Position (2θ)</th>
                         <th>Amplitude Peak Max (counts)</th>
@@ -108,13 +119,12 @@
     </div>
 
     <script>
-        const VERSION_TAG = "v2026.05.22.1";
+        const VERSION_TAG = "v2026.06.01.1";
+
         let persistentDatasets = {};
-        
         let fittingModeActive = false;
         let peakGuessesX = [];
         let currentMouseHoverX = null;
-        let fittedOutputModels = null;
 
         window.onload = function() {
             document.getElementById('app-version-container').innerText = VERSION_TAG;
@@ -129,6 +139,45 @@
                 }
             });
         };
+
+        function refreshCheckboxTargetsPanel() {
+            const panel = document.getElementById('fit-targets-panel');
+            const datasetKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_"));
+            
+            const historicalCheckedStates = {};
+            panel.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                historicalCheckedStates[cb.value] = cb.checked;
+            });
+            
+            panel.innerHTML = "";
+            
+            if (datasetKeys.length === 0) {
+                panel.innerHTML = '<div style="color: #888888; font-size: 0.85rem; font-style: italic;">No Scans Loaded</div>';
+                return;
+            }
+            
+            datasetKeys.forEach(key => {
+                const wrapper = document.createElement('div');
+                wrapper.className = 'checkbox-container';
+                wrapper.style.margin = '3px 0';
+                
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.id = `fit-check-${key}`;
+                cb.value = key;
+                cb.checked = historicalCheckedStates[key] !== undefined ? historicalCheckedStates[key] : true;
+                
+                const label = document.createElement('label');
+                label.htmlFor = cb.id;
+                label.innerText = persistentDatasets[key].label;
+                label.style.fontSize = '0.85rem';
+                label.style.cursor = 'pointer';
+                
+                wrapper.appendChild(cb);
+                wrapper.appendChild(label);
+                panel.appendChild(wrapper);
+            });
+        }
 
         function toggleFittingMode() {
             if (Object.keys(persistentDatasets).length === 0) {
@@ -151,8 +200,7 @@
         }
 
         function snipBackground(y, iterations = 40) {
-            let bg = [...y];
-            let n = bg.length;
+            let bg = [...y]; let n = bg.length;
             let maxIter = Math.min(iterations, Math.floor(n / 2) - 1);
             if (maxIter < 1) return new Array(n).fill(0);
             
@@ -168,44 +216,30 @@
 
         function subtractBackgroundFromPlotted() {
             const dataKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_"));
-            if (dataKeys.length === 0) {
-                alert("No active datasets loaded to execute baseline filters.");
-                return;
-            }
-
-            // Flush old active fits if background profiles alter
+            if (dataKeys.length === 0) { alert("No active datasets loaded to execute baseline filters."); return; }
             clearFittedModelsCache();
 
             dataKeys.forEach(key => {
-                const dataset = persistentDatasets[key];
-                const intensities = dataset.intensities;
+                const dataset = persistentDatasets[key]; const intensities = dataset.intensities;
                 if (intensities.length < 3) return;
-                
                 const bg = snipBackground(intensities, 40);
-                for (let i = 0; i < intensities.length; i++) {
-                    dataset.intensities[i] = intensities[i] - bg[i];
-                }
+                for (let i = 0; i < intensities.length; i++) dataset.intensities[i] = intensities[i] - bg[i];
             });
-
             updateChartCanvas();
         }
 
         function nelderMeadOptimization(objectiveFunc, initialGuess, maxIterations = 600, tolerance = 1e-7) {
-            const N = initialGuess.length;
-            let simplex = [];
+            const N = initialGuess.length; let simplex = [];
             simplex.push({ params: [...initialGuess], score: objectiveFunc(initialGuess) });
             for (let i = 0; i < N; i++) {
-                let vertex = [...initialGuess];
-                vertex[i] = vertex[i] === 0 ? 0.005 : vertex[i] * 1.05;
+                let vertex = [...initialGuess]; vertex[i] = vertex[i] === 0 ? 0.005 : vertex[i] * 1.05;
                 simplex.push({ params: vertex, score: objectiveFunc(vertex) });
             }
             for (let iter = 0; iter < maxIterations; iter++) {
                 simplex.sort((a, b) => a.score - b.score);
                 if (Math.abs(simplex[N].score - simplex[0].score) < tolerance) break;
                 let centroid = new Array(N).fill(0);
-                for (let i = 0; i < N; i++) {
-                    for (let j = 0; j < N; j++) centroid[j] += simplex[i].params[j] / N;
-                }
+                for (let i = 0; i < N; i++) { for (let j = 0; j < N; j++) centroid[j] += simplex[i].params[j] / N; }
                 let reflected = new Array(N);
                 for (let j = 0; j < N; j++) reflected[j] = centroid[j] + 1.0 * (centroid[j] - simplex[N].params[j]);
                 let scoreReflected = objectiveFunc(reflected);
@@ -217,8 +251,7 @@
                     else { simplex[N] = { params: reflected, score: scoreReflected }; continue; }
                 }
                 if (scoreReflected < simplex[N-1].score) { simplex[N] = { params: reflected, score: scoreReflected }; continue; }
-                let contracted = new Array(N);
-                let sourceCoords = scoreReflected < simplex[N].score ? reflected : simplex[N].params;
+                let contracted = new Array(N); let sourceCoords = scoreReflected < simplex[N].score ? reflected : simplex[N].params;
                 for (let j = 0; j < N; j++) contracted[j] = centroid[j] + 0.5 * (sourceCoords[j] - centroid[j]);
                 let scoreContracted = objectiveFunc(contracted);
                 if (scoreContracted < simplex[N].score) { simplex[N] = { params: contracted, score: scoreContracted }; continue; }
@@ -227,122 +260,119 @@
                     simplex[i].score = objectiveFunc(simplex[i].params);
                 }
             }
-            simplex.sort((a, b) => a.score - b.score);
-            return simplex[0].params;
+            simplex.sort((a, b) => a.score - b.score); return simplex[0].params;
         }
 
         function executePeakOptimization() {
-            if (peakGuessesX.length === 0) {
-                alert("Right-click on the graph canvas plotting window to position initial peak center guides first.");
+            if (peakGuessesX.length === 0) { alert("Right-click on the graph canvas to specify initial peak centers."); return; }
+            
+            const panel = document.getElementById('fit-targets-panel');
+            let keysToFit = [];
+            panel.querySelectorAll('input[type="checkbox"]:checked').forEach(cb => {
+                keysToFit.push(cb.value);
+            });
+
+            if (keysToFit.length === 0) {
+                alert("Please select at least one target sample checkbox in the panel list.");
                 return;
             }
-            const firstKey = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_"))[0];
-            const rawX = persistentDatasets[firstKey].angles;
-            const rawY = persistentDatasets[firstKey].intensities;
             
-            let xFit = [...rawX], yFit = [...rawY];
-            if (xFit.length > 1200) {
-                let samplingInterval = Math.ceil(xFit.length / 1200);
-                xFit = xFit.filter((_, i) => i % samplingInterval === 0);
-                yFit = yFit.filter((_, i) => i % samplingInterval === 0);
-            }
-            
-            let initialGuess = [];
-            peakGuessesX.forEach(g_x => {
-                let closestIdx = 0, minDiff = Infinity;
-                for (let i = 0; i < xFit.length; i++) {
-                    let diff = Math.abs(xFit[i] - g_x);
-                    if (diff < minDiff) { minDiff = diff; closestIdx = i; }
-                }
-                initialGuess.push(yFit[closestIdx], g_x, 0.07);
-            });
-            
-            function sumOfSquaredErrors(params) {
-                let sse = 0;
-                for (let i = 0; i < xFit.length; i++) {
-                    let x = xFit[i]; let modelY = 0;
-                    for (let p = 0; p < params.length; p += 3) {
-                        let amp = params[p]; let cent = params[p+1]; let wid = params[p+2];
-                        if (amp < 0 || wid < 0.002) return Infinity; 
-                        modelY += amp * Math.exp(-Math.pow((x - cent) / wid, 2));
-                    }
-                    sse += Math.pow(yFit[i] - modelY, 2);
-                }
-                return sse;
-            }
-            
-            const pOpt = nelderMeadOptimization(sumOfSquaredErrors, initialGuess);
             Object.keys(persistentDatasets).forEach(k => { if(k.startsWith("__fit_")) delete persistentDatasets[k]; });
-            
-            let yFitTotal = new Array(rawX.length).fill(0);
-            let peakCounter = 1;
             const tableBody = document.querySelector("#results-matrix-sheet tbody");
             tableBody.innerHTML = ""; 
             
-            for (let p = 0; p < pOpt.length; p += 3) {
-                let amp = pOpt[p], cent = pOpt[p+1], wid = pOpt[p+2];
-                let yPeak = [];
-                for (let i = 0; i < rawX.length; i++) {
-                    let val = amp * Math.exp(-Math.pow((rawX[i] - cent) / wid, 2));
-                    yPeak.push(val); yFitTotal[i] += val;
-                }
-                persistentDatasets[`__fit_peak_${peakCounter}`] = { angles: rawX, intensities: yPeak, label: `Peak ${peakCounter} Fitted Curve` };
+            keysToFit.forEach(key => {
+                const rawX = persistentDatasets[key].angles; const rawY = persistentDatasets[key].intensities;
+                const labelBase = persistentDatasets[key].label;
                 
-                let fwhm = 2.0 * Math.sqrt(Math.LN2) * wid;
-                let tr = document.createElement('tr');
-                tr.innerHTML = `<td>Peak ${peakCounter}</td><td>${cent.toFixed(4)}°</td><td>${amp.toFixed(1)}</td><td>${fwhm.toFixed(4)}°</td>`;
-                tableBody.appendChild(tr);
-                peakCounter++;
-            }
+                let xFit = [...rawX], yFit = [...rawY];
+                if (xFit.length > 1200) {
+                    let samplingInterval = Math.ceil(xFit.length / 1200);
+                    xFit = xFit.filter((_, i) => i % samplingInterval === 0);
+                    yFit = yFit.filter((_, i) => i % samplingInterval === 0);
+                }
+                
+                let initialGuess = [];
+                peakGuessesX.forEach(g_x => {
+                    let closestIdx = 0, minDiff = Infinity;
+                    for (let i = 0; i < xFit.length; i++) {
+                        let diff = Math.abs(xFit[i] - g_x);
+                        if (diff < minDiff) { minDiff = diff; closestIdx = i; }
+                    }
+                    initialGuess.push(yFit[closestIdx], g_x, 0.07);
+                });
+                
+                function sumOfSquaredErrors(params) {
+                    let sse = 0;
+                    for (let i = 0; i < xFit.length; i++) {
+                        let x = xFit[i]; let modelY = 0;
+                        for (let p = 0; p < params.length; p += 3) {
+                            let amp = params[p]; let cent = params[p+1]; let wid = params[p+2];
+                            if (amp < 0 || wid < 0.002) return Infinity; 
+                            modelY += amp * Math.exp(-Math.pow((x - cent) / wid, 2));
+                        }
+                        sse += Math.pow(yFit[i] - modelY, 2);
+                    }
+                    return sse;
+                }
+                
+                const pOpt = nelderMeadOptimization(sumOfSquaredErrors, initialGuess);
+                let yFitTotal = new Array(rawX.length).fill(0);
+                let peakCounter = 1;
+                
+                for (let p = 0; p < pOpt.length; p += 3) {
+                    let amp = pOpt[p], cent = pOpt[p+1], wid = pOpt[p+2];
+                    let yPeak = [];
+                    for (let i = 0; i < rawX.length; i++) {
+                        let val = amp * Math.exp(-Math.pow((rawX[i] - cent) / wid, 2));
+                        yPeak.push(val); yFitTotal[i] += val;
+                    }
+                    persistentDatasets[`__fit_peak_${peakCounter}_${key}`] = { angles: rawX, intensities: yPeak, label: `${labelBase} Pk ${peakCounter} Fit` };
+                    
+                    let fwhm = 2.0 * Math.sqrt(Math.LN2) * wid;
+                    let tr = document.createElement('tr');
+                    tr.innerHTML = `<td>${labelBase}</td><td>Peak ${peakCounter}</td><td>${cent.toFixed(4)}°</td><td>${amp.toFixed(1)}</td><td>${fwhm.toFixed(4)}°</td>`;
+                    tableBody.appendChild(tr);
+                    peakCounter++;
+                }
+                persistentDatasets[`__fit_composite_${key}`] = { angles: rawX, intensities: yFitTotal, label: `${labelBase} Total Fit` };
+            });
             
-            persistentDatasets[`__fit_composite`] = { angles: rawX, intensities: yFitTotal, label: `Overall Composite Curve Fit` };
             document.getElementById('results-dashboard').style.display = "block";
             updateChartCanvas();
         }
 
         function handleFileSelections(event) {
-            const files = event.target.files;
-            if (!files.length) return;
+            const files = event.target.files; if (!files.length) return;
             let itemsProcessed = 0;
 
             for (let i = 0; i < files.length; i++) {
-                const file = files[i];
-                if (persistentDatasets[file.name]) { itemsProcessed++; continue; }
-
-                const reader = new FileReader();
-                const extension = file.name.split('.').pop().toLowerCase();
+                const file = files[i]; if (persistentDatasets[file.name]) { itemsProcessed++; continue; }
+                const reader = new FileReader(); const extension = file.name.split('.').pop().toLowerCase();
 
                 reader.onload = function(e) {
                     try {
                         let parsedData;
                         if (extension === 'csv') parsedData = parseCSV(e.target.result, file.name);
                         else if (extension === 'xrdml') parsedData = parseXRDML(e.target.result, file.name);
-
                         if (parsedData) persistentDatasets[file.name] = parsedData;
                     } catch (err) { alert(`Parsing structural error: ${file.name}\nReason: ${err.message}`); }
 
                     itemsProcessed++;
-                    if (itemsProcessed === files.length) { updateChartCanvas(); event.target.value = ''; }
+                    if (itemsProcessed === files.length) { refreshCheckboxTargetsPanel(); updateChartCanvas(); event.target.value = ''; }
                 };
                 reader.readAsText(file);
             }
         }
 
         function parseCSV(text, filename) {
-            const lines = text.split(/\r?\n/);
-            let sampleId = filename.split('.')[0]; 
-            let dataStartIndex = -1;
-
+            const lines = text.split(/\r?\n/); let sampleId = filename.split('.')[0]; let dataStartIndex = -1;
             for (let i = 0; i < lines.length; i++) {
                 const line = lines[i];
-                if (line.includes('Sample identification')) {
-                    const parts = line.split(',');
-                    if (parts[1] && parts[1].trim()) sampleId = parts[1].trim();
-                }
+                if (line.includes('Sample identification')) { const parts = line.split(','); if (parts[1] && parts[1].trim()) sampleId = parts[1].trim(); }
                 if (line.includes('[Scan points]')) { dataStartIndex = i + 2; break; }
             }
-            if (dataStartIndex === -1 || dataStartIndex >= lines.length) throw new Error("Missing '[Scan points]' tags block.");
-
+            if (dataStartIndex === -1 || dataStartIndex >= lines.length) throw new Error("Missing '[Scan points]' identifier tags.");
             const angles = []; const intensities = [];
             for (let i = dataStartIndex; i < lines.length; i++) {
                 const line = lines[i].trim(); if (!line) continue;
@@ -356,31 +386,23 @@
         }
 
         function parseXRDML(xmlText, filename) {
-            const parser = new DOMParser();
-            const xmlDoc = parser.parseFromString(xmlText, "text/xml");
-            let sampleId = filename.split('.')[0];
-            const sampleIdEl = xmlDoc.getElementsByTagName("id")[0];
+            const parser = new DOMParser(); const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+            let sampleId = filename.split('.')[0]; const sampleIdEl = xmlDoc.getElementsByTagName("id")[0];
             if (sampleIdEl && sampleIdEl.textContent) sampleId = sampleIdEl.textContent.trim();
 
             const countsEl = xmlDoc.getElementsByTagName("counts")[0];
             if (!countsEl || !countsEl.textContent) throw new Error("Intensity tracking counts node matrices missing.");
             const intensities = countsEl.textContent.trim().split(/\s+/).map(Number);
-
-            const positionsEl = xmlDoc.getElementsByTagName("positions");
-            let angles = [];
+            const positionsEl = xmlDoc.getElementsByTagName("positions"); let angles = [];
 
             for (let i = 0; i < positionsEl.length; i++) {
                 const node = positionsEl[i];
                 if (node.getAttribute("axis") === "2Theta") {
                     const listPositionEl = node.getElementsByTagName("listPosition")[0];
-                    if (listPositionEl && listPositionEl.textContent) {
-                        angles = listPositionEl.textContent.trim().split(/\s+/).map(Number);
-                    } else {
-                        const startEl = node.getElementsByTagName("startPosition")[0];
-                        const endEl = node.getElementsByTagName("endPosition")[0];
-                        if (startEl && endEl) {
-                            angles = linspace(parseFloat(startEl.textContent), parseFloat(endEl.textContent), intensities.length);
-                        }
+                    if (listPositionEl && listPositionEl.textContent) angles = listPositionEl.textContent.trim().split(/\s+/).map(Number);
+                    else {
+                        const startEl = xmlDoc.getElementsByTagName("startPosition")[0]; const endEl = xmlDoc.getElementsByTagName("endPosition")[0];
+                        if (startEl && endEl) angles = linspace(parseFloat(startEl.textContent), parseFloat(endEl.textContent), intensities.length);
                     }
                     break;
                 }
@@ -392,8 +414,7 @@
         function linspace(start, end, num) {
             if (num === 1) return [start];
             const arr = []; const step = (end - start) / (num - 1);
-            for (let i = 0; i < num; i++) arr.push(start + (i * step));
-            return arr;
+            for (let i = 0; i < num; i++) arr.push(start + (i * step)); return arr;
         }
 
         function updateChartCanvas() {
@@ -410,7 +431,7 @@
                 const isFitCurve = key.startsWith("__fit_");
                 
                 let lineConfig = { width: 1.5 };
-                if (key === "__fit_composite") lineConfig = { color: '#000000', width: 2.2 };
+                if (key.startsWith("__fit_composite")) lineConfig = { width: 2.0, dash: 'solid' };
                 else if (isFitCurve) lineConfig = { width: 1.2, dash: 'dot' };
 
                 traces.push({
@@ -437,8 +458,7 @@
                 hovermode: tooltipEnabled ? 'x unified' : 'x',
                 template: 'plotly_white',
                 legend: { orientation: 'h', yanchor: 'bottom', y: 1.02, xanchor: 'right', x: 1 },
-                margin: { l: 60, r: 30, t: 80, b: 50 },
-                shapes: verticalShapes
+                margin: { l: 60, r: 30, t: 80, b: 50 }, shapes: verticalShapes
             };
 
             Plotly.newPlot('chart-container', traces, layout, { responsive: true, displaylogo: false });
@@ -451,8 +471,7 @@
                 }
             });
             chartDiv.on('plotly_unhover', function() {
-                currentMouseHoverX = null;
-                document.getElementById('cursor-bar').innerHTML = `Cursor Position: 2θ = --`;
+                currentMouseHoverX = null; document.getElementById('cursor-bar').innerHTML = `Cursor Position: 2θ = --`;
             });
         }
 
@@ -465,15 +484,13 @@
                     text: "No active scans loaded. Use the control panel to browse files.",
                     xref: "paper", yref: "paper", x: 0.5, y: 0.5, showarrow: false,
                     font: { size: 14, color: "#6c757d", italic: true }
-                }],
-                margin: { l: 60, r: 30, t: 40, b: 50 }
+                }], margin: { l: 60, r: 30, t: 40, b: 50 }
             };
             Plotly.newPlot('chart-container', [], layout, { responsive: true, displaylogo: false });
         }
 
         function cropToView() {
-            const datasetKeys = Object.keys(persistentDatasets);
-            if (datasetKeys.length === 0) return;
+            const datasetKeys = Object.keys(persistentDatasets); if (datasetKeys.length === 0) return;
             const chartDiv = document.getElementById('chart-container');
             let range = chartDiv.layout.xaxis.range;
             if (!range && chartDiv._fullLayout && chartDiv._fullLayout.xaxis) range = chartDiv._fullLayout.xaxis.range;
@@ -484,62 +501,41 @@
 
             datasetKeys.forEach(key => {
                 if (key.startsWith("__fit_")) { delete persistentDatasets[key]; return; }
-                const dataset = persistentDatasets[key];
-                const newAngles = []; const newIntensities = [];
+                const dataset = persistentDatasets[key]; const newAngles = []; const newIntensities = [];
 
                 for (let i = 0; i < dataset.angles.length; i++) {
                     const currentAngle = dataset.angles[i];
-                    if (currentAngle >= xmin && currentAngle <= xmax) {
-                        newAngles.push(currentAngle); newIntensities.push(dataset.intensities[i]);
-                    }
+                    if (currentAngle >= xmin && currentAngle <= xmax) { newAngles.push(currentAngle); newIntensities.push(dataset.intensities[i]); }
                 }
                 dataset.angles = newAngles; dataset.intensities = newIntensities;
             });
-
-            updateChartCanvas();
+            refreshCheckboxTargetsPanel(); updateChartCanvas();
             Plotly.relayout('chart-container', { 'xaxis.autorange': true, 'yaxis.autorange': true });
         }
 
         function handleTooltipToggle() {
             const tooltipEnabled = document.getElementById('toggle-tooltip').checked;
             if (Object.keys(persistentDatasets).length > 0) {
-                Plotly.relayout('chart-container', {
-                    hovermode: tooltipEnabled ? 'x unified' : 'x',
-                    'xaxis.spikedash': tooltipEnabled ? 'solid' : 'dash',
-                    'xaxis.spikecolor': tooltipEnabled ? '#495057' : '#dc3545'
-                });
-                Plotly.restyle('chart-container', {
-                    hoverinfo: tooltipEnabled ? 'all' : 'none',
-                    hovertemplate: tooltipEnabled ? '%{y:.1f} counts<extra></extra>' : null
-                });
+                Plotly.relayout('chart-container', { hovermode: tooltipEnabled ? 'x unified' : 'x', 'xaxis.spikedash': tooltipEnabled ? 'solid' : 'dash', 'xaxis.spikecolor': tooltipEnabled ? '#495057' : '#dc3545' });
+                Plotly.restyle('chart-container', { hoverinfo: tooltipEnabled ? 'all' : 'none', hovertemplate: tooltipEnabled ? '%{y:.1f} counts<extra></extra>' : null });
             }
         }
 
         function exportPlottedToCSV() {
-            const datasetKeys = Object.keys(persistentDatasets);
-            if (datasetKeys.length === 0) return;
+            const datasetKeys = Object.keys(persistentDatasets); if (datasetKeys.length === 0) return;
 
             datasetKeys.forEach(key => {
-                const dataset = persistentDatasets[key];
-                if (dataset.angles.length === 0) return;
-                
+                const dataset = persistentDatasets[key]; if (dataset.angles.length === 0) return;
                 let csvString = "Angle,Intensity\n";
-                for (let i = 0; i < dataset.angles.length; i++) {
-                    csvString += `${dataset.angles[i].toFixed(6)},${dataset.intensities[i].toFixed(1)}\n`;
-                }
+                for (let i = 0; i < dataset.angles.length; i++) csvString += `${dataset.angles[i].toFixed(6)},${dataset.intensities[i].toFixed(1)}\n`;
 
-                const csvBlob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
-                const virtualUrl = URL.createObjectURL(csvBlob);
+                const csvBlob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' }); const virtualUrl = URL.createObjectURL(csvBlob);
                 const downloadAnchor = document.createElement("a");
                 const cleanBaseName = key.startsWith("__fit_") ? key.replace("__fit_", "fit_") : `clean_${key.split('.')[0]}`;
                 
-                downloadAnchor.setAttribute("href", virtualUrl);
-                downloadAnchor.setAttribute("download", `${cleanBaseName}.csv`);
-                downloadAnchor.style.visibility = 'hidden';
-                document.body.appendChild(downloadAnchor);
-                downloadAnchor.click();
-                document.body.removeChild(downloadAnchor);
-                URL.revokeObjectURL(virtualUrl);
+                downloadAnchor.setAttribute("href", virtualUrl); downloadAnchor.setAttribute("download", `${cleanBaseName}.csv`);
+                downloadAnchor.style.visibility = 'hidden'; document.body.appendChild(downloadAnchor);
+                downloadAnchor.click(); document.body.removeChild(downloadAnchor); URL.revokeObjectURL(virtualUrl);
             });
         }
 
@@ -551,14 +547,12 @@
         }
 
         function clearCanvas() {
-            persistentDatasets = {};
-            clearFittedModelsCache();
-            fittingModeActive = false;
+            persistentDatasets = {}; clearFittedModelsCache(); fittingModeActive = false;
             document.getElementById('btn-fit-toggle').innerText = "🎯 Peak Fitting: OFF";
             document.getElementById('btn-fit-toggle').classList.remove('active');
             document.getElementById('btn-run-fit').style.display = "none";
             document.getElementById('cursor-bar').innerHTML = `Cursor Position: 2θ = --`;
-            updateChartCanvas();
+            refreshCheckboxTargetsPanel(); updateChartCanvas();
         }
     </script>
 </body>

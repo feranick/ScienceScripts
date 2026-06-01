@@ -13,7 +13,7 @@ from scipy.optimize import curve_fit
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.05.22.1"
+VERSION_TAG = "v2026.06.01.1"
 
 
 # ==========================================
@@ -38,7 +38,6 @@ def snip_background(y, iterations=40):
     """Calculates the baseline background profile using the SNIP algorithm."""
     bg = np.array(y, dtype=float)
     n = len(bg)
-    # Dynamically bound iterations to safely prevent index crashes on tightly cropped regions
     max_iter = min(iterations, int(n / 2) - 1)
     if max_iter < 1:
         return np.zeros_like(bg)
@@ -132,8 +131,8 @@ class XRDPlotterGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Advanced XRD Peak Analysis Toolkit")
-        self.root.geometry("1000x780")
-        self.root.minsize(800, 600)
+        self.root.geometry("1100x780")
+        self.root.minsize(850, 600)
         
         style = ttk.Style()
         style.theme_use('clam')
@@ -143,36 +142,50 @@ class XRDPlotterGUI:
         self.peak_guesses = []
         self.guess_lines_artists = []
         self.fitted_curves_artists = []
+        self.target_checkbox_vars = {} 
         
         self.fitting_mode_active = False
         self.cursor_line = None  
         
-        # --- Top Control Bar Panel ---
-        control_frame = ttk.Frame(root, padding=10)
-        control_frame.pack(side="top", fill="x")
+        # --- Left Sidebar Panel Layout ---
+        sidebar_frame = ttk.Frame(root, padding=12, relief="flat")
+        sidebar_frame.pack(side="left", fill="y", padx=5, pady=5)
         
-        ttk.Button(control_frame, text="📁 Select File(s)", command=self.select_and_plot_files).pack(side="left", padx=3)
-        ttk.Button(control_frame, text="✂️ Crop to View", command=self.crop_to_current_view).pack(side="left", padx=3)
-        ttk.Button(control_frame, text="✨ Subtract Background", command=self.subtract_background_profile).pack(side="left", padx=3)
+        ttk.Label(sidebar_frame, text="🔬 XRD Data Analyzer", font=("Helvetica", 12, "bold")).pack(side="top", anchor="w", pady=(0, 10))
         
-        # Fitting Interface Mode Anchors
-        self.btn_fit_toggle = ttk.Button(control_frame, text="🎯 Peak Fitting: OFF", command=self.toggle_fitting_mode)
-        self.btn_fit_toggle.pack(side="left", padx=3)
+        ttk.Button(sidebar_frame, text="📁 Select File(s)", command=self.select_and_plot_files).pack(side="top", fill="x", pady=3)
+        ttk.Button(sidebar_frame, text="✂️ Crop to View", command=self.crop_to_current_view).pack(side="top", fill="x", pady=3)
+        ttk.Button(sidebar_frame, text="✨ Subtract Background", command=self.subtract_background_profile).pack(side="top", fill="x", pady=3)
         
-        self.btn_run_fit = ttk.Button(control_frame, text="⚡ Optimize Fit", command=self.run_peak_optimization, state="disabled")
-        self.btn_run_fit.pack(side="left", padx=3)
+        self.btn_fit_toggle = ttk.Button(sidebar_frame, text="🎯 Peak Fitting: OFF", command=self.toggle_fitting_mode)
+        self.btn_fit_toggle.pack(side="top", fill="x", pady=3)
         
-        ttk.Button(control_frame, text="📥 Export to CSV", command=self.export_active_data_to_csv).pack(side="left", padx=3)
-        ttk.Button(control_frame, text="🗑️ Clear Canvas", command=self.clear_canvas).pack(side="left", padx=3)
+        self.btn_run_fit = ttk.Button(sidebar_frame, text="⚡ Optimize Fit", command=self.run_peak_optimization, state="disabled")
+        self.btn_run_fit.pack(side="top", fill="x", pady=3)
         
-        self.status_var = tk.StringVar(value="System initialized. Load files to map data.")
-        ttk.Label(control_frame, textvariable=self.status_var, font=("Helvetica", 9, "italic")).pack(side="left", padx=15)
+        ttk.Button(sidebar_frame, text="📥 Export to CSV", command=self.export_active_data_to_csv).pack(side="top", fill="x", pady=3)
+        ttk.Button(sidebar_frame, text="🗑️ Clear Canvas", command=self.clear_canvas).pack(side="top", fill="x", pady=3)
         
-        ttk.Label(control_frame, text=VERSION_TAG, font=("Helvetica", 8), foreground="#888888").pack(side="right", padx=5)
+        ttk.Separator(sidebar_frame, orient="horizontal").pack(side="top", fill="x", pady=10)
         
-        # --- Middle Layout Display Configuration Split ---
+        # Status Active Profiles Badge
+        self.status_var = tk.StringVar(value="Active profiles loaded: 0")
+        lbl_status = ttk.Label(sidebar_frame, textvariable=self.status_var, font=("Helvetica", 9, "bold"), background="#cff4fc", foreground="#055160", relief="solid", borderwidth=1, padding=6, anchor="center")
+        lbl_status.pack(side="top", fill="x", pady=2)
+        
+        # --- Checkbox Selector Panel (Moved BELOW Active Profiles Status) ---
+        self.panel_fit_targets = ttk.LabelFrame(sidebar_frame, text=" 🎯 Targets for Fitting ", padding=(8, 6))
+        self.panel_fit_targets.pack(side="top", fill="x", pady=8)
+        self.lbl_no_targets = ttk.Label(self.panel_fit_targets, text="No Scans Loaded", font=("Helvetica", 9, "italic"), foreground="#888888")
+        self.lbl_no_targets.pack(side="top", anchor="w", padx=4)
+        
+        # Version tag pinned to the absolute sidebar bottom
+        lbl_version = ttk.Label(sidebar_frame, text=VERSION_TAG, font=("Helvetica", 8), foreground="#888888")
+        lbl_version.pack(side="bottom", pady=2)
+        
+        # --- Main Viewport Container Panel (Right side) ---
         self.main_container = ttk.PanedWindow(root, orient="vertical")
-        self.main_container.pack(fill="both", expand=True, padx=10, pady=5)
+        self.main_container.pack(side="right", fill="both", expand=True, padx=10, pady=5)
         
         self.plot_frame = ttk.Frame(self.main_container, padding=5, relief="groove")
         self.main_container.add(self.plot_frame, weight=3)
@@ -192,20 +205,22 @@ class XRDPlotterGUI:
         self.cursor_var = tk.StringVar(value="Cursor Position: 2θ = --")
         ttk.Label(self.plot_frame, textvariable=self.cursor_var, font=("Consolas", 10, "bold"), background="#e9ecef", relief="solid", borderwidth=1, padding=5).pack(side="bottom", fill="x", pady=(4, 0))
 
-        # --- Bottom Panel Table Dashboard ---
+        # --- Bottom Results Dashboard ---
         self.table_frame = ttk.LabelFrame(self.main_container, text=" 📊 Peak Optimization Results Dashboard ", padding=5)
         self.main_container.add(self.table_frame, weight=1)
         
-        self.result_table = ttk.Treeview(self.table_frame, columns=("Peak", "Center", "Amplitude", "FWHM"), show="headings", height=5)
+        self.result_table = ttk.Treeview(self.table_frame, columns=("Dataset", "Peak", "Center", "Amplitude", "FWHM"), show="headings", height=5)
+        self.result_table.heading("Dataset", text="Dataset / Sample")
         self.result_table.heading("Peak", text="Peak Identity Index")
         self.result_table.heading("Center", text="Center position (2θ°)")
         self.result_table.heading("Amplitude", text="Peak Amplitude (counts)")
         self.result_table.heading("FWHM", text="FWHM Line Width (deg)")
         
-        self.result_table.column("Peak", width=120, anchor="center")
-        self.result_table.column("Center", width=180, anchor="center")
-        self.result_table.column("Amplitude", width=180, anchor="center")
-        self.result_table.column("FWHM", width=180, anchor="center")
+        self.result_table.column("Dataset", width=160, anchor="w")
+        self.result_table.column("Peak", width=110, anchor="center")
+        self.result_table.column("Center", width=130, anchor="center")
+        self.result_table.column("Amplitude", width=130, anchor="center")
+        self.result_table.column("FWHM", width=130, anchor="center")
         self.result_table.pack(fill="both", expand=True)
 
         self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
@@ -217,6 +232,31 @@ class XRDPlotterGUI:
         self.ax.set_title("XRD Diffraction Pattern Analysis", fontsize=11, fontweight='bold', pad=8)
         self.ax.grid(True, linestyle="--", alpha=0.5)
 
+    def refresh_checkbox_targets_panel(self):
+        """Rebuilds the checklist collection row to track active patterns vertically."""
+        for child in self.panel_fit_targets.winfo_children():
+            child.destroy()
+            
+        raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
+        
+        if not raw_keys:
+            self.lbl_no_targets = ttk.Label(self.panel_fit_targets, text="No Scans Loaded", font=("Helvetica", 9, "italic"), foreground="#888888")
+            self.lbl_no_targets.pack(side="top", anchor="w", padx=4)
+            return
+
+        self.target_checkbox_vars = {k: v for k, v in self.target_checkbox_vars.items() if k in raw_keys}
+        
+        for key in raw_keys:
+            if key not in self.target_checkbox_vars:
+                self.target_checkbox_vars[key] = tk.BooleanVar(value=True)
+                
+            cb = ttk.Checkbutton(
+                self.panel_fit_targets, 
+                text=self.active_datasets[key]['label'], 
+                variable=self.target_checkbox_vars[key]
+            )
+            cb.pack(side="top", anchor="w", pady=2, padx=4)
+
     def toggle_fitting_mode(self):
         if not self.active_datasets:
             messagebox.showwarning("Execution Halted", "Load standard experimental datasets profiles before entering optimization modes.")
@@ -225,11 +265,9 @@ class XRDPlotterGUI:
         if self.fitting_mode_active:
             self.btn_fit_toggle.config(text="🎯 Fitting Mode: ACTIVE")
             self.btn_run_fit.config(state="normal")
-            self.status_var.set("Fitting Mode active. Right-click on the graph to map approximate peak center targets.")
         else:
             self.btn_fit_toggle.config(text="🎯 Peak Fitting: OFF")
             self.btn_run_fit.config(state="disabled")
-            self.status_var.set("Fitting Mode deactivated.")
 
     def on_mouse_move(self, event):
         if event.inaxes == self.ax and self.active_datasets:
@@ -252,21 +290,17 @@ class XRDPlotterGUI:
             x_guess = event.xdata
             self.peak_guesses.append(x_guess)
             
-            guess_line = self.ax.axvline(x_guess, color='#d63384', linestyle=':', linewidth=1.5, label="Peak Guess" if not self.guess_lines_artists else "")
+            guess_line = self.ax.axvline(x_guess, color='#d63384', linestyle=':', linewidth=1.5)
             self.guess_lines_artists.append(guess_line)
             self.canvas.draw_idle()
-            self.status_var.set(f"Added peak approximation target coordinate entry near 2θ = {x_guess:.3f}°.")
 
     def subtract_background_profile(self):
-        """Executes automated iterative SNIP background stripping across loaded patterns."""
         if not self.active_datasets:
             messagebox.showwarning("No Data", "No active datasets found on canvas to apply baseline corrections.")
             return
             
         data_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
         if not data_keys: return
-
-        # Wipe mathematical fits if a parameter changes baselines background profile
         self.clear_fitted_artists()
 
         for file_path in data_keys:
@@ -277,7 +311,6 @@ class XRDPlotterGUI:
             bg = snip_background(intensities, iterations=40)
             data['intensities'] = intensities - bg
 
-        # Redraw core spectra signals tracks
         self.ax.clear()
         self.configure_axis_labels()
         self.cursor_line = None  
@@ -289,55 +322,73 @@ class XRDPlotterGUI:
         self.ax.relim()
         self.ax.autoscale_view()
         self.canvas.draw()
-        self.status_var.set("Baseline background successfully stripped across profiles using the SNIP filter algorithm.")
+        self.status_var.set(f"Active profiles loaded: {len(data_keys)}")
 
     def run_peak_optimization(self):
         if not self.peak_guesses:
             messagebox.showwarning("Missing Inputs", "Right-click on the graph canvas to specify peak center guesses first.")
             return
             
-        first_key = list(self.active_datasets.keys())[0]
-        x_data = self.active_datasets[first_key]['angles']
-        y_data = self.active_datasets[first_key]['intensities']
-        
-        for line in self.fitted_curves_artists: line.remove()
+        keys_to_fit = [k for k, v in self.target_checkbox_vars.items() if v.get() and k in self.active_datasets]
+            
+        if not keys_to_fit:
+            messagebox.showwarning("Selection Missing", "Please select at least one active sample track checkbox in the dashboard to execute fitting.")
+            return
+            
+        for line in self.fitted_curves_artists:
+            try: line.remove()
+            except Exception: pass
         self.fitted_curves_artists.clear()
+        
+        for k in list(self.active_datasets.keys()):
+            if k.startswith("__fit_"): del self.active_datasets[k]
         for row in self.result_table.get_children(): self.result_table.delete(row)
 
-        p0 = []; bounds_min = []; bounds_max = []
-        for g_x in self.peak_guesses:
-            idx = np.argmin(np.abs(x_data - g_x))
-            amp_guess = float(y_data[idx])
-            p0.extend([amp_guess, g_x, 0.08])
-            bounds_min.extend([0.0, g_x - 0.4, 0.005])
-            bounds_max.extend([float(np.max(y_data)) * 2.0, g_x + 0.4, 1.5])
+        fit_errors = []
+        
+        for key in keys_to_fit:
+            x_data = self.active_datasets[key]['angles']
+            y_data = self.active_datasets[key]['intensities']
+            label_base = self.active_datasets[key]['label']
+            
+            p0 = []; bounds_min = []; bounds_max = []
+            for g_x in self.peak_guesses:
+                idx = np.argmin(np.abs(x_data - g_x))
+                amp_guess = float(y_data[idx])
+                p0.extend([amp_guess, g_x, 0.08])
+                bounds_min.extend([0.0, g_x - 0.4, 0.005])
+                bounds_max.extend([float(np.max(y_data)) * 2.0, g_x + 0.4, 1.5])
 
-        try:
-            p_opt, _ = curve_fit(multi_gaussian_composite, x_data, y_data, p0=p0, bounds=(bounds_min, bounds_max))
-            
-            y_fit_total = multi_gaussian_composite(x_data, *p_opt)
-            total_fit_line, = self.ax.plot(x_data, y_fit_total, color='black', linestyle='-', linewidth=2.2, label="Overall Fit Line")
-            self.fitted_curves_artists.append(total_fit_line)
-            
-            peak_counter = 1
-            for i in range(0, len(p_opt), 3):
-                amp, cent, wid = p_opt[i], p_opt[i+1], p_opt[i+2]
-                y_peak = gaussian_profile(x_data, amp, cent, wid)
+            try:
+                p_opt, _ = curve_fit(multi_gaussian_composite, x_data, y_data, p0=p0, bounds=(bounds_min, bounds_max))
                 
-                pk_line, = self.ax.plot(x_data, y_peak, linestyle='--', linewidth=1.2, label=f"Peak {peak_counter} Trace")
-                self.fitted_curves_artists.append(pk_line)
+                y_fit_total = multi_gaussian_composite(x_data, *p_opt)
+                total_fit_line, = self.ax.plot(x_data, y_fit_total, linestyle='-', linewidth=2.2, label=f"{label_base} Fit Total")
+                self.fitted_curves_artists.append(total_fit_line)
                 
-                fwhm = 2.0 * np.sqrt(np.log(2)) * wid
-                self.result_table.insert("", "end", values=(f"Peak {peak_counter}", f"{cent:.4f}°", f"{amp:.1f}", f"{fwhm:.4f}°"))
-                self.active_datasets[f"__fit_peak_{peak_counter}"] = {'angles': x_data, 'intensities': y_peak, 'label': f"Peak {peak_counter} Fit Result"}
-                peak_counter += 1
+                peak_counter = 1
+                for i in range(0, len(p_opt), 3):
+                    amp, cent, wid = p_opt[i], p_opt[i+1], p_opt[i+2]
+                    y_peak = gaussian_profile(x_data, amp, cent, wid)
+                    
+                    pk_line, = self.ax.plot(x_data, y_peak, linestyle='--', linewidth=1.2, label=f"{label_base} Pk {peak_counter}")
+                    self.fitted_curves_artists.append(pk_line)
+                    
+                    fwhm = 2.0 * np.sqrt(np.log(2)) * wid
+                    self.result_table.insert("", "end", values=(label_base, f"Peak {peak_counter}", f"{cent:.4f}°", f"{amp:.1f}", f"{fwhm:.4f}°"))
+                    
+                    self.active_datasets[f"__fit_peak_{peak_counter}_{key}"] = {'angles': x_data, 'intensities': y_peak, 'label': f"{label_base} Pk {peak_counter} Fit"}
+                    peak_counter += 1
+                    
+                self.active_datasets[f"__fit_overall_composite_{key}"] = {'angles': x_data, 'intensities': y_fit_total, 'label': f"{label_base} Overall Fit"}
+            except Exception as e:
+                fit_errors.append(f"{label_base}: {e}")
                 
-            self.active_datasets["__fit_overall_composite"] = {'angles': x_data, 'intensities': y_fit_total, 'label': "Overall Deconvoluted Curve Fit"}
-            self.ax.legend(loc="upper right", frameon=True, fontsize=8)
-            self.canvas.draw()
-            self.status_var.set("Nonlinear mathematical optimization routine completed successfully.")
-        except Exception as e:
-            messagebox.showerror("Optimization Convergence Exception", f"Optimization routine failed to converge: {e}")
+        self.ax.legend(loc="upper right", frameon=True, fontsize=8)
+        self.canvas.draw()
+        
+        if fit_errors:
+            messagebox.showerror("Fitting Exceptions Encountered", "Some calculation loops failed to converge:\n\n" + "\n".join(fit_errors))
 
     def select_and_plot_files(self):
         files = filedialog.askopenfilenames(
@@ -361,8 +412,11 @@ class XRDPlotterGUI:
                 
         if loaded_count > 0:
             self.ax.legend(loc="upper right", frameon=True, fontsize=9)
+            self.refresh_checkbox_targets_panel()
             self.canvas.draw()
-            self.status_var.set(f"Added {loaded_count} patterns. Active datasets array total count: {len(self.active_datasets)}.")
+            
+            raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
+            self.status_var.set(f"Active profiles loaded: {len(raw_keys)}")
         if error_logs:
             messagebox.showwarning("Import Errors", "\n".join(error_logs))
 
@@ -391,8 +445,11 @@ class XRDPlotterGUI:
         self.ax.set_xlim(xmin, xmax)  
         self.ax.relim()
         self.ax.autoscale_view(scalex=False, scaley=True) 
+        self.refresh_checkbox_targets_panel()
         self.canvas.draw()
-        self.status_var.set(f"Permanently sliced spectra arrays to bounds: {xmin:.2f}° to {xmax:.2f}°.")
+        
+        raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
+        self.status_var.set(f"Active profiles loaded: {len(raw_keys)}")
 
     def export_active_data_to_csv(self):
         if not self.active_datasets: return
@@ -407,9 +464,9 @@ class XRDPlotterGUI:
                 pd.DataFrame({'Angle': data['angles'], 'Intensity': data['intensities']}).to_csv(out_path, index=False)
                 success_count += 1
             except Exception as e:
-                print(f"Exception tracking file save outputs array indices block: {e}")
+                print(f"Exception tracking file save: {e}")
                 
-        messagebox.showinfo("Export Cycle Terminated", f"Exported {success_count} structural configuration data profiles safely into:\n{out_dir}")
+        messagebox.showinfo("Export Cycle Terminated", f"Exported {success_count} data profiles safely into:\n{out_dir}")
 
     def clear_fitted_artists(self):
         for line in self.fitted_curves_artists: line.remove()
@@ -425,11 +482,12 @@ class XRDPlotterGUI:
         self.cursor_line = None  
         self.ax.clear()
         self.configure_axis_labels()
+        self.refresh_checkbox_targets_panel()
         self.canvas.draw()
         self.fitting_mode_active = False
         self.btn_fit_toggle.config(text="🎯 Peak Fitting: OFF")
         self.btn_run_fit.config(state="disabled")
-        self.status_var.set("Canvas matrix dropped. System ready to receive new scan files array.")
+        self.status_var.set("Active profiles loaded: 0")
         self.cursor_var.set("Cursor Position: 2θ = --")
 
 
