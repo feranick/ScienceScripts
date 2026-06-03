@@ -32,6 +32,9 @@
         
         .btn-bg-sub { background-color: #0dcaf0; color: #212529; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
         .btn-bg-sub:hover { background-color: #0bacd0; }
+        .btn-normalize { background-color: #0d6efd; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
+        .btn-normalize:hover { background-color: #0b5ed7; }
+        .btn-normalize.active { background-color: #ffd43b; color: #212529; }
         .btn-fit-toggle { background-color: #6f42c1; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
         .btn-fit-toggle.active { background-color: #ffd43b; color: #212529; }
         .btn-run-fit { background-color: #fd7e14; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
@@ -73,6 +76,7 @@
         
         <button class="btn-crop" onclick="cropToView()">✂️ Crop to View</button>
         <button class="btn-bg-sub" onclick="subtractBackgroundFromPlotted()">✨ Subtract Background</button>
+        <button id="btn-normalize-toggle" class="btn-normalize" onclick="toggleNormalizationMode()">⚖️ Normalize to Peak</button>
         <button id="btn-fit-toggle" class="btn-fit-toggle" onclick="toggleFittingMode()">🎯 Peak Fitting: OFF</button>
         <button id="btn-run-fit" class="btn-run-fit" onclick="executePeakOptimization()" style="display: none;">⚡ Run Optimised Fit</button>
         <button class="btn-export" onclick="exportPlottedToCSV()">📥 Export Plotted to CSV</button>
@@ -120,10 +124,11 @@
         // ==========================================
         // GLOBAL CONFIGURATIONS & CONSTANTS
         // ==========================================
-        const VERSION_TAG = "v2026.06.03.1";
+        const VERSION_TAG = "v2026.06.03.2";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
+        let normalizationModeActive = false;
         let peakGuessesX = [];
         let currentMouseHoverX = null;
 
@@ -218,6 +223,24 @@
             updateChartCanvas();
         }
 
+        function toggleNormalizationMode() {
+            if (Object.keys(persistentDatasets).length === 0) {
+                alert("Load standard target profiles into data memory spaces before normalizing.");
+                return;
+            }
+            normalizationModeActive = !normalizationModeActive;
+            const btn = document.getElementById('btn-normalize-toggle');
+            
+            if (normalizationModeActive) {
+                if (fittingModeActive) toggleFittingMode(); 
+                btn.innerText = "⚖️ Mode: SELECT PEAK";
+                btn.classList.add('active');
+            } else {
+                btn.innerText = "⚖️ Normalize to Peak";
+                btn.classList.remove('active');
+            }
+        }
+
         function toggleFittingMode() {
             if (Object.keys(persistentDatasets).length === 0) {
                 alert("Load standard target profiles into data memory spaces before optimizing models.");
@@ -228,6 +251,7 @@
             const runBtn = document.getElementById('btn-run-fit');
             
             if (fittingModeActive) {
+                if (normalizationModeActive) toggleNormalizationMode();
                 btn.innerText = "🎯 Fitting Mode: ACTIVE";
                 btn.classList.add('active');
                 runBtn.style.display = "block";
@@ -317,7 +341,7 @@
             }
             
             Object.keys(persistentDatasets).forEach(k => { if(k.startsWith("__fit_")) delete persistentDatasets[k]; });
-            const tableBody = document.querySelector("#results-matrix-sheet tbody");
+            const tableBody = document.querySelector("#results-dashboard tbody");
             tableBody.innerHTML = ""; 
             
             keysToFit.forEach(key => {
@@ -438,12 +462,9 @@
                 const node = positionsEl[i];
                 if (node.getAttribute("axis") === "2Theta") {
                     const listPositionEl = node.getElementsByTagName("listPosition")[0];
-                    if (listPositionEl && listPositionEl.textContent) {
-                        angles = listPositionEl.textContent.trim().split(/\s+/).map(Number);
-                    } else {
-                        // FIXED: Reverted back from global root xmlDoc selector to localized node pointer relative to axis boundaries
-                        const startEl = node.getElementsByTagName("startPosition")[0]; 
-                        const endEl = node.getElementsByTagName("endPosition")[0];
+                    if (listPositionEl && listPositionEl.textContent) angles = listPositionEl.textContent.trim().split(/\s+/).map(Number);
+                    else {
+                        const startEl = node.getElementsByTagName("startPosition")[0]; const endEl = node.getElementsByTagName("endPosition")[0];
                         if (startEl && endEl) angles = linspace(parseFloat(startEl.textContent), parseFloat(endEl.textContent), intensities.length);
                     }
                     break;
@@ -496,7 +517,7 @@
                     showspikes: true, spikemode: 'across', spikethickness: 1.0,
                     spikedash: tooltipEnabled ? 'solid' : 'dash', spikecolor: tooltipEnabled ? '#495057' : '#dc3545'  
                 },
-                yaxis: { title: 'Intensity (counts)', showgrid: true, gridcolor: '#e9ecef', ticks: 'outside' },
+                yaxis: { title: 'Intensity (Normalized or Counts)', showgrid: true, gridcolor: '#e9ecef', ticks: 'outside' },
                 hovermode: tooltipEnabled ? 'x unified' : 'x',
                 template: 'plotly_white',
                 legend: { orientation: 'h', yanchor: 'bottom', y: 1.02, xanchor: 'right', x: 1 },
@@ -514,6 +535,46 @@
             });
             chartDiv.on('plotly_unhover', function() {
                 currentMouseHoverX = null; document.getElementById('cursor-bar').innerHTML = `Cursor Position: 2θ = --`;
+            });
+            
+            // Connected interactive click actions hook directly into the Peak Normalization sub-routines
+            chartDiv.on('plotly_click', function(plotlyData) {
+                if (normalizationModeActive && plotlyData && plotlyData.points && plotlyData.points.length > 0) {
+                    const xClick = plotlyData.points[0].x;
+                    const windowSize = 0.3; // Search threshold radius in degrees
+                    const datasetKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_"));
+                    let normalizedAny = false;
+                    
+                    datasetKeys.forEach(key => {
+                        const dataset = persistentDatasets[key];
+                        let localPeakMax = -Infinity;
+                        
+                        for (let i = 0; i < dataset.angles.length; i++) {
+                            if (dataset.angles[i] >= xClick - windowSize && dataset.angles[i] <= xClick + windowSize) {
+                                if (dataset.intensities[i] > localPeakMax) {
+                                    localPeakMax = dataset.intensities[i];
+                                }
+                            }
+                        }
+                        
+                        if (localPeakMax > 0 && localPeakMax !== -Infinity) {
+                            for (let i = 0; i < dataset.intensities.length; i++) {
+                                dataset.intensities[i] = dataset.intensities[i] / localPeakMax;
+                            }
+                            normalizedAny = true;
+                        }
+                    });
+                    
+                    if (normalizedAny) {
+                        clearFittedModelsCache();
+                        updateChartCanvas();
+                    }
+                    
+                    normalizationModeActive = false;
+                    const btn = document.getElementById('btn-normalize-toggle');
+                    btn.innerText = "⚖️ Normalize to Peak";
+                    btn.classList.remove('active');
+                }
             });
         }
 
@@ -589,9 +650,11 @@
         }
 
         function clearCanvas() {
-            persistentDatasets = {}; clearFittedModelsCache(); fittingModeActive = false;
+            persistentDatasets = {}; clearFittedModelsCache(); fittingModeActive = false; normalizationModeActive = false;
             document.getElementById('btn-fit-toggle').innerText = "🎯 Peak Fitting: OFF";
             document.getElementById('btn-fit-toggle').classList.remove('active');
+            document.getElementById('btn-normalize-toggle').innerText = "⚖️ Normalize to Peak";
+            document.getElementById('btn-normalize-toggle').classList.remove('active');
             document.getElementById('btn-run-fit').style.display = "none";
             document.getElementById('cursor-bar').innerHTML = `Cursor Position: 2θ = --`;
             refreshCheckboxTargetsPanel(); updateChartCanvas();

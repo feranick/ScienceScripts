@@ -13,7 +13,7 @@ from scipy.optimize import curve_fit
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.06.03.1"
+VERSION_TAG = "v2026.06.03.2"
 
 # ==========================================
 # MATHEMATICAL FUNCTION CODES
@@ -144,6 +144,7 @@ class XRDPlotterGUI:
         self.target_checkbox_vars = {} 
         
         self.fitting_mode_active = False
+        self.normalization_mode_active = False
         self.cursor_line = None  
         
         # --- Left Sidebar Panel Layout ---
@@ -155,6 +156,10 @@ class XRDPlotterGUI:
         ttk.Button(sidebar_frame, text="📁 Select File(s)", command=self.select_and_plot_files).pack(side="top", fill="x", pady=3)
         ttk.Button(sidebar_frame, text="✂️ Crop to View", command=self.crop_to_current_view).pack(side="top", fill="x", pady=3)
         ttk.Button(sidebar_frame, text="✨ Subtract Background", command=self.subtract_background_profile).pack(side="top", fill="x", pady=3)
+        
+        # Added Normalize to Peak UI Button Component
+        self.btn_normalize_toggle = ttk.Button(sidebar_frame, text="⚖️ Normalize to Peak", command=self.toggle_normalization_mode)
+        self.btn_normalize_toggle.pack(side="top", fill="x", pady=3)
         
         self.btn_fit_toggle = ttk.Button(sidebar_frame, text="🎯 Peak Fitting: OFF", command=self.toggle_fitting_mode)
         self.btn_fit_toggle.pack(side="top", fill="x", pady=3)
@@ -227,7 +232,7 @@ class XRDPlotterGUI:
 
     def configure_axis_labels(self):
         self.ax.set_xlabel(r"2$\theta$ Angle (degrees)", fontsize=10, fontweight='bold')
-        self.ax.set_ylabel("Intensity (counts)", fontsize=10, fontweight='bold')
+        self.ax.set_ylabel("Intensity (Normalized or Counts)", fontsize=10, fontweight='bold')
         self.ax.set_title("XRD Diffraction Pattern Analysis", fontsize=11, fontweight='bold', pad=8)
         self.ax.grid(True, linestyle="--", alpha=0.5)
 
@@ -272,12 +277,10 @@ class XRDPlotterGUI:
         if key_to_remove in self.active_datasets:
             del self.active_datasets[key_to_remove]
             
-        # Drop associated curves fit elements to avoid visual dangling lines artefacts
         for k in list(self.active_datasets.keys()):
             if k.endswith(f"_{key_to_remove}"):
                 del self.active_datasets[k]
                 
-        # Completely re-render active array layers
         self.ax.clear()
         self.configure_axis_labels()
         self.cursor_line = None  
@@ -301,12 +304,28 @@ class XRDPlotterGUI:
         raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
         self.status_var.set(f"Active profiles loaded: {len(raw_keys)}")
 
+    def toggle_normalization_mode(self):
+        """Toggles the interactive mouse click normalization process."""
+        if not self.active_datasets:
+            messagebox.showwarning("Execution Halted", "Load standard experimental datasets profiles before entering normalization modes.")
+            return
+        self.normalization_mode_active = not self.normalization_mode_active
+        if self.normalization_mode_active:
+            if self.fitting_mode_active:
+                self.toggle_fitting_mode()
+            self.btn_normalize_toggle.config(text="⚖️ Mode: SELECT PEAK")
+            self.status_var.set("Normalization Mode active. Left-click near a peak to scale all active tracks.")
+        else:
+            self.btn_normalize_toggle.config(text="⚖️ Normalize to Peak")
+
     def toggle_fitting_mode(self):
         if not self.active_datasets:
             messagebox.showwarning("Execution Halted", "Load standard experimental datasets profiles before entering optimization modes.")
             return
         self.fitting_mode_active = not self.fitting_mode_active
         if self.fitting_mode_active:
+            if self.normalization_mode_active:
+                self.toggle_normalization_mode()
             self.btn_fit_toggle.config(text="🎯 Fitting Mode: ACTIVE")
             self.btn_run_fit.config(state="normal")
         else:
@@ -330,13 +349,51 @@ class XRDPlotterGUI:
             self.cursor_var.set("Cursor Position: 2θ = --")
 
     def on_canvas_click(self, event):
-        # FIXED: Changed '&&' typo to native python logical operator 'and'
-        if self.fitting_mode_active and event.inaxes == self.ax and event.button == 3:
-            x_guess = event.xdata
-            self.peak_guesses.append(x_guess)
-            guess_line = self.ax.axvline(x_guess, color='#d63384', linestyle=':', linewidth=1.5)
-            self.guess_lines_artists.append(guess_line)
-            self.canvas.draw_idle()
+        if event.inaxes == self.ax:
+            # Handle Normalization Mode Click Event (Left Click)
+            if self.normalization_mode_active and event.button == 1:
+                x_click = event.xdata
+                window_span = 0.3  # Search radius window in degrees
+                data_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
+                normalized_any = False
+                
+                for key in data_keys:
+                    angles = self.active_datasets[key]['angles']
+                    intensities = self.active_datasets[key]['intensities']
+                    
+                    mask = (angles >= x_click - window_span) & (angles <= x_click + window_span)
+                    if np.any(mask):
+                        local_peak_max = np.max(intensities[mask])
+                        if local_peak_max > 0:
+                            self.active_datasets[key]['intensities'] = intensities / local_peak_max
+                            normalized_any = True
+                            
+                if normalized_any:
+                    self.clear_fitted_artists()
+                    self.ax.clear()
+                    self.configure_axis_labels()
+                    self.cursor_line = None
+                    
+                    for file_path, data in self.active_datasets.items():
+                        self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
+                            
+                    self.ax.legend(loc="upper right", frameon=True, fontsize=9)
+                    self.ax.relim()
+                    self.ax.autoscale_view()
+                    self.canvas.draw()
+                    self.status_var.set(f"Profiles successfully normalized to peak near 2θ = {x_click:.3f}°.")
+                    
+                self.normalization_mode_active = False
+                self.btn_normalize_toggle.config(text="⚖️ Normalize to Peak")
+                return
+
+            # Handle Fitting Mode Click Event (Right Click)
+            elif self.fitting_mode_active and event.button == 3:
+                x_guess = event.xdata
+                self.peak_guesses.append(x_guess)
+                guess_line = self.ax.axvline(x_guess, color='#d63384', linestyle=':', linewidth=1.5)
+                self.guess_lines_artists.append(guess_line)
+                self.canvas.draw_idle()
 
     def subtract_background_profile(self):
         if not self.active_datasets:
@@ -536,7 +593,9 @@ class XRDPlotterGUI:
         self.refresh_checkbox_targets_panel()
         self.canvas.draw()
         self.fitting_mode_active = False
+        self.normalization_mode_active = False
         self.btn_fit_toggle.config(text="🎯 Peak Fitting: OFF")
+        self.btn_normalize_toggle.config(text="⚖️ Normalize to Peak")
         self.btn_run_fit.config(state="disabled")
         self.status_var.set("Active profiles loaded: 0")
         self.cursor_var.set("Cursor Position: 2θ = --")
