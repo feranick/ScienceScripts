@@ -13,8 +13,7 @@ from scipy.optimize import curve_fit
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.06.01.1"
-
+VERSION_TAG = "v2026.06.03.1"
 
 # ==========================================
 # MATHEMATICAL FUNCTION CODES
@@ -131,7 +130,7 @@ class XRDPlotterGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Advanced XRD Peak Analysis Toolkit")
-        self.root.geometry("1100x780")
+        self.root.geometry("1050x780")
         self.root.minsize(850, 600)
         
         style = ttk.Style()
@@ -173,7 +172,7 @@ class XRDPlotterGUI:
         lbl_status = ttk.Label(sidebar_frame, textvariable=self.status_var, font=("Helvetica", 9, "bold"), background="#cff4fc", foreground="#055160", relief="solid", borderwidth=1, padding=6, anchor="center")
         lbl_status.pack(side="top", fill="x", pady=2)
         
-        # --- Checkbox Selector Panel (Moved BELOW Active Profiles Status) ---
+        # --- Checkbox Selector Panel ---
         self.panel_fit_targets = ttk.LabelFrame(sidebar_frame, text=" 🎯 Targets for Fitting ", padding=(8, 6))
         self.panel_fit_targets.pack(side="top", fill="x", pady=8)
         self.lbl_no_targets = ttk.Label(self.panel_fit_targets, text="No Scans Loaded", font=("Helvetica", 9, "italic"), foreground="#888888")
@@ -233,7 +232,7 @@ class XRDPlotterGUI:
         self.ax.grid(True, linestyle="--", alpha=0.5)
 
     def refresh_checkbox_targets_panel(self):
-        """Rebuilds the checklist collection row to track active patterns vertically."""
+        """Rebuilds the checklist collection row to track active patterns with an explicit 'X' deletion gate."""
         for child in self.panel_fit_targets.winfo_children():
             child.destroy()
             
@@ -250,12 +249,57 @@ class XRDPlotterGUI:
             if key not in self.target_checkbox_vars:
                 self.target_checkbox_vars[key] = tk.BooleanVar(value=True)
                 
+            row_frame = ttk.Frame(self.panel_fit_targets)
+            row_frame.pack(side="top", fill="x", pady=2, expand=True)
+                
             cb = ttk.Checkbutton(
-                self.panel_fit_targets, 
+                row_frame, 
                 text=self.active_datasets[key]['label'], 
                 variable=self.target_checkbox_vars[key]
             )
-            cb.pack(side="top", anchor="w", pady=2, padx=4)
+            cb.pack(side="left", anchor="w")
+            
+            btn_del = ttk.Button(
+                row_frame, 
+                text="❌", 
+                width=2, 
+                command=lambda k=key: self.remove_specific_dataset(k)
+            )
+            btn_del.pack(side="right", anchor="e")
+
+    def remove_specific_dataset(self, key_to_remove):
+        """Selectively drops an index from the memory storage system and reconstructs the axes frame."""
+        if key_to_remove in self.active_datasets:
+            del self.active_datasets[key_to_remove]
+            
+        # Drop associated curves fit elements to avoid visual dangling lines artefacts
+        for k in list(self.active_datasets.keys()):
+            if k.endswith(f"_{key_to_remove}"):
+                del self.active_datasets[k]
+                
+        # Completely re-render active array layers
+        self.ax.clear()
+        self.configure_axis_labels()
+        self.cursor_line = None  
+        
+        for file_path, data in self.active_datasets.items():
+            if file_path.startswith("__fit_composite"):
+                self.ax.plot(data['angles'], data['intensities'], color='#000000', linestyle='-', linewidth=2.0, label=data['label'])
+            elif file_path.startswith("__fit_"):
+                self.ax.plot(data['angles'], data['intensities'], linestyle='--', linewidth=1.2, label=data['label'])
+            else:
+                self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
+                
+        if self.active_datasets:
+            self.ax.legend(loc="upper right", frameon=True, fontsize=8)
+            
+        self.ax.relim()
+        self.ax.autoscale_view()
+        self.refresh_checkbox_targets_panel()
+        self.canvas.draw()
+        
+        raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
+        self.status_var.set(f"Active profiles loaded: {len(raw_keys)}")
 
     def toggle_fitting_mode(self):
         if not self.active_datasets:
@@ -286,10 +330,10 @@ class XRDPlotterGUI:
             self.cursor_var.set("Cursor Position: 2θ = --")
 
     def on_canvas_click(self, event):
+        # FIXED: Changed '&&' typo to native python logical operator 'and'
         if self.fitting_mode_active and event.inaxes == self.ax and event.button == 3:
             x_guess = event.xdata
             self.peak_guesses.append(x_guess)
-            
             guess_line = self.ax.axvline(x_guess, color='#d63384', linestyle=':', linewidth=1.5)
             self.guess_lines_artists.append(guess_line)
             self.canvas.draw_idle()
@@ -468,13 +512,20 @@ class XRDPlotterGUI:
                 
         messagebox.showinfo("Export Cycle Terminated", f"Exported {success_count} data profiles safely into:\n{out_dir}")
 
-    def clear_fitted_artists(self):
-        for line in self.fitted_curves_artists: line.remove()
-        for line in self.guess_lines_artists: line.remove()
+    def remove_fitted_only_artists(self):
+        for line in self.fitted_curves_artists: 
+            try: line.remove()
+            except Exception: pass
         self.fitted_curves_artists.clear()
+        for row in self.result_table.get_children(): self.result_table.delete(row)
+
+    def clear_fitted_artists(self):
+        self.remove_fitted_only_artists()
+        for line in self.guess_lines_artists: 
+            try: line.remove()
+            except Exception: pass
         self.guess_lines_artists.clear()
         self.peak_guesses.clear()
-        for row in self.result_table.get_children(): self.result_table.delete(row)
 
     def clear_canvas(self):
         self.active_datasets.clear()

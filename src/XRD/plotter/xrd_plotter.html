@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Web XRD Pattern Visualizer & Peak Fitting Tool</title>
-    <!-- Smart Fallback Mirror Setup for Plotly.js to safeguard lab internet drops -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.24.1/plotly.min.js"></script>
     <script>
         if (typeof Plotly === 'undefined') {
@@ -86,10 +85,9 @@
         
         <div class="status-badge" id="status-display">Active profiles loaded: 0</div>
 
-        <!-- Checkbox Selector Panel (Moved BELOW Active Profiles Loaded) -->
         <div class="checkbox-container" style="flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 5px; width: 100%;">
             <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">🎯 Targets for Fitting:</label>
-            <div id="fit-targets-panel" style="width: 100%; max-height: 95px; overflow-y: auto; border: 1px solid #ced4da; border-radius: 6px; background-color: #fff; padding: 8px; box-sizing: border-box;">
+            <div id="fit-targets-panel" style="width: 100%; max-height: 110px; overflow-y: auto; border: 1px solid #ced4da; border-radius: 6px; background-color: #fff; padding: 8px; box-sizing: border-box;">
                 <div style="color: #888888; font-size: 0.85rem; font-style: italic;">No Scans Loaded</div>
             </div>
         </div>
@@ -119,7 +117,10 @@
     </div>
 
     <script>
-        const VERSION_TAG = "v2026.06.01.1";
+        // ==========================================
+        // GLOBAL CONFIGURATIONS & CONSTANTS
+        // ==========================================
+        const VERSION_TAG = "v2026.06.03.1";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -158,8 +159,15 @@
             
             datasetKeys.forEach(key => {
                 const wrapper = document.createElement('div');
-                wrapper.className = 'checkbox-container';
-                wrapper.style.margin = '3px 0';
+                wrapper.style.display = 'flex';
+                wrapper.style.alignItems = 'center';
+                wrapper.style.justifyContent = 'space-between';
+                wrapper.style.width = '100%';
+                wrapper.style.margin = '4px 0';
+                
+                const leftDiv = document.createElement('div');
+                leftDiv.className = 'checkbox-container';
+                leftDiv.style.margin = '0';
                 
                 const cb = document.createElement('input');
                 cb.type = 'checkbox';
@@ -173,10 +181,41 @@
                 label.style.fontSize = '0.85rem';
                 label.style.cursor = 'pointer';
                 
-                wrapper.appendChild(cb);
-                wrapper.appendChild(label);
+                leftDiv.appendChild(cb);
+                leftDiv.appendChild(label);
+                
+                const delSpan = document.createElement('span');
+                delSpan.innerText = "❌";
+                delSpan.title = "Remove this scan trace";
+                delSpan.style.cursor = "pointer";
+                delSpan.style.fontSize = "0.82rem";
+                delSpan.style.marginLeft = "8px";
+                delSpan.onclick = function() { removeSpecificDataset(key); };
+                
+                wrapper.appendChild(leftDiv);
+                wrapper.appendChild(delSpan);
                 panel.appendChild(wrapper);
             });
+        }
+
+        function removeSpecificDataset(key) {
+            if (persistentDatasets[key]) {
+                delete persistentDatasets[key];
+            }
+            Object.keys(persistentDatasets).forEach(k => {
+                if (k.endsWith('_' + key)) {
+                    delete persistentDatasets[k];
+                }
+            });
+            
+            if (Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_")).length === 0) {
+                document.querySelector("#results-matrix-sheet tbody").innerHTML = "";
+                document.getElementById('results-dashboard').style.display = "none";
+                peakGuessesX = [];
+            }
+            
+            refreshCheckboxTargetsPanel();
+            updateChartCanvas();
         }
 
         function toggleFittingMode() {
@@ -399,9 +438,12 @@
                 const node = positionsEl[i];
                 if (node.getAttribute("axis") === "2Theta") {
                     const listPositionEl = node.getElementsByTagName("listPosition")[0];
-                    if (listPositionEl && listPositionEl.textContent) angles = listPositionEl.textContent.trim().split(/\s+/).map(Number);
-                    else {
-                        const startEl = xmlDoc.getElementsByTagName("startPosition")[0]; const endEl = xmlDoc.getElementsByTagName("endPosition")[0];
+                    if (listPositionEl && listPositionEl.textContent) {
+                        angles = listPositionEl.textContent.trim().split(/\s+/).map(Number);
+                    } else {
+                        // FIXED: Reverted back from global root xmlDoc selector to localized node pointer relative to axis boundaries
+                        const startEl = node.getElementsByTagName("startPosition")[0]; 
+                        const endEl = node.getElementsByTagName("endPosition")[0];
                         if (startEl && endEl) angles = linspace(parseFloat(startEl.textContent), parseFloat(endEl.textContent), intensities.length);
                     }
                     break;
