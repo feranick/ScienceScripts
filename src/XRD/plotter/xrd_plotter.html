@@ -7,7 +7,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.24.1/plotly.min.js"></script>
     <script>
         if (typeof Plotly === 'undefined') {
-            document.write('<script src="https://unpkg.com/plotly.js-dist@2.24.1/plotly.min.js"><\/script>');
+            document.write('<script src="https://unpkg.com/plotly.js-dist-min@2.24.1/plotly.min.js"><\/script>');
         }
     </script>
     <style>
@@ -140,7 +140,7 @@
         // ==========================================
         // GLOBAL CONFIGURATIONS & CONSTANTS
         // ==========================================
-        const VERSION_TAG = "v2026.06.09.2";
+        const VERSION_TAG = "v2026.06.09.3";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -148,6 +148,10 @@
         let peakGuessesX = [];
         let currentMouseHoverX = null;
         let historyStack = []; // Rolling snapshot stack database layer array
+        let chartInitialized = false;
+        let uiRevisionCounter = 0; // bump to reset zoom/pan; keep constant to preserve it across redraws
+
+        function bumpChartView() { uiRevisionCounter++; }
 
         window.onload = function() {
             document.getElementById('app-version-container').innerText = VERSION_TAG;
@@ -224,6 +228,7 @@
                 document.getElementById('btn-undo').disabled = true;
             }
             
+            bumpChartView();
             refreshCheckboxTargetsPanel();
             updateChartCanvas();
         }
@@ -290,8 +295,11 @@
             if (persistentDatasets[key]) {
                 delete persistentDatasets[key];
             }
+            // Only delete fit traces generated for THIS dataset (exact key patterns),
+            // never sibling datasets whose filenames happen to end with "_<key>".
+            const peakPattern = new RegExp('^__fit_peak_\\d+_' + escapeRegExp(key) + '$');
             Object.keys(persistentDatasets).forEach(k => {
-                if (k.endsWith('_' + key)) {
+                if (k === '__fit_composite_' + key || peakPattern.test(k)) {
                     delete persistentDatasets[k];
                 }
             });
@@ -302,6 +310,7 @@
                 peakGuessesX = [];
             }
             
+            bumpChartView();
             refreshCheckboxTargetsPanel();
             updateChartCanvas();
         }
@@ -372,6 +381,7 @@
                 const bg = snipBackground(intensities, 40);
                 for (let i = 0; i < intensities.length; i++) dataset.intensities[i] = intensities[i] - bg[i];
             });
+            bumpChartView();
             updateChartCanvas();
         }
 
@@ -430,6 +440,7 @@
             tableBody.innerHTML = ""; 
             
             keysToFit.forEach(key => {
+                if (!persistentDatasets[key]) return; // stale checkbox guard
                 const rawX = persistentDatasets[key].angles; const rawY = persistentDatasets[key].intensities;
                 const labelBase = persistentDatasets[key].label;
                 
@@ -475,15 +486,19 @@
                         let val = amp * Math.exp(-Math.pow((rawX[i] - cent) / wid, 2));
                         yPeak.push(val); yFitTotal[i] += val;
                     }
-                    persistentDatasets[`__fit_peak_${peakCounter}_${key}`] = { angles: rawX, intensities: yPeak, label: `${labelBase} Pk ${peakCounter} Fit` };
+                    persistentDatasets[`__fit_peak_${peakCounter}_${key}`] = { angles: [...rawX], intensities: yPeak, label: `${labelBase} Pk ${peakCounter} Fit` };
                     
                     let fwhm = 2.0 * Math.sqrt(Math.LN2) * wid;
                     let tr = document.createElement('tr');
-                    tr.innerHTML = `<td>${labelBase}</td><td>Peak ${peakCounter}</td><td>${cent.toFixed(4)}°</td><td>${amp.toFixed(1)}</td><td>${fwhm.toFixed(4)}°</td>`;
+                    [labelBase, `Peak ${peakCounter}`, `${cent.toFixed(4)}°`, amp.toFixed(1), `${fwhm.toFixed(4)}°`].forEach(cellText => {
+                        const td = document.createElement('td');
+                        td.textContent = cellText;
+                        tr.appendChild(td);
+                    });
                     tableBody.appendChild(tr);
                     peakCounter++;
                 }
-                persistentDatasets[`__fit_composite_${key}`] = { angles: rawX, intensities: yFitTotal, label: `${labelBase} Total Fit` };
+                persistentDatasets[`__fit_composite_${key}`] = { angles: [...rawX], intensities: yFitTotal, label: `${labelBase} Total Fit` };
             });
             
             document.getElementById('results-dashboard').style.display = "block";
@@ -492,10 +507,22 @@
 
         function handleFileSelections(event) {
             const files = event.target.files; if (!files.length) return;
+            const totalFiles = files.length;
             let itemsProcessed = 0;
 
-            for (let i = 0; i < files.length; i++) {
-                const file = files[i]; if (persistentDatasets[file.name]) { itemsProcessed++; continue; }
+            function finalizeIfDone() {
+                itemsProcessed++;
+                if (itemsProcessed === totalFiles) {
+                    bumpChartView();
+                    refreshCheckboxTargetsPanel();
+                    updateChartCanvas();
+                    event.target.value = ''; // reset so re-selecting the same file fires onchange again
+                }
+            }
+
+            for (let i = 0; i < totalFiles; i++) {
+                const file = files[i];
+                if (persistentDatasets[file.name]) { finalizeIfDone(); continue; }
                 const reader = new FileReader(); const extension = file.name.split('.').pop().toLowerCase();
 
                 reader.onload = function(e) {
@@ -508,9 +535,11 @@
                             persistentDatasets[file.name] = parsedData;
                         }
                     } catch (err) { alert(`Parsing structural error: ${file.name}\nReason: ${err.message}`); }
-
-                    itemsProcessed++;
-                    if (itemsProcessed === files.length) { refreshCheckboxTargetsPanel(); updateChartCanvas(); event.target.value = ''; }
+                    finalizeIfDone();
+                };
+                reader.onerror = function() {
+                    alert(`File read error: ${file.name}`);
+                    finalizeIfDone();
                 };
                 reader.readAsText(file);
             }
@@ -521,7 +550,7 @@
             for (let i = 0; i < lines.length; i++) {
                 const line = lines[i];
                 if (line.includes('Sample identification')) { const parts = line.split(','); if (parts[1] && parts[1].trim()) sampleId = parts[1].trim(); }
-                if (line.includes('[Scan points]')) { dataStartIndex = i + 2; break; }
+                if (line.includes('[Scan points]')) { dataStartIndex = i + 1; break; }
             }
             if (dataStartIndex === -1 || dataStartIndex >= lines.length) throw new Error("Missing '[Scan points]' identifier tags.");
             const angles = []; const intensities = [];
@@ -568,6 +597,10 @@
             for (let i = 0; i < num; i++) arr.push(start + (i * step)); return arr;
         }
 
+        function escapeRegExp(str) {
+            return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        }
+
         function updateChartCanvas() {
             const datasetKeys = Object.keys(persistentDatasets);
             const dataKeysWithoutFits = datasetKeys.filter(k => !k.startsWith("__fit_"));
@@ -612,8 +645,28 @@
                 margin: { l: 60, r: 30, t: 80, b: 50 }, shapes: verticalShapes
             };
 
-            Plotly.newPlot('chart-container', traces, layout, { responsive: true, displaylogo: false });
+            drawChart(traces, layout);
+        }
 
+        // First draw uses newPlot and binds events once; subsequent draws use
+        // Plotly.react with a uirevision so zoom/pan survives in-place redraws
+        // (adding peak guesses, running fits) and only resets when bumpChartView()
+        // is called for structural changes (load/remove/crop/normalize/etc.).
+        function drawChart(traces, layout) {
+            layout.uirevision = uiRevisionCounter;
+            layout.xaxis.uirevision = uiRevisionCounter;
+            layout.yaxis.uirevision = uiRevisionCounter;
+            const config = { responsive: true, displaylogo: false };
+            if (!chartInitialized) {
+                Plotly.newPlot('chart-container', traces, layout, config);
+                bindChartEvents();
+                chartInitialized = true;
+            } else {
+                Plotly.react('chart-container', traces, layout, config);
+            }
+        }
+
+        function bindChartEvents() {
             const chartDiv = document.getElementById('chart-container');
             chartDiv.on('plotly_hover', function(data) {
                 if (data && data.points && data.points.length > 0) {
@@ -638,8 +691,10 @@
                     
                     const datasetKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_"));
                     
-                    // Threshold shield evaluation loops prevent signal explosion crashes
-                    let willNormalize = false;
+                    // Single pass per dataset: find the global max and the local-window max,
+                    // recording the divisor only when the local peak clears the 5% threshold
+                    // (prevents normalizing to noise / signal explosion).
+                    const divisors = {};
                     datasetKeys.forEach(key => {
                         const dataset = persistentDatasets[key];
                         let globalMax = -Infinity;
@@ -654,39 +709,22 @@
                             }
                         }
                         if (localPeakMax > 0 && localPeakMax !== -Infinity && localPeakMax >= (0.05 * globalMax)) {
-                            willNormalize = true;
+                            divisors[key] = localPeakMax;
                         }
                     });
                     
-                    if (willNormalize) {
+                    const keysToNormalize = Object.keys(divisors);
+                    if (keysToNormalize.length > 0) {
                         saveToHistory(); // Cache history state parameters block
-                    }
-                    
-                    let normalizedAny = false;
-                    datasetKeys.forEach(key => {
-                        const dataset = persistentDatasets[key];
-                        let globalMax = -Infinity;
-                        let localPeakMax = -Infinity;
-                        
-                        for (let i = 0; i < dataset.angles.length; i++) {
-                            if (dataset.intensities[i] > globalMax) globalMax = dataset.intensities[i];
-                            if (dataset.angles[i] >= xClick - windowSize && dataset.angles[i] <= xClick + windowSize) {
-                                if (dataset.intensities[i] > localPeakMax) {
-                                    localPeakMax = dataset.intensities[i];
-                                }
-                            }
-                        }
-                        
-                        if (localPeakMax > 0 && localPeakMax !== -Infinity && localPeakMax >= (0.05 * globalMax)) {
+                        keysToNormalize.forEach(key => {
+                            const dataset = persistentDatasets[key];
+                            const divisor = divisors[key];
                             for (let i = 0; i < dataset.intensities.length; i++) {
-                                dataset.intensities[i] = dataset.intensities[i] / localPeakMax;
+                                dataset.intensities[i] = dataset.intensities[i] / divisor;
                             }
-                            normalizedAny = true;
-                        }
-                    });
-                    
-                    if (normalizedAny) {
+                        });
                         clearFittedModelsCache();
+                        bumpChartView();
                         updateChartCanvas();
                     }
                     
@@ -704,12 +742,12 @@
                 yaxis: { title: 'Intensity (counts)', range: [0, 3000], gridcolor: '#f1f3f5' },
                 template: 'plotly_white',
                 annotations: [{
-                    text: "No active scans loaded. Use the control panel to browse files.",
+                    text: "<i>No active scans loaded. Use the control panel to browse files.</i>",
                     xref: "paper", yref: "paper", x: 0.5, y: 0.5, showarrow: false,
-                    font: { size: 14, color: "#6c757d", italic: true }
+                    font: { size: 14, color: "#6c757d" }
                 }], margin: { l: 60, r: 30, t: 40, b: 50 }
             };
-            Plotly.newPlot('chart-container', [], layout, { responsive: true, displaylogo: false });
+            drawChart([], layout);
         }
 
         function cropToView() {
@@ -733,6 +771,7 @@
                 }
                 dataset.angles = newAngles; dataset.intensities = newIntensities;
             });
+            bumpChartView();
             refreshCheckboxTargetsPanel(); updateChartCanvas();
             Plotly.relayout('chart-container', { 'xaxis.autorange': true, 'yaxis.autorange': true });
         }
@@ -755,7 +794,7 @@
 
                 const csvBlob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' }); const virtualUrl = URL.createObjectURL(csvBlob);
                 const downloadAnchor = document.createElement("a");
-                const cleanBaseName = key.startsWith("__fit_") ? key.replace("__fit_", "fit_") : `clean_${key.split('.')[0]}`;
+                const cleanBaseName = key.startsWith("__fit_") ? key.replace("__fit_", "fit_") : `clean_${key.replace(/\.[^.]+$/, '')}`;
                 
                 downloadAnchor.setAttribute("href", virtualUrl); downloadAnchor.setAttribute("download", `${cleanBaseName}.csv`);
                 downloadAnchor.style.visibility = 'hidden'; document.body.appendChild(downloadAnchor);
@@ -781,6 +820,7 @@
             document.getElementById('btn-normalize-toggle').classList.remove('active');
             document.getElementById('btn-run-fit').style.display = "none";
             document.getElementById('cursor-bar').innerHTML = `Cursor Position: 2θ = --`;
+            bumpChartView();
             refreshCheckboxTargetsPanel(); updateChartCanvas();
         }
     </script>

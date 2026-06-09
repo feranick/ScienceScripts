@@ -114,7 +114,13 @@ def load_xrd_data(file_path):
             df = pd.read_csv(file_path, skiprows=skiprows)
             df.columns = df.columns.str.strip()
             if 'Angle' in df.columns and 'Intensity' in df.columns:
-                return df['Angle'].values, df['Intensity'].values, sample_id
+                # Coerce to numeric and drop non-numeric footer/junk rows
+                ang = pd.to_numeric(df['Angle'], errors='coerce')
+                inten = pd.to_numeric(df['Intensity'], errors='coerce')
+                valid = ang.notna() & inten.notna()
+                if not valid.any():
+                    raise ValueError("No numeric data rows found under '[Scan points]'.")
+                return ang[valid].values, inten[valid].values, sample_id
             else:
                 raise ValueError("Missing required 'Angle' or 'Intensity' columns.")
         except Exception as e:
@@ -124,7 +130,12 @@ def load_xrd_data(file_path):
         try:
             tree = ET.parse(file_path)
             root = tree.getroot()
-            ns = {'x': 'http://www.xrdml.com/XRDMeasurement/2.2'}
+            # Derive the namespace from the root tag so 1.x/2.x XRDML versions all parse
+            if root.tag.startswith('{'):
+                ns_uri = root.tag[1:].split('}')[0]
+            else:
+                ns_uri = 'http://www.xrdml.com/XRDMeasurement/2.2'
+            ns = {'x': ns_uri}
             
             s_id = root.find('.//x:sample/x:id', ns)
             if s_id is not None and s_id.text:
@@ -371,7 +382,7 @@ class XRDPlotterGUI:
         self.cursor_line = None
         
         for file_path, data in self.active_datasets.items():
-            if file_path.startswith("__fit_composite"):
+            if file_path.startswith("__fit_overall_composite"):
                 line, = self.ax.plot(data['angles'], data['intensities'], color='#000000', linestyle='-', linewidth=2.0, label=data['label'])
                 self.fitted_curves_artists.append(line)
             elif file_path.startswith("__fit_"):
@@ -473,16 +484,26 @@ class XRDPlotterGUI:
         self.ax.clear()
         self.configure_axis_labels()
         self.cursor_line = None  
+        # ax.clear() destroyed the old artists; rebuild tracking lists as we replot
+        self.fitted_curves_artists = []
+        self.guess_lines_artists = []
         
         for file_path, data in self.active_datasets.items():
-            if file_path.startswith("__fit_composite"):
-                self.ax.plot(data['angles'], data['intensities'], color='#000000', linestyle='-', linewidth=2.0, label=data['label'])
+            if file_path.startswith("__fit_overall_composite"):
+                line, = self.ax.plot(data['angles'], data['intensities'], color='#000000', linestyle='-', linewidth=2.0, label=data['label'])
+                self.fitted_curves_artists.append(line)
             elif file_path.startswith("__fit_"):
-                self.ax.plot(data['angles'], data['intensities'], linestyle='--', linewidth=1.2, label=data['label'])
+                line, = self.ax.plot(data['angles'], data['intensities'], linestyle='--', linewidth=1.2, label=data['label'])
+                self.fitted_curves_artists.append(line)
             elif file_path.startswith("__ref_"):
                 self.ax.plot(data['angles'], data['intensities'], linestyle='-.', linewidth=1.5, alpha=0.8, label=data['label'])
             else:
                 self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
+                
+        # Re-plot peak guess markers (also destroyed by ax.clear)
+        for g_x in self.peak_guesses:
+            guess_line = self.ax.axvline(g_x, color='#d63384', linestyle=':', linewidth=1.5)
+            self.guess_lines_artists.append(guess_line)
                 
         if self.active_datasets:
             self.ax.legend(loc="upper right", frameon=True, fontsize=8)
@@ -556,6 +577,8 @@ class XRDPlotterGUI:
                 for key in data_keys:
                     angles = self.active_datasets[key]['angles']
                     intensities = self.active_datasets[key]['intensities']
+                    if len(intensities) == 0:
+                        continue  # Dataset emptied by a previous crop
                     mask = (angles >= x_click - window_span) & (angles <= x_click + window_span)
                     if np.any(mask):
                         global_max = np.max(intensities)
@@ -571,6 +594,8 @@ class XRDPlotterGUI:
                 for key in data_keys:
                     angles = self.active_datasets[key]['angles']
                     intensities = self.active_datasets[key]['intensities']
+                    if len(intensities) == 0:
+                        continue  # Dataset emptied by a previous crop
                     mask = (angles >= x_click - window_span) & (angles <= x_click + window_span)
                     
                     if np.any(mask):
@@ -653,9 +678,11 @@ class XRDPlotterGUI:
             return
             
         self.status_var.set("Searching Materials Project...")
-        threading.Thread(target=self._bg_search_worker, args=(api_key, formula, mode), daemon=True).start()
+        # Snapshot the guesses now: the worker thread must not read mutable UI state
+        guesses_snapshot = tuple(self.peak_guesses)
+        threading.Thread(target=self._bg_search_worker, args=(api_key, formula, mode, guesses_snapshot), daemon=True).start()
 
-    def _bg_search_worker(self, api_key, query_str, mode):
+    def _bg_search_worker(self, api_key, query_str, mode, peak_guesses):
         try:
             query_kwargs = {
                 "fields": ["material_id", "structure", "symmetry", "energy_above_hull", "formula_pretty"]
@@ -676,7 +703,7 @@ class XRDPlotterGUI:
                     if mode == "peaks":
                         pattern = calculator.get_pattern(doc.structure, two_theta_range=(5, 90))
                         theoretical_peaks = np.array(pattern.x)
-                        score, avg_err = calculate_crystallographic_match_score(theoretical_peaks, self.peak_guesses)
+                        score, avg_err = calculate_crystallographic_match_score(theoretical_peaks, peak_guesses)
                         compiled_results.append((score, avg_err, doc))
                     else:
                         compiled_results.append((0.0, 0.0, doc))
@@ -689,10 +716,14 @@ class XRDPlotterGUI:
             self.root.after(0, self.show_polymorph_selection, compiled_results, mode)
         except Exception as e:
             self.root.after(0, lambda err=str(e): messagebox.showerror("API Connection Error", f"Network handshake fault: {err}"))
-            raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
-            self.root.after(0, lambda: self.status_var.set(f"Active profiles loaded: {len(raw_keys)}"))
+            self.root.after(0, self._reset_status_count)
+
+    def _reset_status_count(self):
+        raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
+        self.status_var.set(f"Active profiles loaded: {len(raw_keys)}")
 
     def show_polymorph_selection(self, scored_docs, mode="text"):
+        self._reset_status_count()  # Clear the "Searching..." message
         if not scored_docs:
             messagebox.showinfo("Empty Registry", "No matching thermodynamic crystal arrays found for that search query.")
             self.refresh_checkbox_targets_panel()
@@ -787,6 +818,14 @@ class XRDPlotterGUI:
         label = f"Ref: {formula} ({sym_symbol})"
         key_handle = f"__ref_{mat_id}"
         
+        # If this reference was already plotted, remove the stale line so we
+        # don't accumulate duplicate artists/legend entries
+        if key_handle in self.active_datasets:
+            old_label = self.active_datasets[key_handle]['label']
+            for line in list(self.ax.lines):
+                if line.get_label() == old_label:
+                    line.remove()
+        
         self.active_datasets[key_handle] = {'angles': angles_grid, 'intensities': intensities_grid, 'label': label}
         
         self.ax.plot(angles_grid, intensities_grid, linestyle='-.', linewidth=1.5, alpha=0.8, label=label)
@@ -823,6 +862,10 @@ class XRDPlotterGUI:
             x_data = self.active_datasets[key]['angles']
             y_data = self.active_datasets[key]['intensities']
             label_base = self.active_datasets[key]['label']
+            
+            if len(x_data) == 0:
+                fit_errors.append(f"{label_base}: dataset is empty (cropped out of view).")
+                continue
             
             p0 = []; bounds_min = []; bounds_max = []
             for g_x in self.peak_guesses:
@@ -916,14 +959,38 @@ class XRDPlotterGUI:
         out_dir = filedialog.askdirectory(title="Select Output Folder")
         if not out_dir: return 
         success_count = 0
+        used_names = set()
+        export_errors = []
         for path_key, data in self.active_datasets.items():
             try:
-                b_name = os.path.splitext(os.path.basename(path_key))[0] if not path_key.startswith("__fit_") and not path_key.startswith("__ref_") else path_key.strip("__")
-                out_path = os.path.join(out_dir, f"clean_{b_name}.csv")
+                if path_key.startswith("__fit_") or path_key.startswith("__ref_"):
+                    # Fit/ref keys embed the original full file path; reduce it to
+                    # the basename so the export name contains no path separators
+                    prefix, _, embedded = path_key.strip("_").rpartition("_")
+                    base = os.path.splitext(os.path.basename(embedded))[0] if embedded else ""
+                    b_name = f"{prefix}_{base}" if base else path_key.strip("_")
+                else:
+                    b_name = os.path.splitext(os.path.basename(path_key))[0]
+                # Strip any remaining characters that are unsafe in filenames
+                b_name = "".join(c if (c.isalnum() or c in "._- ") else "_" for c in b_name)
+                # Avoid silently overwriting on basename collisions
+                candidate = b_name
+                n = 2
+                while candidate in used_names:
+                    candidate = f"{b_name}_{n}"
+                    n += 1
+                used_names.add(candidate)
+                out_path = os.path.join(out_dir, f"clean_{candidate}.csv")
                 pd.DataFrame({'Angle': data['angles'], 'Intensity': data['intensities']}).to_csv(out_path, index=False)
                 success_count += 1
-            except Exception as e: print(f"Exception tracking file save: {e}")
-        messagebox.showinfo("Export Complete", f"Successfully saved {success_count} data profiles.")
+            except Exception as e:
+                export_errors.append(f"{path_key}: {e}")
+        msg = f"Successfully saved {success_count} data profiles."
+        if export_errors:
+            msg += "\n\nFailed:\n" + "\n".join(export_errors)
+            messagebox.showwarning("Export Finished With Errors", msg)
+        else:
+            messagebox.showinfo("Export Complete", msg)
 
     def remove_fitted_only_artists(self):
         for line in self.fitted_curves_artists: 
