@@ -32,19 +32,26 @@
         
         .btn-bg-sub { background-color: #0dcaf0; color: #212529; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
         .btn-bg-sub:hover { background-color: #0bacd0; }
+        
         .btn-normalize { background-color: #0d6efd; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
         .btn-normalize:hover { background-color: #0b5ed7; }
         .btn-normalize.active { background-color: #ffd43b; color: #212529; }
+        
         .btn-fit-toggle { background-color: #6f42c1; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
         .btn-fit-toggle.active { background-color: #ffd43b; color: #212529; }
         .btn-run-fit { background-color: #fd7e14; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
         .btn-run-fit:hover { background-color: #e06d0f; }
+        
         .btn-crop { background-color: #eef1f6; color: #333333; border: 1px solid #ced4da; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
         .btn-crop:hover { background-color: #dfe4ec; }
         .btn-export { background-color: #198754; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; }
         .btn-export:hover { background-color: #157347; }
         .btn-clear { background-color: #dc3545; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; }
         .btn-clear:hover { background-color: #bb2d3b; }
+        
+        .btn-undo { background-color: #6c757d; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
+        .btn-undo:hover { background-color: #5c636a; }
+        .btn-undo:disabled { background-color: #e9ecef; color: #adb5bd; cursor: not-allowed; border: 1px solid #dee2e6; }
         
         .checkbox-container { display: flex; align-items: center; gap: 8px; font-size: 0.9rem; color: #212529; user-select: none; margin: 2px 0; }
         .checkbox-container input { cursor: pointer; width: 15px; height: 15px; }
@@ -64,23 +71,32 @@
 <body>
 
     <div id="sidebar">
-        <h2>🔬 XRD Data Viewer and Converter</h2>
-        <p class="info-text">Upload single or multiple XRD datasets in native csv or xrdml format. </p>
+        <h2>🔬 XRD Data Analyzer</h2>
+        <p class="info-text">Load data tracks, isolate regions of interest, and trigger peak optimization routines.</p>
         
         <div class="upload-btn-wrapper">
             <div class="btn-upload">📁 Click to Select File(s)</div>
             <input type="file" id="xrd-files" accept=".csv,.xrdml" multiple onchange="handleFileSelections(event)">
         </div>
 
-        <hr style="border: 0; border-top: 1px solid #e9ecef; margin: 5px 0;">
+        <hr style="border: 0; border-top: 1px solid #e9ecef; margin: 3px 0;">
         
         <button class="btn-crop" onclick="cropToView()">✂️ Crop to View</button>
         <button class="btn-bg-sub" onclick="subtractBackgroundFromPlotted()">✨ Subtract Background</button>
-        <button id="btn-normalize-toggle" class="btn-normalize" onclick="toggleNormalizationMode()">⚖️ Normalize to Peak</button>
-        <button id="btn-fit-toggle" class="btn-fit-toggle" onclick="toggleFittingMode()">🎯 Peak Fitting: OFF</button>
-        <button id="btn-run-fit" class="btn-run-fit" onclick="executePeakOptimization()" style="display: none;">⚡ Run Optimised Fit</button>
+        
+        <div style="display: flex; align-items: center; width: 100%; gap: 4px;">
+            <button id="btn-normalize-toggle" class="btn-normalize" style="flex-grow: 1;" onclick="toggleNormalizationMode()">⚖️ Normalize to Peak</button>
+            <span style="font-size: 0.9rem; color: #495057; padding-left: 2px;">±</span>
+            <input type="number" id="norm-span-input" value="0.3" step="0.1" min="0.01" style="width: 45px; padding: 8px 4px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.85rem; text-align: center;">
+            <span style="font-size: 0.9rem; color: #495057;">°</span>
+        </div>
+        
+        <button id="btn-fit-toggle" class="btn-fit-toggle" onclick="toggleFittingMode()">🎯 Peak Selection: OFF</button>
+        <button id="btn-run-fit" class="btn-run-fit" onclick="executePeakOptimization()" style="display: none;">⚡ Fit</button>
         <button class="btn-export" onclick="exportPlottedToCSV()">📥 Export Plotted to CSV</button>
         <button class="btn-clear" onclick="clearCanvas()">🗑️ Clear Canvas</button>
+        
+        <button id="btn-undo" class="btn-undo" onclick="undoLastAction()" disabled>↩️ Undo Last Action</button>
         
         <div class="checkbox-container">
             <input type="checkbox" id="toggle-tooltip" checked onchange="handleTooltipToggle()">
@@ -124,13 +140,14 @@
         // ==========================================
         // GLOBAL CONFIGURATIONS & CONSTANTS
         // ==========================================
-        const VERSION_TAG = "v2026.06.03.2";
+        const VERSION_TAG = "v2026.06.09.2";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
         let normalizationModeActive = false;
         let peakGuessesX = [];
         let currentMouseHoverX = null;
+        let historyStack = []; // Rolling snapshot stack database layer array
 
         window.onload = function() {
             document.getElementById('app-version-container').innerText = VERSION_TAG;
@@ -140,11 +157,76 @@
             chartDiv.addEventListener('contextmenu', function(e) {
                 if (fittingModeActive && currentMouseHoverX !== null) {
                     e.preventDefault();
+                    saveToHistory(); // Cache history state parameters block
                     peakGuessesX.push(currentMouseHoverX);
                     updateChartCanvas();
                 }
             });
         };
+
+        // ==========================================
+        // CORE TRACKING HISTORY SNAPSHOT OPERATORS
+        // ==========================================
+        function saveToHistory() {
+            if (historyStack.length >= 25) {
+                historyStack.shift();
+            }
+            
+            const datasetsCacheCopy = {};
+            for (const key in persistentDatasets) {
+                datasetsCacheCopy[key] = {
+                    angles: [...persistentDatasets[key].angles],
+                    intensities: [...persistentDatasets[key].intensities],
+                    label: persistentDatasets[key].label
+                };
+            }
+            
+            const resultsTableCacheCopy = [];
+            document.querySelectorAll("#results-matrix-sheet tbody tr").forEach(tr => {
+                const tds = tr.querySelectorAll("td");
+                if (tds.length === 5) {
+                    resultsTableCacheCopy.push([tds[0].innerText, tds[1].innerText, tds[2].innerText, tds[3].innerText, tds[4].innerText]);
+                }
+            });
+            
+            historyStack.push({
+                persistentDatasets: datasetsCacheCopy,
+                peakGuessesX: [...peakGuessesX],
+                tableData: resultsTableCacheCopy,
+                dashboardDisplay: document.getElementById('results-dashboard').style.display
+            });
+            
+            document.getElementById('btn-undo').disabled = false;
+        }
+
+        function undoLastAction() {
+            if (historyStack.length === 0) return;
+            
+            const snapshot = historyStack.pop();
+            persistentDatasets = snapshot.persistentDatasets;
+            peakGuessesX = snapshot.peakGuessesX;
+            
+            const tableBody = document.querySelector("#results-matrix-sheet tbody");
+            tableBody.innerHTML = "";
+            snapshot.tableData.forEach(rowData => {
+                const tr = document.createElement('tr');
+                rowData.forEach(textCell => {
+                    const td = document.createElement('td');
+                    td.innerText = textCell;
+                    tr.appendChild(td);
+                });
+                tableBody.appendChild(tr);
+            });
+            
+            document.getElementById('results-dashboard').style.display = snapshot.dashboardDisplay;
+            
+            if (historyStack.length === 0) {
+                document.getElementById('btn-undo').disabled = true;
+            }
+            
+            refreshCheckboxTargetsPanel();
+            updateChartCanvas();
+        }
 
         function refreshCheckboxTargetsPanel() {
             const panel = document.getElementById('fit-targets-panel');
@@ -204,6 +286,7 @@
         }
 
         function removeSpecificDataset(key) {
+            saveToHistory(); // Cache history state parameters block
             if (persistentDatasets[key]) {
                 delete persistentDatasets[key];
             }
@@ -252,11 +335,11 @@
             
             if (fittingModeActive) {
                 if (normalizationModeActive) toggleNormalizationMode();
-                btn.innerText = "🎯 Fitting Mode: ACTIVE";
+                btn.innerText = "🎯 Peak Selection: ACTIVE";
                 btn.classList.add('active');
                 runBtn.style.display = "block";
             } else {
-                btn.innerText = "🎯 Peak Fitting: OFF";
+                btn.innerText = "🎯 Peak Selection: OFF";
                 btn.classList.remove('active');
                 runBtn.style.display = "none";
             }
@@ -280,6 +363,7 @@
         function subtractBackgroundFromPlotted() {
             const dataKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_"));
             if (dataKeys.length === 0) { alert("No active datasets loaded to execute baseline filters."); return; }
+            saveToHistory(); // Cache history state parameters block
             clearFittedModelsCache();
 
             dataKeys.forEach(key => {
@@ -340,8 +424,9 @@
                 return;
             }
             
+            saveToHistory(); // Cache history state parameters block
             Object.keys(persistentDatasets).forEach(k => { if(k.startsWith("__fit_")) delete persistentDatasets[k]; });
-            const tableBody = document.querySelector("#results-dashboard tbody");
+            const tableBody = document.querySelector("#results-matrix-sheet tbody");
             tableBody.innerHTML = ""; 
             
             keysToFit.forEach(key => {
@@ -418,7 +503,10 @@
                         let parsedData;
                         if (extension === 'csv') parsedData = parseCSV(e.target.result, file.name);
                         else if (extension === 'xrdml') parsedData = parseXRDML(e.target.result, file.name);
-                        if (parsedData) persistentDatasets[file.name] = parsedData;
+                        if (parsedData) {
+                            saveToHistory(); // Cache history state parameters block
+                            persistentDatasets[file.name] = parsedData;
+                        }
                     } catch (err) { alert(`Parsing structural error: ${file.name}\nReason: ${err.message}`); }
 
                     itemsProcessed++;
@@ -537,19 +625,51 @@
                 currentMouseHoverX = null; document.getElementById('cursor-bar').innerHTML = `Cursor Position: 2θ = --`;
             });
             
-            // Connected interactive click actions hook directly into the Peak Normalization sub-routines
             chartDiv.on('plotly_click', function(plotlyData) {
                 if (normalizationModeActive && plotlyData && plotlyData.points && plotlyData.points.length > 0) {
                     const xClick = plotlyData.points[0].x;
-                    const windowSize = 0.3; // Search threshold radius in degrees
-                    const datasetKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_"));
-                    let normalizedAny = false;
                     
+                    // Safely extract custom search tolerance from Entry framework field
+                    let windowSize = parseFloat(document.getElementById('norm-span-input').value);
+                    if (isNaN(windowSize) || windowSize <= 0) {
+                        windowSize = 0.3;
+                        document.getElementById('norm-span-input').value = "0.3";
+                    }
+                    
+                    const datasetKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_"));
+                    
+                    // Threshold shield evaluation loops prevent signal explosion crashes
+                    let willNormalize = false;
                     datasetKeys.forEach(key => {
                         const dataset = persistentDatasets[key];
+                        let globalMax = -Infinity;
                         let localPeakMax = -Infinity;
                         
                         for (let i = 0; i < dataset.angles.length; i++) {
+                            if (dataset.intensities[i] > globalMax) globalMax = dataset.intensities[i];
+                            if (dataset.angles[i] >= xClick - windowSize && dataset.angles[i] <= xClick + windowSize) {
+                                if (dataset.intensities[i] > localPeakMax) {
+                                    localPeakMax = dataset.intensities[i];
+                                }
+                            }
+                        }
+                        if (localPeakMax > 0 && localPeakMax !== -Infinity && localPeakMax >= (0.05 * globalMax)) {
+                            willNormalize = true;
+                        }
+                    });
+                    
+                    if (willNormalize) {
+                        saveToHistory(); // Cache history state parameters block
+                    }
+                    
+                    let normalizedAny = false;
+                    datasetKeys.forEach(key => {
+                        const dataset = persistentDatasets[key];
+                        let globalMax = -Infinity;
+                        let localPeakMax = -Infinity;
+                        
+                        for (let i = 0; i < dataset.angles.length; i++) {
+                            if (dataset.intensities[i] > globalMax) globalMax = dataset.intensities[i];
                             if (dataset.angles[i] >= xClick - windowSize && dataset.angles[i] <= xClick + windowSize) {
                                 if (dataset.intensities[i] > localPeakMax) {
                                     localPeakMax = dataset.intensities[i];
@@ -557,7 +677,7 @@
                             }
                         }
                         
-                        if (localPeakMax > 0 && localPeakMax !== -Infinity) {
+                        if (localPeakMax > 0 && localPeakMax !== -Infinity && localPeakMax >= (0.05 * globalMax)) {
                             for (let i = 0; i < dataset.intensities.length; i++) {
                                 dataset.intensities[i] = dataset.intensities[i] / localPeakMax;
                             }
@@ -600,6 +720,7 @@
             if (!range || range.length < 2) return;
 
             const xmin = range[0]; const xmax = range[1];
+            saveToHistory(); // Cache history state parameters block
             clearFittedModelsCache();
 
             datasetKeys.forEach(key => {
@@ -650,8 +771,11 @@
         }
 
         function clearCanvas() {
+            if (Object.keys(persistentDatasets).length > 0) {
+                saveToHistory(); // Cache history state parameters block
+            }
             persistentDatasets = {}; clearFittedModelsCache(); fittingModeActive = false; normalizationModeActive = false;
-            document.getElementById('btn-fit-toggle').innerText = "🎯 Peak Fitting: OFF";
+            document.getElementById('btn-fit-toggle').innerText = "🎯 Peak Selection: OFF";
             document.getElementById('btn-fit-toggle').classList.remove('active');
             document.getElementById('btn-normalize-toggle').innerText = "⚖️ Normalize to Peak";
             document.getElementById('btn-normalize-toggle').classList.remove('active');

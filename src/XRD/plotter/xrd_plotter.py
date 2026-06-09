@@ -22,7 +22,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.06.09.1"
+VERSION_TAG = "v2026.06.09.2"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 
@@ -55,6 +55,31 @@ def snip_background(y, iterations=40):
         temp = np.copy(bg)
         bg[p:-p] = np.minimum(bg[p:-p], (temp[:-2*p] + temp[2*p:]) / 2.0)
     return bg
+
+def calculate_crystallographic_match_score(theoretical_angles, experimental_guesses, tolerance=0.18):
+    """
+    Computes a mathematical Figure of Merit (FOM) matching score based on proximity
+    between database reflections and user-marked experimental peak coordinates.
+    """
+    if not experimental_guesses or len(theoretical_angles) == 0:
+        return 0.0, 0.0
+    
+    matched_peaks_count = 0
+    cumulative_proximity_delta = 0.0
+    
+    for exp_x in experimental_guesses:
+        deltas = np.abs(theoretical_angles - exp_x)
+        minimum_delta = np.min(deltas)
+        
+        if minimum_delta <= tolerance:
+            matched_peaks_count += 1
+            cumulative_proximity_delta += minimum_delta
+        else:
+            cumulative_proximity_delta += tolerance  # Out-of-bounds positioning penalty
+            
+    score_percentage = (matched_peaks_count / len(experimental_guesses)) * 100.0
+    average_closeness_error = cumulative_proximity_delta / len(experimental_guesses)
+    return score_percentage, average_closeness_error
 
 
 # ==========================================
@@ -153,6 +178,7 @@ class XRDPlotterGUI:
         self.guess_lines_artists = []
         self.fitted_curves_artists = []
         self.target_checkbox_vars = {} 
+        self.history_stack = [] # Undo tracking history stack array matrix
         
         self.fitting_mode_active = False
         self.normalization_mode_active = False
@@ -168,17 +194,31 @@ class XRDPlotterGUI:
         ttk.Button(sidebar_frame, text="✂️ Crop to View", command=self.crop_to_current_view).pack(side="top", fill="x", pady=3)
         ttk.Button(sidebar_frame, text="✨ Subtract Background", command=self.subtract_background_profile).pack(side="top", fill="x", pady=3)
         
-        self.btn_normalize_toggle = ttk.Button(sidebar_frame, text="⚖️ Normalize to Peak", command=self.toggle_normalization_mode)
-        self.btn_normalize_toggle.pack(side="top", fill="x", pady=3)
+        # Inline Horizontal Configuration Row for Normalization and variable window field bounds
+        norm_row = ttk.Frame(sidebar_frame)
+        norm_row.pack(side="top", fill="x", pady=3)
         
-        self.btn_fit_toggle = ttk.Button(sidebar_frame, text="🎯 Peak Fitting: OFF", command=self.toggle_fitting_mode)
+        self.btn_normalize_toggle = ttk.Button(norm_row, text="⚖️ Normalize to Peak", command=self.toggle_normalization_mode)
+        self.btn_normalize_toggle.pack(side="left", fill="x", expand=True)
+        
+        ttk.Label(norm_row, text="±", font=("Helvetica", 10)).pack(side="left", padx=(5, 1))
+        self.ent_norm_span = ttk.Entry(norm_row, width=5)
+        self.ent_norm_span.insert(0, "0.3")
+        self.ent_norm_span.pack(side="left", padx=1)
+        ttk.Label(norm_row, text="°", font=("Helvetica", 10)).pack(side="left", padx=(1, 2))
+        
+        self.btn_fit_toggle = ttk.Button(sidebar_frame, text="🎯 Peak Selection: OFF", command=self.toggle_fitting_mode)
         self.btn_fit_toggle.pack(side="top", fill="x", pady=3)
         
-        self.btn_run_fit = ttk.Button(sidebar_frame, text="⚡ Optimize Fit", command=self.run_peak_optimization, state="disabled")
+        self.btn_run_fit = ttk.Button(sidebar_frame, text="⚡ Fit", command=self.run_peak_optimization, state="disabled")
         self.btn_run_fit.pack(side="top", fill="x", pady=3)
         
         ttk.Button(sidebar_frame, text="📥 Export to CSV", command=self.export_active_data_to_csv).pack(side="top", fill="x", pady=3)
         ttk.Button(sidebar_frame, text="🗑️ Clear Canvas", command=self.clear_canvas).pack(side="top", fill="x", pady=3)
+        
+        # New Interactive Undo Button Element
+        self.btn_undo = ttk.Button(sidebar_frame, text="↩️ Undo Last Action", command=self.undo_last_action, state="disabled")
+        self.btn_undo.pack(side="top", fill="x", pady=3)
         
         ttk.Separator(sidebar_frame, orient="horizontal").pack(side="top", fill="x", pady=10)
         
@@ -202,12 +242,15 @@ class XRDPlotterGUI:
         btn_save_key = ttk.Button(key_entry_row, text="💾", width=3, command=self.save_api_key_locally)
         btn_save_key.pack(side="right", padx=(3, 0))
         
-        ttk.Label(panel_search, text="Material Formula (e.g. TiO2):", font=("Helvetica", 8, "bold")).pack(anchor="w")
+        ttk.Label(panel_search, text="Formula or System (e.g. TiO2 or W-O):", font=("Helvetica", 8, "bold")).pack(anchor="w")
         self.ent_formula = ttk.Entry(panel_search)
         self.ent_formula.pack(fill="x", pady=(0, 6))
         
-        btn_search = ttk.Button(panel_search, text="🔍 Search & Fetch Reference", command=self.execute_database_search)
-        btn_search.pack(fill="x")
+        btn_search_text = ttk.Button(panel_search, text="🔍 Search by Formula", command=lambda: self.execute_database_search(mode="text"))
+        btn_search_text.pack(fill="x", pady=2)
+        
+        btn_search_match = ttk.Button(panel_search, text="🎯 Search/Match by Peaks", command=lambda: self.execute_database_search(mode="peaks"))
+        btn_search_match.pack(fill="x", pady=2)
 
         # --- Checkbox Selector Panel ---
         self.panel_fit_targets = ttk.LabelFrame(sidebar_frame, text=" 🎯 Targets for Fitting ", padding=(8, 6))
@@ -215,6 +258,7 @@ class XRDPlotterGUI:
         self.lbl_no_targets = ttk.Label(self.panel_fit_targets, text="No Scans Loaded", font=("Helvetica", 9, "italic"), foreground="#888888")
         self.lbl_no_targets.pack(side="top", anchor="w", padx=4)
         
+        # Version tag pinned to the absolute sidebar bottom
         lbl_version = ttk.Label(sidebar_frame, text=VERSION_TAG, font=("Helvetica", 8), foreground="#888888")
         lbl_version.pack(side="bottom", pady=2)
         
@@ -269,6 +313,94 @@ class XRDPlotterGUI:
         self.ax.set_title("XRD Diffraction Pattern Analysis", fontsize=11, fontweight='bold', pad=8)
         self.ax.grid(True, linestyle="--", alpha=0.5)
 
+    # ==========================================
+    # CORE TRACKING HISTORY SNAPSHOT OPERATORS
+    # ==========================================
+    def save_to_history(self):
+        """Generates a deep state matrix cache to enable instantaneous layout rollbacks."""
+        if len(self.history_stack) >= 25:
+            self.history_stack.pop(0)
+            
+        tree_cache = []
+        for row in self.result_table.get_children():
+            tree_cache.append(self.result_table.item(row)['values'])
+            
+        snapshot = {
+            'active_datasets': {k: {
+                'angles': np.copy(v['angles']),
+                'intensities': np.copy(v['intensities']),
+                'label': v['label']
+            } for k, v in self.active_datasets.items()},
+            'peak_guesses': list(self.peak_guesses),
+            'table_data': tree_cache
+        }
+        self.history_stack.append(snapshot)
+        self.btn_undo.config(state="normal")
+
+    def undo_last_action(self):
+        """Pops the last layout footprint snapshot off the history array stack and restores the UI state."""
+        if not self.history_stack:
+            return
+            
+        snapshot = self.history_stack.pop()
+        
+        # Clean current active artistic trace lines
+        for line in self.fitted_curves_artists:
+            try: line.remove()
+            except Exception: pass
+        for line in self.guess_lines_artists:
+            try: line.remove()
+            except Exception: pass
+            
+        self.fitted_curves_artists = []
+        self.guess_lines_artists = []
+        
+        # Restore references
+        self.active_datasets = snapshot['active_datasets']
+        self.peak_guesses = snapshot['peak_guesses']
+        
+        # Restore Treeview Data Row Matrices
+        for row in self.result_table.get_children():
+            self.result_table.delete(row)
+        for values in snapshot['table_data']:
+            self.result_table.insert("", "end", values=values)
+            
+        # Re-plot entire axes system from scratch
+        self.ax.clear()
+        self.configure_axis_labels()
+        self.cursor_line = None
+        
+        for file_path, data in self.active_datasets.items():
+            if file_path.startswith("__fit_composite"):
+                line, = self.ax.plot(data['angles'], data['intensities'], color='#000000', linestyle='-', linewidth=2.0, label=data['label'])
+                self.fitted_curves_artists.append(line)
+            elif file_path.startswith("__fit_"):
+                line, = self.ax.plot(data['angles'], data['intensities'], linestyle='--', linewidth=1.2, label=data['label'])
+                self.fitted_curves_artists.append(line)
+            elif file_path.startswith("__ref_"):
+                self.ax.plot(data['angles'], data['intensities'], linestyle='-.', linewidth=1.5, alpha=0.8, label=data['label'])
+            else:
+                self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
+                
+        # Re-plot peak selection vertical bars
+        for g_x in self.peak_guesses:
+            guess_line = self.ax.axvline(g_x, color='#d63384', linestyle=':', linewidth=1.5)
+            self.guess_lines_artists.append(guess_line)
+            
+        if self.active_datasets:
+            self.ax.legend(loc="upper right", frameon=True, fontsize=8)
+            
+        self.ax.relim()
+        self.ax.autoscale_view()
+        self.refresh_checkbox_targets_panel()
+        self.canvas.draw()
+        
+        raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
+        self.status_var.set(f"Active profiles loaded: {len(raw_keys)}")
+        
+        if not self.history_stack:
+            self.btn_undo.config(state="disabled")
+
     def load_api_key_on_launch(self):
         if os.path.exists(KEY_FILE_NAME):
             try:
@@ -292,7 +424,7 @@ class XRDPlotterGUI:
                 f.write(key_to_save)
             messagebox.showinfo("Success", "Materials Project API key saved locally!")
         except Exception as e:
-            messagebox.showerror("IO Fault", f"Could not write configuration token to file system maps: {e}")
+            messagebox.showerror("IO Fault", f"Could not write configuration token: {e}")
 
     def refresh_checkbox_targets_panel(self):
         for child in self.panel_fit_targets.winfo_children():
@@ -330,6 +462,7 @@ class XRDPlotterGUI:
             btn_del.pack(side="right", anchor="e")
 
     def remove_specific_dataset(self, key_to_remove):
+        self.save_to_history() # Track state change
         if key_to_remove in self.active_datasets:
             del self.active_datasets[key_to_remove]
             
@@ -381,10 +514,10 @@ class XRDPlotterGUI:
         self.fitting_mode_active = not self.fitting_mode_active
         if self.fitting_mode_active:
             if self.normalization_mode_active: self.toggle_normalization_mode()
-            self.btn_fit_toggle.config(text="🎯 Fitting Mode: ACTIVE")
+            self.btn_fit_toggle.config(text="🎯 Peak Selection: ACTIVE")
             self.btn_run_fit.config(state="normal")
         else:
-            self.btn_fit_toggle.config(text="🎯 Peak Fitting: OFF")
+            self.btn_fit_toggle.config(text="🎯 Peak Selection: OFF")
             self.btn_run_fit.config(state="disabled")
 
     def on_mouse_move(self, event):
@@ -405,19 +538,46 @@ class XRDPlotterGUI:
 
     def on_canvas_click(self, event):
         if event.inaxes == self.ax:
+            # Handle Normalization Mode Click Event (Left Click)
             if self.normalization_mode_active and event.button == 1:
                 x_click = event.xdata
-                window_span = 0.3  
-                data_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
-                normalized_any = False
                 
+                try:
+                    window_span = float(self.ent_norm_span.get().strip())
+                except ValueError:
+                    window_span = 0.3  
+                    self.ent_norm_span.delete(0, tk.END)
+                    self.ent_norm_span.insert(0, "0.3")
+                
+                data_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
+                
+                # Check validation bounds before committing history stack indices
+                will_normalize = False
                 for key in data_keys:
                     angles = self.active_datasets[key]['angles']
                     intensities = self.active_datasets[key]['intensities']
                     mask = (angles >= x_click - window_span) & (angles <= x_click + window_span)
                     if np.any(mask):
+                        global_max = np.max(intensities)
                         local_peak_max = np.max(intensities[mask])
-                        if local_peak_max > 0:
+                        if local_peak_max > 0 and local_peak_max >= (0.05 * global_max):
+                            will_normalize = True
+                            break
+                            
+                if will_normalize:
+                    self.save_to_history() # Track state change
+                
+                normalized_any = False
+                for key in data_keys:
+                    angles = self.active_datasets[key]['angles']
+                    intensities = self.active_datasets[key]['intensities']
+                    mask = (angles >= x_click - window_span) & (angles <= x_click + window_span)
+                    
+                    if np.any(mask):
+                        global_max = np.max(intensities)
+                        local_peak_max = np.max(intensities[mask])
+                        
+                        if local_peak_max > 0 and local_peak_max >= (0.05 * global_max):
                             self.active_datasets[key]['intensities'] = intensities / local_peak_max
                             normalized_any = True
                             
@@ -438,7 +598,9 @@ class XRDPlotterGUI:
                 self.btn_normalize_toggle.config(text="⚖️ Normalize to Peak")
                 return
 
+            # Handle Fitting Mode Click Event (Right Click)
             elif self.fitting_mode_active and event.button == 3:
+                self.save_to_history() # Track state change
                 x_guess = event.xdata
                 self.peak_guesses.append(x_guess)
                 guess_line = self.ax.axvline(x_guess, color='#d63384', linestyle=':', linewidth=1.5)
@@ -451,6 +613,7 @@ class XRDPlotterGUI:
             return
         data_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
         if not data_keys: return
+        self.save_to_history() # Track state change
         self.clear_fitted_artists()
 
         for file_path in data_keys:
@@ -471,7 +634,7 @@ class XRDPlotterGUI:
         self.ax.legend(loc="upper right", frameon=True, fontsize=9)
         self.ax.relim(); self.ax.autoscale_view(); self.canvas.draw()
 
-    def execute_database_search(self):
+    def execute_database_search(self, mode="text"):
         if not MP_LIBRARIES_AVAILABLE:
             messagebox.showinfo("Packages Missing", "To query reference data directly, run this command in your terminal folder:\npip install mp-api pymatgen")
             return
@@ -480,91 +643,134 @@ class XRDPlotterGUI:
         formula = self.ent_formula.get().strip()
         
         if not formula:
-            messagebox.showwarning("Missing Inputs", "Please specify a crystal target formula matrix (e.g. Si, TiO2).")
+            messagebox.showwarning("Missing Inputs", "Please specify a crystal target formula / system constraint.")
             return
         if not api_key:
             messagebox.showwarning("Missing Key", "Materials Project queries require an API key.")
             return
+        if mode == "peaks" and not self.peak_guesses:
+            messagebox.showwarning("No Peak Targets", "Right-click on the canvas map area to designate reference peaks first.")
+            return
             
         self.status_var.set("Searching Materials Project...")
-        threading.Thread(target=self._bg_search_worker, args=(api_key, formula), daemon=True).start()
+        threading.Thread(target=self._bg_search_worker, args=(api_key, formula, mode), daemon=True).start()
 
-    def _bg_search_worker(self, api_key, formula):
+    def _bg_search_worker(self, api_key, query_str, mode):
         try:
+            query_kwargs = {
+                "fields": ["material_id", "structure", "symmetry", "energy_above_hull", "formula_pretty"]
+            }
+            if "-" in query_str:
+                query_kwargs["chemsys"] = query_str
+            else:
+                query_kwargs["formula"] = query_str
+                
             with MPRester(api_key) as mpr:
-                docs = mpr.materials.summary.search(
-                    formula=formula,
-                    fields=["material_id", "structure", "symmetry", "energy_above_hull", "formula_pretty"]
-                )
-            self.root.after(0, self.show_polymorph_selection, docs)
+                docs = mpr.materials.summary.search(**query_kwargs)
+                
+            compiled_results = []
+            calculator = XRDCalculator(wavelength="CuKa")
+            
+            for doc in docs:
+                try:
+                    if mode == "peaks":
+                        pattern = calculator.get_pattern(doc.structure, two_theta_range=(5, 90))
+                        theoretical_peaks = np.array(pattern.x)
+                        score, avg_err = calculate_crystallographic_match_score(theoretical_peaks, self.peak_guesses)
+                        compiled_results.append((score, avg_err, doc))
+                    else:
+                        compiled_results.append((0.0, 0.0, doc))
+                except Exception:
+                    continue
+            
+            if mode == "peaks":
+                compiled_results.sort(key=lambda item: (-item[0], item[1]))
+                
+            self.root.after(0, self.show_polymorph_selection, compiled_results, mode)
         except Exception as e:
             self.root.after(0, lambda err=str(e): messagebox.showerror("API Connection Error", f"Network handshake fault: {err}"))
             raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
             self.root.after(0, lambda: self.status_var.set(f"Active profiles loaded: {len(raw_keys)}"))
 
-    def show_polymorph_selection(self, docs):
-        if not docs:
-            messagebox.showinfo("Empty Registry", "No matching thermodynamic crystal arrays found for that formula.")
+    def show_polymorph_selection(self, scored_docs, mode="text"):
+        if not scored_docs:
+            messagebox.showinfo("Empty Registry", "No matching thermodynamic crystal arrays found for that search query.")
             self.refresh_checkbox_targets_panel()
             return
             
         pop = tk.Toplevel(self.root)
-        pop.title("Select Structural Polymorph")
-        pop.geometry("560x260") # Slightly wider window layout parameters
+        pop.title("Select Structural Polymorph" if mode == "text" else "Search & Match Candidate Ranking")
+        pop.geometry("640x280") 
         pop.transient(self.root); pop.grab_set()
         
-        ttk.Label(pop, text="Select a crystallographic reference entry to simulate:", font=("Helvetica", 9, "bold")).pack(pady=6)
+        lbl_msg = "Select a crystallographic reference entry to simulate:" if mode == "text" else "Crystallographic candidates ranked by experimental peak alignment FOM scores:"
+        ttk.Label(pop, text=lbl_msg, font=("Helvetica", 9, "bold")).pack(pady=6)
         
         frame = ttk.Frame(pop)
         frame.pack(fill="both", expand=True, padx=8, pady=4)
         scroll = ttk.Scrollbar(frame)
         scroll.pack(side="right", fill="y")
         
-        # ADDED: Added 'Formula' to column registry tracking rules
-        tree = ttk.Treeview(frame, columns=("Formula", "ID", "Symmetry", "Stability"), show="headings", yscrollcommand=scroll.set, height=6)
+        tree = ttk.Treeview(frame, columns=("Score", "Formula", "ID", "Symmetry", "Stability"), show="headings", yscrollcommand=scroll.set, height=6, selectmode="extended")
+        tree.heading("Score", text="Match Score")
         tree.heading("Formula", text="Material / Formula")
         tree.heading("ID", text="Material ID")
         tree.heading("Symmetry", text="Space Group Symbol")
         tree.heading("Stability", text="E Above Hull (eV/atom)")
         
+        tree.column("Score", width=95, anchor="center")
         tree.column("Formula", width=120, anchor="center")
-        tree.column("ID", width=100, anchor="center")
-        tree.column("Symmetry", width=140, anchor="center")
-        tree.column("Stability", width=150, anchor="center")
+        tree.column("ID", width=95, anchor="center")
+        tree.column("Symmetry", width=135, anchor="center")
+        tree.column("Stability", width=145, anchor="center")
         tree.pack(fill="both", expand=True)
         scroll.config(command=tree.yview)
         
         doc_map = {}
-        for idx, doc in enumerate(docs):
-            m_id = str(getattr(doc, 'material_id', f"MP-Index-{idx}"))
+        for item in scored_docs:
+            score, avg_err, doc = item
+            m_id = str(getattr(doc, 'material_id', 'Unknown'))
             sym = getattr(doc, 'symmetry', None)
             sym_symbol = getattr(sym, 'symbol', 'Unknown') if sym else 'Unknown'
             e_hull = getattr(doc, 'energy_above_hull', 0.0)
             formula = getattr(doc, 'formula_pretty', 'Unknown')
             
-            # Insert the parsed dynamic text directly out into the row collection element array
-            item_id = tree.insert("", "end", values=(formula, m_id, sym_symbol, f"{e_hull:.4f}"))
+            score_string = f"{score:.1f}%" if mode == "peaks" else "N/A"
+            
+            item_id = tree.insert("", "end", values=(score_string, formula, m_id, sym_symbol, f"{e_hull:.4f}"))
             doc_map[item_id] = doc
             
         def trigger_plot_conversion():
             sel = tree.selection()
             if not sel: return
-            target_doc = doc_map[sel[0]]
             pop.destroy()
-            self.simulate_and_add_reference(target_doc)
+            self.save_to_history() # Track state change before mapping down theoretical entries
+            for item_id in sel:
+                target_doc = doc_map[item_id]
+                self.simulate_and_add_reference(target_doc)
             
         ttk.Button(pop, text="Plot Theoretical Diffractogram", command=trigger_plot_conversion).pack(pady=8)
 
     def simulate_and_add_reference(self, doc):
+        """Calculates powder profiles and incorporates data arrays to UI layers securely."""
         structure = doc.structure
         mat_id = str(doc.material_id)
         sym_symbol = doc.symmetry.symbol if doc.symmetry else "Unknown"
         formula = doc.formula_pretty if getattr(doc, 'formula_pretty', None) else "Ref"
         
-        calculator = XRDCalculator(wavelength="CuKa")
-        pattern = calculator.get_pattern(structure, two_theta_range=(5, 90))
+        # DYNAMIC FIX: Read the current cropped/visible x-axis limits from the plot
+        xmin, xmax = self.ax.get_xlim()
         
-        angles_grid = np.linspace(5, 90, 2000)
+        # Fallback guard rails in case the plot limits are uninitialized or inverted
+        if xmin >= xmax or xmin < 0:
+            xmin, xmax = 5.0, 90.0
+        
+        calculator = XRDCalculator(wavelength="CuKa")
+        # Optimization: Restrict the database pattern generation to your cropped region
+        pattern = calculator.get_pattern(structure, two_theta_range=(xmin, xmax))
+        
+        # Generate the interpolation grid strictly within the cropped boundaries
+        angles_grid = np.linspace(xmin, xmax, 2000)
         intensities_grid = np.zeros_like(angles_grid)
         sigma = 0.12  
         
@@ -601,6 +807,8 @@ class XRDPlotterGUI:
             messagebox.showwarning("Selection Missing", "Please select at least one check box pattern row to fit.")
             return
             
+        self.save_to_history() # Track state change before fitting optimization routine starts mutating arrays
+        
         for line in self.fitted_curves_artists:
             try: line.remove()
             except Exception: pass
@@ -654,8 +862,10 @@ class XRDPlotterGUI:
             filetypes=[("XRD Datasets (*.csv, *.xrdml)", "*.csv;*.xrdml"), ("Spreadsheets (*.csv)", "*.csv"), ("XML Readouts (*.xrdml)", "*.xrdml"), ("All Files", "*.*")]
         )
         if not files: return
-        loaded_count = 0; error_logs = []
         
+        self.save_to_history() # Track state change before layering data profiles into memory arrays
+        
+        loaded_count = 0; error_logs = []
         for file_path in files:
             if file_path in self.active_datasets: continue
             try:
@@ -677,6 +887,7 @@ class XRDPlotterGUI:
     def crop_to_current_view(self):
         if not self.active_datasets: return
         xmin, xmax = self.ax.get_xlim()
+        self.save_to_history() # Track state change before permanently cropping data arrays matrix lengths
         self.clear_fitted_artists()
 
         for f_path, data in list(self.active_datasets.items()):
@@ -730,10 +941,12 @@ class XRDPlotterGUI:
         self.peak_guesses.clear()
 
     def clear_canvas(self):
+        if self.active_datasets:
+            self.save_to_history() # Track state change so that an accidental canvas purge can be completely undone
         self.active_datasets.clear(); self.clear_fitted_artists(); self.cursor_line = None  
         self.ax.clear(); self.configure_axis_labels(); self.refresh_checkbox_targets_panel(); self.canvas.draw()
         self.fitting_mode_active = False; self.normalization_mode_active = False
-        self.btn_fit_toggle.config(text="🎯 Peak Fitting: OFF"); self.btn_normalize_toggle.config(text="⚖️ Normalize to Peak"); self.btn_run_fit.config(state="disabled")
+        self.btn_fit_toggle.config(text="🎯 Peak Selection: OFF"); self.btn_normalize_toggle.config(text="⚖️ Normalize to Peak"); self.btn_run_fit.config(state="disabled")
         self.status_var.set("Active profiles loaded: 0"); self.cursor_var.set("Cursor Position: 2θ = --")
 
 
