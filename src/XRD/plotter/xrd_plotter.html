@@ -34,6 +34,8 @@
         .btn-bg-sub:hover { background-color: #0bacd0; }
         .btn-ref-sub { background-color: #02b2af; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
         .btn-ref-sub:hover { background-color: #01928f; }
+        .btn-smooth { background-color: #198754; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
+        .btn-smooth:hover { background-color: #146c43; }
         
         .btn-normalize { background-color: #0d6efd; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
         .btn-normalize:hover { background-color: #0b5ed7; }
@@ -86,6 +88,12 @@
         <button class="btn-crop" onclick="cropToView()">✂️ Crop to View</button>
         <button class="btn-bg-sub" onclick="subtractBackgroundFromPlotted()">✨ Subtract Background</button>
         <button class="btn-ref-sub" onclick="openSubtractionModal()">🧪 Subtract Reference Scan</button>
+        
+        <div style="display: flex; align-items: center; width: 100%; gap: 4px;">
+            <button class="btn-smooth" style="flex-grow: 1;" onclick="smoothNoise()">🍃 Smooth Noise</button>
+            <span style="font-size: 0.85rem; color: #495057; padding-left: 2px;">Win:</span>
+            <input type="number" id="smooth-window-input" value="11" step="2" min="3" style="width: 45px; padding: 8px 4px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.85rem; text-align: center;">
+        </div>
         
         <div style="display: flex; align-items: center; width: 100%; gap: 4px;">
             <button id="btn-normalize-toggle" class="btn-normalize" style="flex-grow: 1;" onclick="toggleNormalizationMode()">⚖️ Normalize to Peak</button>
@@ -253,7 +261,7 @@
         function openSubtractionModal() {
             const datasetKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_"));
             if (datasetKeys.length < 2) {
-                alert("You must have at least two scans loaded (one reference background blank and one target scan) to execute subtraction.");
+                alert("You must have at least two scans loaded to execute subtraction.");
                 return;
             }
             const selectEl = document.getElementById('modal-blank-select');
@@ -291,8 +299,57 @@
             closeSubtractionModal(); refreshCheckboxTargetsPanel(); updateChartCanvas();
         }
 
+        // NEW FUNCTIONALITY: Localized Symmetric moving Gaussian Window smoothing filter algorithm
+        function smoothNoise() {
+            let winSize = parseInt(document.getElementById('smooth-window-input').value);
+            if (isNaN(winSize) || winSize < 3) {
+                winSize = 11;
+                document.getElementById('smooth-window-input').value = "11";
+            }
+            if (winSize % 2 === 0) winSize++; // Coeff window boundaries must be odd numbered integers
+            
+            const datasetKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_") && !k.startsWith("__ref_"));
+            if (datasetKeys.length === 0) return;
+            
+            saveToHistory();
+            clearFittedModelsCache();
+            
+            datasetKeys.forEach(key => {
+                const intensities = persistentDatasets[key].intensities;
+                if (intensities.length <= winSize) return;
+                
+                const smoothed = new Array(intensities.length);
+                const half = Math.floor(winSize / 2);
+                
+                // Precompute symmetric standard deviation matrix kernel factors to filter residual noise
+                let kernel = [];
+                let sigma = half / 2.2;
+                let sum = 0;
+                for (let i = -half; i <= half; i++) {
+                    let g = Math.exp(-(i * i) / (2 * sigma * sigma));
+                    kernel.push(g);
+                    sum += g;
+                }
+                kernel = kernel.map(v => v / sum);
+                
+                for (let i = 0; i < intensities.length; i++) {
+                    let kSum = 0;
+                    for (let w = -half; w <= half; w++) {
+                        let idx = i + w;
+                        // Clamp out of bounds edge conditions arrays indices to prevent tail decay
+                        if (idx < 0) idx = 0;
+                        if (idx >= intensities.length) idx = intensities.length - 1;
+                        kSum += intensities[idx] * kernel[w + half];
+                    }
+                    smoothed[i] = kSum;
+                }
+                persistentDatasets[key].intensities = smoothed;
+            });
+            refreshCheckboxTargetsPanel();
+            updateChartCanvas();
+        }
+
         function refreshCheckboxTargetsPanel() {
-            /** Enumerates ALL active traces, references, and regression components with an explicit deletion switch. */
             const panel = document.getElementById('fit-targets-panel');
             const datasetKeys = Object.keys(persistentDatasets);
             const historicalCheckedStates = {};
@@ -307,12 +364,9 @@
             datasetKeys.forEach(key => {
                 const wrapper = document.createElement('div');
                 wrapper.style.display = 'flex'; wrapper.style.alignItems = 'center'; wrapper.style.justifyContent = 'space-between'; wrapper.style.width = '100%'; wrapper.style.margin = '4px 0';
-                
-                const leftDiv = document.createElement('div');
-                leftDiv.className = 'checkbox-container'; leftDiv.style.margin = '0';
+                const leftDiv = document.createElement('div'); leftDiv.className = 'checkbox-container'; leftDiv.style.margin = '0';
                 
                 const isFitOrRef = key.startsWith("__fit_") || key.startsWith("__ref_");
-                
                 if (!isFitOrRef) {
                     const cb = document.createElement('input'); cb.type = 'checkbox'; cb.id = `fit-check-${key}`; cb.value = key;
                     cb.checked = historicalCheckedStates[key] !== undefined ? historicalCheckedStates[key] : true;
@@ -325,7 +379,7 @@
                 }
                 
                 const delSpan = document.createElement('span');
-                delSpan.innerText = "❌"; delSpan.title = "Remove this targeted layer"; delSpan.style.cursor = "pointer"; delSpan.style.fontSize = "0.82rem"; delSpan.style.marginLeft = "8px";
+                delSpan.innerText = "❌"; delSpan.style.cursor = "pointer"; delSpan.style.fontSize = "0.82rem"; delSpan.style.marginLeft = "8px";
                 delSpan.onclick = function() { removeSpecificDataset(key); };
                 
                 wrapper.appendChild(leftDiv); wrapper.appendChild(delSpan); panel.appendChild(wrapper);
@@ -378,39 +432,6 @@
                 for (let i = 0; i < intensities.length; i++) dataset.intensities[i] = intensities[i] - bg[i];
             });
             updateChartCanvas();
-        }
-
-        function nelderMeadOptimization(objectiveFunc, initialGuess, maxIterations = 600, tolerance = 1e-7) {
-            const N = initialGuess.length; let simplex = [];
-            simplex.push({ params: [...initialGuess], score: objectiveFunc(initialGuess) });
-            for (let i = 0; i < N; i++) {
-                let vertex = [...initialGuess]; vertex[i] = vertex[i] === 0 ? 0.005 : vertex[i] * 1.05;
-                simplex.push({ params: vertex, score: objectiveFunc(vertex) });
-            }
-            for (let iter = 0; iter < maxIterations; iter++) {
-                simplex.sort((a, b) => a.score - b.score);
-                if (Math.abs(simplex[N].score - simplex[0].score) < tolerance) break;
-                let centroid = new Array(N).fill(0);
-                for (let i = 0; i < N; i++) { for (let j = 0; j < N; j++) centroid[j] += simplex[i].params[j] / N; }
-                let reflected = new Array(N); for (let j = 0; j < N; j++) reflected[j] = centroid[j] + 1.0 * (centroid[j] - simplex[N].params[j]);
-                let scoreReflected = objectiveFunc(reflected);
-                if (scoreReflected < simplex[0].score) {
-                    let expanded = new Array(N); for (let j = 0; j < N; j++) expanded[j] = centroid[j] + 2.0 * (reflected[j] - centroid[j]);
-                    let scoreExpanded = objectiveFunc(expanded);
-                    if (scoreExpanded < scoreReflected) { simplex[N] = { params: expanded, score: scoreExpanded }; continue; }
-                    else { simplex[N] = { params: reflected, score: scoreReflected }; continue; }
-                }
-                if (scoreReflected < simplex[N-1].score) { simplex[N] = { params: reflected, score: scoreReflected }; continue; }
-                let contracted = new Array(N); let sourceCoords = scoreReflected < simplex[N].score ? reflected : simplex[N].params;
-                for (let j = 0; j < N; j++) contracted[j] = centroid[j] + 0.5 * (sourceCoords[j] - centroid[j]);
-                let scoreContracted = objectiveFunc(contracted);
-                if (scoreContracted < simplex[N].score) { simplex[N] = { params: contracted, score: scoreContracted }; continue; }
-                for (let i = 1; i <= N; i++) {
-                    for (let j = 0; j < N; j++) simplex[i].params[j] = simplex[0].params[j] + 0.5 * (simplex[i].params[j] - simplex[0].params[j]);
-                    simplex[i].score = objectiveFunc(simplex[i].params);
-                }
-            }
-            simplex.sort((a, b) => a.score - b.score); return simplex[0].params;
         }
 
         function executePeakOptimization() {

@@ -11,6 +11,7 @@ import webbrowser
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from scipy.optimize import curve_fit
+from scipy.signal import savgol_filter
 
 # Conditional Imports to ensure app stability if packages are absent on launch
 try:
@@ -196,6 +197,16 @@ class XRDPlotterGUI:
         ttk.Button(sidebar_frame, text="✨ Subtract Background", command=self.subtract_background_profile).pack(side="top", fill="x", pady=3)
         ttk.Button(sidebar_frame, text="🧪 Subtract Reference Scan", command=self.open_blank_subtraction_dialog).pack(side="top", fill="x", pady=3)
         
+        # NEW FUNCTIONALITY: Savitzky-Golay Signal Noise Smoothing Layout Row
+        smooth_row = ttk.Frame(sidebar_frame)
+        smooth_row.pack(side="top", fill="x", pady=3)
+        
+        ttk.Button(smooth_row, text="🍃 Smooth Noise", command=self.smooth_active_profiles).pack(side="left", fill="x", expand=True)
+        ttk.Label(smooth_row, text="Win:", font=("Helvetica", 9)).pack(side="left", padx=(4, 1))
+        self.ent_smooth_win = ttk.Entry(smooth_row, width=4)
+        self.ent_smooth_win.insert(0, "11")
+        self.ent_smooth_win.pack(side="left", padx=1)
+        
         # Inline Horizontal Configuration Row for Normalization and variable window field bounds
         norm_row = ttk.Frame(sidebar_frame)
         norm_row.pack(side="top", fill="x", pady=3)
@@ -231,7 +242,6 @@ class XRDPlotterGUI:
         panel_search = ttk.LabelFrame(sidebar_frame, text=" 🌐 Materials Genome API Search ", padding=(8, 6))
         panel_search.pack(side="top", fill="x", pady=5)
         
-        # NEW FUNCTIONALITY: Added an inline layout containing a clickable hyperlink anchor to fetch web keys
         key_header_frame = ttk.Frame(panel_search)
         key_header_frame.pack(fill="x", pady=(0, 2))
         
@@ -426,7 +436,7 @@ class XRDPlotterGUI:
             messagebox.showerror("IO Fault", f"Could not write configuration token: {e}")
 
     def refresh_checkbox_targets_panel(self):
-        """Itemizes ALL loaded data, mathematical fit, and literature curves with target check boxes and deletion gates."""
+        """Itemizes ALL loaded data, mathematical fit, and literature curves with target checkboxes and deletion gates."""
         for child in self.panel_fit_targets.winfo_children():
             child.destroy()
             
@@ -622,9 +632,9 @@ class XRDPlotterGUI:
         self.ax.relim(); self.ax.autoscale_view(); self.canvas.draw()
 
     def open_blank_subtraction_dialog(self):
-        raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
+        raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_") and not k.startswith("__ref_")]
         if len(raw_keys) < 2:
-            messagebox.showwarning("Insufficient Data", "You must have at least two scans loaded (one reference background blank and one target scan) to execute subtraction.")
+            messagebox.showwarning("Insufficient Data", "You must have at least two scans loaded to execute subtraction.")
             return
             
         pop = tk.Toplevel(self.root)
@@ -683,24 +693,63 @@ class XRDPlotterGUI:
                 self.active_datasets[target_key]['intensities'] = target_intensities - blank_profile_interp
                 
             pop.destroy()
-            
-            self.ax.clear()
-            self.configure_axis_labels()
-            self.cursor_line = None
-            
-            for file_path, data in self.active_datasets.items():
-                if file_path.startswith("__ref_"):
-                    self.ax.plot(data['angles'], data['intensities'], linestyle='-.', linewidth=1.5, alpha=0.8, label=data['label'])
-                else:
-                    self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
-            
-            self.ax.legend(loc="upper right", frameon=True, fontsize=8)
-            self.ax.relim()
-            self.ax.autoscale_view()
-            self.canvas.draw()
-            self.status_var.set(f"Subtracted reference scan: '{self.active_datasets[blank_key]['label']}' from chosen plots.")
+            self.replot_and_refresh_canvas()
+            self.status_var.set(f"Subtracted reference scan: '{self.active_datasets[blank_key]['label']}'.")
             
         ttk.Button(pop, text="Subtract Reference Blank", command=run_reference_subtraction).pack(pady=8)
+
+    # NEW FUNCTIONALITY: Savitzky-Golay Native Execution loop handler
+    def smooth_active_profiles(self):
+        """Applies a peak-preserving polynomial Savitzky-Golay smoothing kernel to active rows."""
+        if not self.active_datasets:
+            messagebox.showwarning("No Data", "No active experimental trace paths found to smooth.")
+            return
+            
+        try:
+            window = int(self.ent_smooth_win.get().strip())
+            if window < 3: raise ValueError
+            if window % 2 == 0:
+                window += 1  # Window parameter mapping must be odd numbered integers
+        except ValueError:
+            window = 11
+            self.ent_smooth_win.delete(0, tk.END)
+            self.ent_smooth_win.insert(0, "11")
+            
+        self.save_to_history()
+        self.clear_fitted_artists()
+        
+        data_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_") and not k.startswith("__ref_")]
+        smoothed_count = 0
+        
+        for key in data_keys:
+            y = self.active_datasets[key]['intensities']
+            if len(y) > window:
+                # Polynomial order 2 preserves parabolic curvature limits at peak maximas flawlessly
+                self.active_datasets[key]['intensities'] = savgol_filter(y, window, polyorder=2)
+                smoothed_count += 1
+                
+        if smoothed_count > 0:
+            self.replot_and_refresh_canvas()
+            self.status_var.set(f"Successfully smoothed residual noise across {smoothed_count} layers (Savgol window={window}).")
+
+    def replot_and_refresh_canvas(self):
+        self.ax.clear()
+        self.configure_axis_labels()
+        self.cursor_line = None
+        
+        for file_path, data in self.active_datasets.items():
+            if file_path.startswith("__fit_composite"):
+                self.ax.plot(data['angles'], data['intensities'], color='#000000', linestyle='-', linewidth=2.0, label=data['label'])
+            elif file_path.startswith("__fit_"):
+                self.ax.plot(data['angles'], data['intensities'], linestyle='--', linewidth=1.2, label=data['label'])
+            elif file_path.startswith("__ref_"):
+                self.ax.plot(data['angles'], data['intensities'], linestyle='-.', linewidth=1.5, alpha=0.8, label=data['label'])
+            else:
+                self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
+                
+        if self.active_datasets:
+            self.ax.legend(loc="upper right", frameon=True, fontsize=8)
+        self.ax.relim(); self.ax.autoscale_view(); self.refresh_checkbox_targets_panel(); self.canvas.draw()
 
     def execute_database_search(self, mode="text"):
         if not MP_LIBRARIES_AVAILABLE:
@@ -820,6 +869,7 @@ class XRDPlotterGUI:
         ttk.Button(pop, text="Plot Theoretical Diffractogram", command=trigger_plot_conversion).pack(pady=8)
 
     def simulate_and_add_reference(self, doc):
+        """Calculates powder profiles and incorporates data arrays to UI layers securely."""
         structure = doc.structure
         mat_id = str(doc.material_id)
         sym_symbol = doc.symmetry.symbol if doc.symmetry else "Unknown"
@@ -850,7 +900,6 @@ class XRDPlotterGUI:
         key_handle = f"__ref_{mat_id}"
         
         self.active_datasets[key_handle] = {'angles': angles_grid, 'intensities': intensities_grid, 'label': label}
-        
         self.ax.plot(angles_grid, intensities_grid, linestyle='-.', linewidth=1.5, alpha=0.8, label=label)
         self.ax.legend(loc="upper right", frameon=True, fontsize=8)
         self.refresh_checkbox_targets_panel()
