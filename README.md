@@ -10,3 +10,5 @@ Collection of Scripts for Handling Scientific Data
     - Curve normalization to peak
     - Cropping to view
     - Search of theoretical xrd based on formula or peak selection via Materials Genome (python version only).
+    - Smoothing curves
+    - Background subtraction (via regularization or through reference diffractogram)
