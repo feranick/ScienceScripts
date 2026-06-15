@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 import numpy as np
 import threading
+import webbrowser
 
 # Embed Matplotlib into Tkinter
 from matplotlib.figure import Figure
@@ -22,7 +23,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.06.09.2"
+VERSION_TAG = "v2026.06.15.1"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 
@@ -114,13 +115,7 @@ def load_xrd_data(file_path):
             df = pd.read_csv(file_path, skiprows=skiprows)
             df.columns = df.columns.str.strip()
             if 'Angle' in df.columns and 'Intensity' in df.columns:
-                # Coerce to numeric and drop non-numeric footer/junk rows
-                ang = pd.to_numeric(df['Angle'], errors='coerce')
-                inten = pd.to_numeric(df['Intensity'], errors='coerce')
-                valid = ang.notna() & inten.notna()
-                if not valid.any():
-                    raise ValueError("No numeric data rows found under '[Scan points]'.")
-                return ang[valid].values, inten[valid].values, sample_id
+                return df['Angle'].values, df['Intensity'].values, sample_id
             else:
                 raise ValueError("Missing required 'Angle' or 'Intensity' columns.")
         except Exception as e:
@@ -130,12 +125,7 @@ def load_xrd_data(file_path):
         try:
             tree = ET.parse(file_path)
             root = tree.getroot()
-            # Derive the namespace from the root tag so 1.x/2.x XRDML versions all parse
-            if root.tag.startswith('{'):
-                ns_uri = root.tag[1:].split('}')[0]
-            else:
-                ns_uri = 'http://www.xrdml.com/XRDMeasurement/2.2'
-            ns = {'x': ns_uri}
+            ns = {'x': 'http://www.xrdml.com/XRDMeasurement/2.2'}
             
             s_id = root.find('.//x:sample/x:id', ns)
             if s_id is not None and s_id.text:
@@ -189,7 +179,7 @@ class XRDPlotterGUI:
         self.guess_lines_artists = []
         self.fitted_curves_artists = []
         self.target_checkbox_vars = {} 
-        self.history_stack = [] # Undo tracking history stack array matrix
+        self.history_stack = []
         
         self.fitting_mode_active = False
         self.normalization_mode_active = False
@@ -204,6 +194,7 @@ class XRDPlotterGUI:
         ttk.Button(sidebar_frame, text="📁 Select File(s)", command=self.select_and_plot_files).pack(side="top", fill="x", pady=3)
         ttk.Button(sidebar_frame, text="✂️ Crop to View", command=self.crop_to_current_view).pack(side="top", fill="x", pady=3)
         ttk.Button(sidebar_frame, text="✨ Subtract Background", command=self.subtract_background_profile).pack(side="top", fill="x", pady=3)
+        ttk.Button(sidebar_frame, text="🧪 Subtract Reference Scan", command=self.open_blank_subtraction_dialog).pack(side="top", fill="x", pady=3)
         
         # Inline Horizontal Configuration Row for Normalization and variable window field bounds
         norm_row = ttk.Frame(sidebar_frame)
@@ -226,8 +217,6 @@ class XRDPlotterGUI:
         
         ttk.Button(sidebar_frame, text="📥 Export to CSV", command=self.export_active_data_to_csv).pack(side="top", fill="x", pady=3)
         ttk.Button(sidebar_frame, text="🗑️ Clear Canvas", command=self.clear_canvas).pack(side="top", fill="x", pady=3)
-        
-        # New Interactive Undo Button Element
         self.btn_undo = ttk.Button(sidebar_frame, text="↩️ Undo Last Action", command=self.undo_last_action, state="disabled")
         self.btn_undo.pack(side="top", fill="x", pady=3)
         
@@ -242,7 +231,15 @@ class XRDPlotterGUI:
         panel_search = ttk.LabelFrame(sidebar_frame, text=" 🌐 Materials Genome API Search ", padding=(8, 6))
         panel_search.pack(side="top", fill="x", pady=5)
         
-        ttk.Label(panel_search, text="API Key:", font=("Helvetica", 8, "bold")).pack(anchor="w")
+        # NEW FUNCTIONALITY: Added an inline layout containing a clickable hyperlink anchor to fetch web keys
+        key_header_frame = ttk.Frame(panel_search)
+        key_header_frame.pack(fill="x", pady=(0, 2))
+        
+        ttk.Label(key_header_frame, text="API Key:", font=("Helvetica", 8, "bold")).pack(side="left", anchor="w")
+        
+        lbl_hyperlink = ttk.Label(key_header_frame, text="Get Key ↗", foreground="#0d6efd", cursor="hand2", font=("Helvetica", 8, "underline"))
+        lbl_hyperlink.pack(side="right", anchor="e")
+        lbl_hyperlink.bind("<Button-1>", lambda e: webbrowser.open_new("https://next-gen.materialsproject.org/api"))
         
         key_entry_row = ttk.Frame(panel_search)
         key_entry_row.pack(fill="x", pady=(0, 4))
@@ -263,9 +260,9 @@ class XRDPlotterGUI:
         btn_search_match = ttk.Button(panel_search, text="🎯 Search/Match by Peaks", command=lambda: self.execute_database_search(mode="peaks"))
         btn_search_match.pack(fill="x", pady=2)
 
-        # --- Checkbox Selector Panel ---
-        self.panel_fit_targets = ttk.LabelFrame(sidebar_frame, text=" 🎯 Targets for Fitting ", padding=(8, 6))
-        self.panel_fit_targets.pack(side="top", fill="x", pady=8)
+        # --- Active Layers Control Panel Frame Container ---
+        self.panel_fit_targets = ttk.LabelFrame(sidebar_frame, text=" 📋 Plotted Canvas Layers ", padding=(8, 6))
+        self.panel_fit_targets.pack(side="top", fill="x", pady=8, expand=True)
         self.lbl_no_targets = ttk.Label(self.panel_fit_targets, text="No Scans Loaded", font=("Helvetica", 9, "italic"), foreground="#888888")
         self.lbl_no_targets.pack(side="top", anchor="w", padx=4)
         
@@ -324,9 +321,6 @@ class XRDPlotterGUI:
         self.ax.set_title("XRD Diffraction Pattern Analysis", fontsize=11, fontweight='bold', pad=8)
         self.ax.grid(True, linestyle="--", alpha=0.5)
 
-    # ==========================================
-    # CORE TRACKING HISTORY SNAPSHOT OPERATORS
-    # ==========================================
     def save_to_history(self):
         """Generates a deep state matrix cache to enable instantaneous layout rollbacks."""
         if len(self.history_stack) >= 25:
@@ -355,7 +349,6 @@ class XRDPlotterGUI:
             
         snapshot = self.history_stack.pop()
         
-        # Clean current active artistic trace lines
         for line in self.fitted_curves_artists:
             try: line.remove()
             except Exception: pass
@@ -365,24 +358,20 @@ class XRDPlotterGUI:
             
         self.fitted_curves_artists = []
         self.guess_lines_artists = []
-        
-        # Restore references
         self.active_datasets = snapshot['active_datasets']
         self.peak_guesses = snapshot['peak_guesses']
         
-        # Restore Treeview Data Row Matrices
         for row in self.result_table.get_children():
             self.result_table.delete(row)
         for values in snapshot['table_data']:
             self.result_table.insert("", "end", values=values)
             
-        # Re-plot entire axes system from scratch
         self.ax.clear()
         self.configure_axis_labels()
         self.cursor_line = None
         
         for file_path, data in self.active_datasets.items():
-            if file_path.startswith("__fit_overall_composite"):
+            if file_path.startswith("__fit_composite"):
                 line, = self.ax.plot(data['angles'], data['intensities'], color='#000000', linestyle='-', linewidth=2.0, label=data['label'])
                 self.fitted_curves_artists.append(line)
             elif file_path.startswith("__fit_"):
@@ -393,7 +382,6 @@ class XRDPlotterGUI:
             else:
                 self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
                 
-        # Re-plot peak selection vertical bars
         for g_x in self.peak_guesses:
             guess_line = self.ax.axvline(g_x, color='#d63384', linestyle=':', linewidth=1.5)
             self.guess_lines_artists.append(guess_line)
@@ -438,42 +426,33 @@ class XRDPlotterGUI:
             messagebox.showerror("IO Fault", f"Could not write configuration token: {e}")
 
     def refresh_checkbox_targets_panel(self):
+        """Itemizes ALL loaded data, mathematical fit, and literature curves with target check boxes and deletion gates."""
         for child in self.panel_fit_targets.winfo_children():
             child.destroy()
             
-        raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
-        
-        if not raw_keys:
+        if not self.active_datasets:
             self.lbl_no_targets = ttk.Label(self.panel_fit_targets, text="No Scans Loaded", font=("Helvetica", 9, "italic"), foreground="#888888")
             self.lbl_no_targets.pack(side="top", anchor="w", padx=4)
             return
 
-        self.target_checkbox_vars = {k: v for k, v in self.target_checkbox_vars.items() if k in raw_keys}
-        
-        for key in raw_keys:
-            if key not in self.target_checkbox_vars:
-                self.target_checkbox_vars[key] = tk.BooleanVar(value=True)
-                
+        for key, data in list(self.active_datasets.items()):
             row_frame = ttk.Frame(self.panel_fit_targets)
             row_frame.pack(side="top", fill="x", pady=2, expand=True)
-                
-            cb = ttk.Checkbutton(
-                row_frame, 
-                text=self.active_datasets[key]['label'], 
-                variable=self.target_checkbox_vars[key]
-            )
-            cb.pack(side="left", anchor="w")
             
-            btn_del = ttk.Button(
-                row_frame, 
-                text="❌", 
-                width=2, 
-                command=lambda k=key: self.remove_specific_dataset(k)
-            )
+            if not key.startswith("__fit_") and not key.startswith("__ref_"):
+                if key not in self.target_checkbox_vars:
+                    self.target_checkbox_vars[key] = tk.BooleanVar(value=True)
+                cb = ttk.Checkbutton(row_frame, text=data['label'], variable=self.target_checkbox_vars[key])
+                cb.pack(side="left", anchor="w")
+            else:
+                lbl = ttk.Label(row_frame, text=data['label'], font=("Helvetica", 9, "italic"), foreground="#555555")
+                lbl.pack(side="left", anchor="w", padx=4)
+            
+            btn_del = ttk.Button(row_frame, text="❌", width=2, command=lambda k=key: self.remove_specific_dataset(k))
             btn_del.pack(side="right", anchor="e")
 
     def remove_specific_dataset(self, key_to_remove):
-        self.save_to_history() # Track state change
+        self.save_to_history() 
         if key_to_remove in self.active_datasets:
             del self.active_datasets[key_to_remove]
             
@@ -484,26 +463,16 @@ class XRDPlotterGUI:
         self.ax.clear()
         self.configure_axis_labels()
         self.cursor_line = None  
-        # ax.clear() destroyed the old artists; rebuild tracking lists as we replot
-        self.fitted_curves_artists = []
-        self.guess_lines_artists = []
         
         for file_path, data in self.active_datasets.items():
-            if file_path.startswith("__fit_overall_composite"):
-                line, = self.ax.plot(data['angles'], data['intensities'], color='#000000', linestyle='-', linewidth=2.0, label=data['label'])
-                self.fitted_curves_artists.append(line)
+            if file_path.startswith("__fit_composite"):
+                self.ax.plot(data['angles'], data['intensities'], color='#000000', linestyle='-', linewidth=2.0, label=data['label'])
             elif file_path.startswith("__fit_"):
-                line, = self.ax.plot(data['angles'], data['intensities'], linestyle='--', linewidth=1.2, label=data['label'])
-                self.fitted_curves_artists.append(line)
+                self.ax.plot(data['angles'], data['intensities'], linestyle='--', linewidth=1.2, label=data['label'])
             elif file_path.startswith("__ref_"):
                 self.ax.plot(data['angles'], data['intensities'], linestyle='-.', linewidth=1.5, alpha=0.8, label=data['label'])
             else:
                 self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
-                
-        # Re-plot peak guess markers (also destroyed by ax.clear)
-        for g_x in self.peak_guesses:
-            guess_line = self.ax.axvline(g_x, color='#d63384', linestyle=':', linewidth=1.5)
-            self.guess_lines_artists.append(guess_line)
                 
         if self.active_datasets:
             self.ax.legend(loc="upper right", frameon=True, fontsize=8)
@@ -559,7 +528,6 @@ class XRDPlotterGUI:
 
     def on_canvas_click(self, event):
         if event.inaxes == self.ax:
-            # Handle Normalization Mode Click Event (Left Click)
             if self.normalization_mode_active and event.button == 1:
                 x_click = event.xdata
                 
@@ -572,13 +540,10 @@ class XRDPlotterGUI:
                 
                 data_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
                 
-                # Check validation bounds before committing history stack indices
                 will_normalize = False
                 for key in data_keys:
                     angles = self.active_datasets[key]['angles']
                     intensities = self.active_datasets[key]['intensities']
-                    if len(intensities) == 0:
-                        continue  # Dataset emptied by a previous crop
                     mask = (angles >= x_click - window_span) & (angles <= x_click + window_span)
                     if np.any(mask):
                         global_max = np.max(intensities)
@@ -588,14 +553,12 @@ class XRDPlotterGUI:
                             break
                             
                 if will_normalize:
-                    self.save_to_history() # Track state change
+                    self.save_to_history() 
                 
                 normalized_any = False
                 for key in data_keys:
                     angles = self.active_datasets[key]['angles']
                     intensities = self.active_datasets[key]['intensities']
-                    if len(intensities) == 0:
-                        continue  # Dataset emptied by a previous crop
                     mask = (angles >= x_click - window_span) & (angles <= x_click + window_span)
                     
                     if np.any(mask):
@@ -623,9 +586,8 @@ class XRDPlotterGUI:
                 self.btn_normalize_toggle.config(text="⚖️ Normalize to Peak")
                 return
 
-            # Handle Fitting Mode Click Event (Right Click)
             elif self.fitting_mode_active and event.button == 3:
-                self.save_to_history() # Track state change
+                self.save_to_history() 
                 x_guess = event.xdata
                 self.peak_guesses.append(x_guess)
                 guess_line = self.ax.axvline(x_guess, color='#d63384', linestyle=':', linewidth=1.5)
@@ -638,7 +600,7 @@ class XRDPlotterGUI:
             return
         data_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
         if not data_keys: return
-        self.save_to_history() # Track state change
+        self.save_to_history() 
         self.clear_fitted_artists()
 
         for file_path in data_keys:
@@ -659,6 +621,87 @@ class XRDPlotterGUI:
         self.ax.legend(loc="upper right", frameon=True, fontsize=9)
         self.ax.relim(); self.ax.autoscale_view(); self.canvas.draw()
 
+    def open_blank_subtraction_dialog(self):
+        raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
+        if len(raw_keys) < 2:
+            messagebox.showwarning("Insufficient Data", "You must have at least two scans loaded (one reference background blank and one target scan) to execute subtraction.")
+            return
+            
+        pop = tk.Toplevel(self.root)
+        pop.title("Experimental Reference Matrix Subtraction")
+        pop.geometry("460x320")
+        pop.transient(self.root)
+        pop.grab_set()
+        
+        ttk.Label(pop, text="Select Blank / Supporting Substrate Scan (e.g. Clay Blank):", font=("Helvetica", 9, "bold")).pack(anchor="w", padx=12, pady=(12, 2))
+        
+        combo_blank = ttk.Combobox(pop, state="readonly", width=55)
+        combo_blank['values'] = [self.active_datasets[k]['label'] for k in raw_keys]
+        combo_blank.current(0)
+        combo_blank.pack(fill="x", padx=12, pady=(0, 12))
+        
+        ttk.Label(pop, text="Select Target Scan(s) to isolate and filter background from:", font=("Helvetica", 9, "bold")).pack(anchor="w", padx=12, pady=(4, 2))
+        
+        frame_list = ttk.Frame(pop)
+        frame_list.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+        scroll = ttk.Scrollbar(frame_list)
+        scroll.pack(side="right", fill="y")
+        
+        listbox_targets = tk.Listbox(frame_list, selectmode="multiple", yscrollcommand=scroll.set, exportselection=False)
+        for k in raw_keys:
+            listbox_targets.insert(tk.END, self.active_datasets[k]['label'])
+        listbox_targets.pack(fill="both", expand=True, side="left")
+        scroll.config(command=listbox_targets.yview)
+        
+        for idx in range(1, len(raw_keys)):
+            listbox_targets.select_set(idx)
+            
+        def run_reference_subtraction():
+            blank_idx = combo_blank.current()
+            selected_targets = listbox_targets.curselection()
+            
+            if not selected_targets:
+                messagebox.showwarning("Void Bounds", "Please pick at least one sample data scan target row.")
+                return
+                
+            blank_key = raw_keys[blank_idx]
+            blank_angles = self.active_datasets[blank_key]['angles']
+            blank_intensities = self.active_datasets[blank_key]['intensities']
+            
+            self.save_to_history()
+            self.clear_fitted_artists()
+            
+            for idx in selected_targets:
+                target_key = raw_keys[idx]
+                if target_key == blank_key:
+                    continue 
+                    
+                target_angles = self.active_datasets[target_key]['angles']
+                target_intensities = self.active_datasets[target_key]['intensities']
+                
+                blank_profile_interp = np.interp(target_angles, blank_angles, blank_intensities)
+                self.active_datasets[target_key]['intensities'] = target_intensities - blank_profile_interp
+                
+            pop.destroy()
+            
+            self.ax.clear()
+            self.configure_axis_labels()
+            self.cursor_line = None
+            
+            for file_path, data in self.active_datasets.items():
+                if file_path.startswith("__ref_"):
+                    self.ax.plot(data['angles'], data['intensities'], linestyle='-.', linewidth=1.5, alpha=0.8, label=data['label'])
+                else:
+                    self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
+            
+            self.ax.legend(loc="upper right", frameon=True, fontsize=8)
+            self.ax.relim()
+            self.ax.autoscale_view()
+            self.canvas.draw()
+            self.status_var.set(f"Subtracted reference scan: '{self.active_datasets[blank_key]['label']}' from chosen plots.")
+            
+        ttk.Button(pop, text="Subtract Reference Blank", command=run_reference_subtraction).pack(pady=8)
+
     def execute_database_search(self, mode="text"):
         if not MP_LIBRARIES_AVAILABLE:
             messagebox.showinfo("Packages Missing", "To query reference data directly, run this command in your terminal folder:\npip install mp-api pymatgen")
@@ -678,11 +721,9 @@ class XRDPlotterGUI:
             return
             
         self.status_var.set("Searching Materials Project...")
-        # Snapshot the guesses now: the worker thread must not read mutable UI state
-        guesses_snapshot = tuple(self.peak_guesses)
-        threading.Thread(target=self._bg_search_worker, args=(api_key, formula, mode, guesses_snapshot), daemon=True).start()
+        threading.Thread(target=self._bg_search_worker, args=(api_key, formula, mode), daemon=True).start()
 
-    def _bg_search_worker(self, api_key, query_str, mode, peak_guesses):
+    def _bg_search_worker(self, api_key, query_str, mode):
         try:
             query_kwargs = {
                 "fields": ["material_id", "structure", "symmetry", "energy_above_hull", "formula_pretty"]
@@ -703,7 +744,7 @@ class XRDPlotterGUI:
                     if mode == "peaks":
                         pattern = calculator.get_pattern(doc.structure, two_theta_range=(5, 90))
                         theoretical_peaks = np.array(pattern.x)
-                        score, avg_err = calculate_crystallographic_match_score(theoretical_peaks, peak_guesses)
+                        score, avg_err = calculate_crystallographic_match_score(theoretical_peaks, self.peak_guesses)
                         compiled_results.append((score, avg_err, doc))
                     else:
                         compiled_results.append((0.0, 0.0, doc))
@@ -716,14 +757,10 @@ class XRDPlotterGUI:
             self.root.after(0, self.show_polymorph_selection, compiled_results, mode)
         except Exception as e:
             self.root.after(0, lambda err=str(e): messagebox.showerror("API Connection Error", f"Network handshake fault: {err}"))
-            self.root.after(0, self._reset_status_count)
-
-    def _reset_status_count(self):
-        raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
-        self.status_var.set(f"Active profiles loaded: {len(raw_keys)}")
+            raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
+            self.root.after(0, lambda: self.status_var.set(f"Active profiles loaded: {len(raw_keys)}"))
 
     def show_polymorph_selection(self, scored_docs, mode="text"):
-        self._reset_status_count()  # Clear the "Searching..." message
         if not scored_docs:
             messagebox.showinfo("Empty Registry", "No matching thermodynamic crystal arrays found for that search query.")
             self.refresh_checkbox_targets_panel()
@@ -775,7 +812,7 @@ class XRDPlotterGUI:
             sel = tree.selection()
             if not sel: return
             pop.destroy()
-            self.save_to_history() # Track state change before mapping down theoretical entries
+            self.save_to_history() 
             for item_id in sel:
                 target_doc = doc_map[item_id]
                 self.simulate_and_add_reference(target_doc)
@@ -783,24 +820,18 @@ class XRDPlotterGUI:
         ttk.Button(pop, text="Plot Theoretical Diffractogram", command=trigger_plot_conversion).pack(pady=8)
 
     def simulate_and_add_reference(self, doc):
-        """Calculates powder profiles and incorporates data arrays to UI layers securely."""
         structure = doc.structure
         mat_id = str(doc.material_id)
         sym_symbol = doc.symmetry.symbol if doc.symmetry else "Unknown"
         formula = doc.formula_pretty if getattr(doc, 'formula_pretty', None) else "Ref"
         
-        # DYNAMIC FIX: Read the current cropped/visible x-axis limits from the plot
         xmin, xmax = self.ax.get_xlim()
-        
-        # Fallback guard rails in case the plot limits are uninitialized or inverted
         if xmin >= xmax or xmin < 0:
             xmin, xmax = 5.0, 90.0
         
         calculator = XRDCalculator(wavelength="CuKa")
-        # Optimization: Restrict the database pattern generation to your cropped region
         pattern = calculator.get_pattern(structure, two_theta_range=(xmin, xmax))
         
-        # Generate the interpolation grid strictly within the cropped boundaries
         angles_grid = np.linspace(xmin, xmax, 2000)
         intensities_grid = np.zeros_like(angles_grid)
         sigma = 0.12  
@@ -817,14 +848,6 @@ class XRDPlotterGUI:
             
         label = f"Ref: {formula} ({sym_symbol})"
         key_handle = f"__ref_{mat_id}"
-        
-        # If this reference was already plotted, remove the stale line so we
-        # don't accumulate duplicate artists/legend entries
-        if key_handle in self.active_datasets:
-            old_label = self.active_datasets[key_handle]['label']
-            for line in list(self.ax.lines):
-                if line.get_label() == old_label:
-                    line.remove()
         
         self.active_datasets[key_handle] = {'angles': angles_grid, 'intensities': intensities_grid, 'label': label}
         
@@ -846,7 +869,7 @@ class XRDPlotterGUI:
             messagebox.showwarning("Selection Missing", "Please select at least one check box pattern row to fit.")
             return
             
-        self.save_to_history() # Track state change before fitting optimization routine starts mutating arrays
+        self.save_to_history() 
         
         for line in self.fitted_curves_artists:
             try: line.remove()
@@ -862,10 +885,6 @@ class XRDPlotterGUI:
             x_data = self.active_datasets[key]['angles']
             y_data = self.active_datasets[key]['intensities']
             label_base = self.active_datasets[key]['label']
-            
-            if len(x_data) == 0:
-                fit_errors.append(f"{label_base}: dataset is empty (cropped out of view).")
-                continue
             
             p0 = []; bounds_min = []; bounds_max = []
             for g_x in self.peak_guesses:
@@ -906,9 +925,9 @@ class XRDPlotterGUI:
         )
         if not files: return
         
-        self.save_to_history() # Track state change before layering data profiles into memory arrays
-        
+        self.save_to_history() 
         loaded_count = 0; error_logs = []
+        
         for file_path in files:
             if file_path in self.active_datasets: continue
             try:
@@ -930,7 +949,7 @@ class XRDPlotterGUI:
     def crop_to_current_view(self):
         if not self.active_datasets: return
         xmin, xmax = self.ax.get_xlim()
-        self.save_to_history() # Track state change before permanently cropping data arrays matrix lengths
+        self.save_to_history() 
         self.clear_fitted_artists()
 
         for f_path, data in list(self.active_datasets.items()):
@@ -959,38 +978,14 @@ class XRDPlotterGUI:
         out_dir = filedialog.askdirectory(title="Select Output Folder")
         if not out_dir: return 
         success_count = 0
-        used_names = set()
-        export_errors = []
         for path_key, data in self.active_datasets.items():
             try:
-                if path_key.startswith("__fit_") or path_key.startswith("__ref_"):
-                    # Fit/ref keys embed the original full file path; reduce it to
-                    # the basename so the export name contains no path separators
-                    prefix, _, embedded = path_key.strip("_").rpartition("_")
-                    base = os.path.splitext(os.path.basename(embedded))[0] if embedded else ""
-                    b_name = f"{prefix}_{base}" if base else path_key.strip("_")
-                else:
-                    b_name = os.path.splitext(os.path.basename(path_key))[0]
-                # Strip any remaining characters that are unsafe in filenames
-                b_name = "".join(c if (c.isalnum() or c in "._- ") else "_" for c in b_name)
-                # Avoid silently overwriting on basename collisions
-                candidate = b_name
-                n = 2
-                while candidate in used_names:
-                    candidate = f"{b_name}_{n}"
-                    n += 1
-                used_names.add(candidate)
-                out_path = os.path.join(out_dir, f"clean_{candidate}.csv")
+                b_name = os.path.splitext(os.path.basename(path_key))[0] if not path_key.startswith("__fit_") and not path_key.startswith("__ref_") else path_key.strip("__")
+                out_path = os.path.join(out_dir, f"clean_{b_name}.csv")
                 pd.DataFrame({'Angle': data['angles'], 'Intensity': data['intensities']}).to_csv(out_path, index=False)
                 success_count += 1
-            except Exception as e:
-                export_errors.append(f"{path_key}: {e}")
-        msg = f"Successfully saved {success_count} data profiles."
-        if export_errors:
-            msg += "\n\nFailed:\n" + "\n".join(export_errors)
-            messagebox.showwarning("Export Finished With Errors", msg)
-        else:
-            messagebox.showinfo("Export Complete", msg)
+            except Exception as e: print(f"Exception tracking file save: {e}")
+        messagebox.showinfo("Export Complete", f"Successfully saved {success_count} data profiles.")
 
     def remove_fitted_only_artists(self):
         for line in self.fitted_curves_artists: 
@@ -1009,7 +1004,7 @@ class XRDPlotterGUI:
 
     def clear_canvas(self):
         if self.active_datasets:
-            self.save_to_history() # Track state change so that an accidental canvas purge can be completely undone
+            self.save_to_history() 
         self.active_datasets.clear(); self.clear_fitted_artists(); self.cursor_line = None  
         self.ax.clear(); self.configure_axis_labels(); self.refresh_checkbox_targets_panel(); self.canvas.draw()
         self.fitting_mode_active = False; self.normalization_mode_active = False
