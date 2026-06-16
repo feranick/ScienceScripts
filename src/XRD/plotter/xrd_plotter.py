@@ -24,7 +24,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.06.15.1"
+VERSION_TAG = "v2026.06.16.1"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 
@@ -197,7 +197,7 @@ class XRDPlotterGUI:
         ttk.Button(sidebar_frame, text="✨ Subtract Background", command=self.subtract_background_profile).pack(side="top", fill="x", pady=3)
         ttk.Button(sidebar_frame, text="🧪 Subtract Reference Scan", command=self.open_blank_subtraction_dialog).pack(side="top", fill="x", pady=3)
         
-        # NEW FUNCTIONALITY: Savitzky-Golay Signal Noise Smoothing Layout Row
+        # Savitzky-Golay Signal Noise Smoothing Layout Row
         smooth_row = ttk.Frame(sidebar_frame)
         smooth_row.pack(side="top", fill="x", pady=3)
         
@@ -206,6 +206,17 @@ class XRDPlotterGUI:
         self.ent_smooth_win = ttk.Entry(smooth_row, width=4)
         self.ent_smooth_win.insert(0, "11")
         self.ent_smooth_win.pack(side="left", padx=1)
+        
+        # NEW FUNCTIONALITY: Rigid 2-Theta Zero-Offset Calibration Interface row
+        shift_row = ttk.Frame(sidebar_frame)
+        shift_row.pack(side="top", fill="x", pady=3)
+        
+        ttk.Button(shift_row, text="📐 Shift 2θ", command=self.apply_two_theta_shift).pack(side="left", fill="x", expand=True)
+        ttk.Label(shift_row, text="Δ:", font=("Helvetica", 9)).pack(side="left", padx=(4, 1))
+        self.ent_shift_val = ttk.Entry(shift_row, width=5)
+        self.ent_shift_val.insert(0, "0.0")
+        self.ent_shift_val.pack(side="left", padx=1)
+        ttk.Label(shift_row, text="°", font=("Helvetica", 9)).pack(side="left", padx=(1, 2))
         
         # Inline Horizontal Configuration Row for Normalization and variable window field bounds
         norm_row = ttk.Frame(sidebar_frame)
@@ -376,37 +387,12 @@ class XRDPlotterGUI:
         for values in snapshot['table_data']:
             self.result_table.insert("", "end", values=values)
             
-        self.ax.clear()
-        self.configure_axis_labels()
-        self.cursor_line = None
+        self.replot_and_refresh_canvas()
         
-        for file_path, data in self.active_datasets.items():
-            if file_path.startswith("__fit_composite"):
-                line, = self.ax.plot(data['angles'], data['intensities'], color='#000000', linestyle='-', linewidth=2.0, label=data['label'])
-                self.fitted_curves_artists.append(line)
-            elif file_path.startswith("__fit_"):
-                line, = self.ax.plot(data['angles'], data['intensities'], linestyle='--', linewidth=1.2, label=data['label'])
-                self.fitted_curves_artists.append(line)
-            elif file_path.startswith("__ref_"):
-                self.ax.plot(data['angles'], data['intensities'], linestyle='-.', linewidth=1.5, alpha=0.8, label=data['label'])
-            else:
-                self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
-                
         for g_x in self.peak_guesses:
             guess_line = self.ax.axvline(g_x, color='#d63384', linestyle=':', linewidth=1.5)
             self.guess_lines_artists.append(guess_line)
             
-        if self.active_datasets:
-            self.ax.legend(loc="upper right", frameon=True, fontsize=8)
-            
-        self.ax.relim()
-        self.ax.autoscale_view()
-        self.refresh_checkbox_targets_panel()
-        self.canvas.draw()
-        
-        raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
-        self.status_var.set(f"Active profiles loaded: {len(raw_keys)}")
-        
         if not self.history_stack:
             self.btn_undo.config(state="disabled")
 
@@ -470,30 +456,7 @@ class XRDPlotterGUI:
             if k.endswith(f"_{key_to_remove}"):
                 del self.active_datasets[k]
                 
-        self.ax.clear()
-        self.configure_axis_labels()
-        self.cursor_line = None  
-        
-        for file_path, data in self.active_datasets.items():
-            if file_path.startswith("__fit_composite"):
-                self.ax.plot(data['angles'], data['intensities'], color='#000000', linestyle='-', linewidth=2.0, label=data['label'])
-            elif file_path.startswith("__fit_"):
-                self.ax.plot(data['angles'], data['intensities'], linestyle='--', linewidth=1.2, label=data['label'])
-            elif file_path.startswith("__ref_"):
-                self.ax.plot(data['angles'], data['intensities'], linestyle='-.', linewidth=1.5, alpha=0.8, label=data['label'])
-            else:
-                self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
-                
-        if self.active_datasets:
-            self.ax.legend(loc="upper right", frameon=True, fontsize=8)
-            
-        self.ax.relim()
-        self.ax.autoscale_view()
-        self.refresh_checkbox_targets_panel()
-        self.canvas.draw()
-        
-        raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
-        self.status_var.set(f"Active profiles loaded: {len(raw_keys)}")
+        self.replot_and_refresh_canvas()
 
     def toggle_normalization_mode(self):
         if not self.active_datasets:
@@ -581,16 +544,8 @@ class XRDPlotterGUI:
                             
                 if normalized_any:
                     self.clear_fitted_artists()
-                    self.ax.clear()
-                    self.configure_axis_labels()
-                    self.cursor_line = None
-                    for file_path, data in self.active_datasets.items():
-                        if file_path.startswith("__ref_"):
-                            self.ax.plot(data['angles'], data['intensities'], linestyle='-.', linewidth=1.5, alpha=0.8, label=data['label'])
-                        else:
-                            self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
-                    self.ax.legend(loc="upper right", frameon=True, fontsize=9)
-                    self.ax.relim(); self.ax.autoscale_view(); self.canvas.draw()
+                    self.replot_and_refresh_canvas()
+                    self.status_var.set(f"Profiles successfully normalized to peak near 2θ = {x_click:.3f}°.")
                     
                 self.normalization_mode_active = False
                 self.btn_normalize_toggle.config(text="⚖️ Normalize to Peak")
@@ -620,16 +575,7 @@ class XRDPlotterGUI:
             bg = snip_background(intensities, iterations=40)
             data['intensities'] = intensities - bg
 
-        self.ax.clear()
-        self.configure_axis_labels()
-        self.cursor_line = None  
-        for file_path, data in self.active_datasets.items():
-            if file_path.startswith("__ref_"):
-                self.ax.plot(data['angles'], data['intensities'], linestyle='-.', linewidth=1.5, alpha=0.8, label=data['label'])
-            else:
-                self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
-        self.ax.legend(loc="upper right", frameon=True, fontsize=9)
-        self.ax.relim(); self.ax.autoscale_view(); self.canvas.draw()
+        self.replot_and_refresh_canvas()
 
     def open_blank_subtraction_dialog(self):
         raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_") and not k.startswith("__ref_")]
@@ -698,7 +644,6 @@ class XRDPlotterGUI:
             
         ttk.Button(pop, text="Subtract Reference Blank", command=run_reference_subtraction).pack(pady=8)
 
-    # NEW FUNCTIONALITY: Savitzky-Golay Native Execution loop handler
     def smooth_active_profiles(self):
         """Applies a peak-preserving polynomial Savitzky-Golay smoothing kernel to active rows."""
         if not self.active_datasets:
@@ -708,8 +653,7 @@ class XRDPlotterGUI:
         try:
             window = int(self.ent_smooth_win.get().strip())
             if window < 3: raise ValueError
-            if window % 2 == 0:
-                window += 1  # Window parameter mapping must be odd numbered integers
+            if window % 2 == 0: window += 1  
         except ValueError:
             window = 11
             self.ent_smooth_win.delete(0, tk.END)
@@ -724,13 +668,38 @@ class XRDPlotterGUI:
         for key in data_keys:
             y = self.active_datasets[key]['intensities']
             if len(y) > window:
-                # Polynomial order 2 preserves parabolic curvature limits at peak maximas flawlessly
                 self.active_datasets[key]['intensities'] = savgol_filter(y, window, polyorder=2)
                 smoothed_count += 1
                 
         if smoothed_count > 0:
             self.replot_and_refresh_canvas()
-            self.status_var.set(f"Successfully smoothed residual noise across {smoothed_count} layers (Savgol window={window}).")
+            self.status_var.set(f"Smoothed residual noise across {smoothed_count} layers (Savgol window={window}).")
+
+    # NEW FUNCTIONALITY: Rigid 2-Theta translation execution block handler
+    def apply_two_theta_shift(self):
+        """Linearly shifts the independent 2-Theta coordinates vector array to calibrate zero-offset artifacts."""
+        if not self.active_datasets:
+            messagebox.showwarning("No Data", "No active profiles found to execute calibration translations.")
+            return
+            
+        try:
+            shift_val = float(self.ent_shift_val.get().strip())
+        except ValueError:
+            messagebox.showerror("Invalid Value", "Please enter a valid numeric calculation factor for the 2θ shift.")
+            return
+            
+        if shift_val == 0.0:
+            return
+            
+        self.save_to_history()
+        self.clear_fitted_artists()
+        
+        data_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_") and not k.startswith("__ref_")]
+        for key in data_keys:
+            self.active_datasets[key]['angles'] = self.active_datasets[key]['angles'] + shift_val
+            
+        self.replot_and_refresh_canvas()
+        self.status_var.set(f"Applied a rigid 2θ shift calibration correction of {shift_val}°.")
 
     def replot_and_refresh_canvas(self):
         self.ax.clear()
@@ -739,9 +708,11 @@ class XRDPlotterGUI:
         
         for file_path, data in self.active_datasets.items():
             if file_path.startswith("__fit_composite"):
-                self.ax.plot(data['angles'], data['intensities'], color='#000000', linestyle='-', linewidth=2.0, label=data['label'])
+                line, = self.ax.plot(data['angles'], data['intensities'], color='#000000', linestyle='-', linewidth=2.0, label=data['label'])
+                self.fitted_curves_artists.append(line)
             elif file_path.startswith("__fit_"):
-                self.ax.plot(data['angles'], data['intensities'], linestyle='--', linewidth=1.2, label=data['label'])
+                line, = self.ax.plot(data['angles'], data['intensities'], linestyle='--', linewidth=1.2, label=data['label'])
+                self.fitted_curves_artists.append(line)
             elif file_path.startswith("__ref_"):
                 self.ax.plot(data['angles'], data['intensities'], linestyle='-.', linewidth=1.5, alpha=0.8, label=data['label'])
             else:
@@ -869,7 +840,6 @@ class XRDPlotterGUI:
         ttk.Button(pop, text="Plot Theoretical Diffractogram", command=trigger_plot_conversion).pack(pady=8)
 
     def simulate_and_add_reference(self, doc):
-        """Calculates powder profiles and incorporates data arrays to UI layers securely."""
         structure = doc.structure
         mat_id = str(doc.material_id)
         sym_symbol = doc.symmetry.symbol if doc.symmetry else "Unknown"
@@ -1010,17 +980,7 @@ class XRDPlotterGUI:
             data['angles'] = ang[mask]
             data['intensities'] = intset[mask]
 
-        self.ax.clear(); self.configure_axis_labels(); self.cursor_line = None  
-        for f_path, data in self.active_datasets.items():
-            if f_path.startswith("__ref_"):
-                self.ax.plot(data['angles'], data['intensities'], linestyle='-.', linewidth=1.5, alpha=0.8, label=data['label'])
-            else:
-                self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
-                
-        self.ax.legend(loc="upper right", frameon=True, fontsize=9)
-        self.ax.set_xlim(xmin, xmax); self.ax.relim(); self.ax.autoscale_view(scalex=False, scaley=True); self.refresh_checkbox_targets_panel(); self.canvas.draw()
-        raw_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_")]
-        self.status_var.set(f"Active profiles loaded: {len(raw_keys)}")
+        self.replot_and_refresh_canvas()
 
     def export_active_data_to_csv(self):
         if not self.active_datasets: return

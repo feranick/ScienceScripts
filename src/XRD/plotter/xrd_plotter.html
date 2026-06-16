@@ -36,6 +36,8 @@
         .btn-ref-sub:hover { background-color: #01928f; }
         .btn-smooth { background-color: #198754; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
         .btn-smooth:hover { background-color: #146c43; }
+        .btn-shift { background-color: #ffc107; color: #212529; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
+        .btn-shift:hover { background-color: #e0a800; }
         
         .btn-normalize { background-color: #0d6efd; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
         .btn-normalize:hover { background-color: #0b5ed7; }
@@ -93,6 +95,13 @@
             <button class="btn-smooth" style="flex-grow: 1;" onclick="smoothNoise()">🍃 Smooth Noise</button>
             <span style="font-size: 0.85rem; color: #495057; padding-left: 2px;">Win:</span>
             <input type="number" id="smooth-window-input" value="11" step="2" min="3" style="width: 45px; padding: 8px 4px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.85rem; text-align: center;">
+        </div>
+        
+        <div style="display: flex; align-items: center; width: 100%; gap: 4px;">
+            <button class="btn-shift" style="flex-grow: 1;" onclick="applyTwoThetaShift()">📐 Shift 2θ</button>
+            <span style="font-size: 0.85rem; color: #495057; padding-left: 2px;">Δ:</span>
+            <input type="number" id="shift-window-input" value="0.0" step="0.05" style="width: 45px; padding: 8px 4px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.85rem; text-align: center;">
+            <span style="font-size: 0.9rem; color: #495057;">°</span>
         </div>
         
         <div style="display: flex; align-items: center; width: 100%; gap: 4px;">
@@ -165,7 +174,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "v2026.06.15.1";
+        const VERSION_TAG = "v2026.06.16.1";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -299,71 +308,64 @@
             closeSubtractionModal(); refreshCheckboxTargetsPanel(); updateChartCanvas();
         }
 
-        // NEW FUNCTIONALITY: Localized Symmetric moving Gaussian Window smoothing filter algorithm
         function smoothNoise() {
             let winSize = parseInt(document.getElementById('smooth-window-input').value);
-            if (isNaN(winSize) || winSize < 3) {
-                winSize = 11;
-                document.getElementById('smooth-window-input').value = "11";
-            }
-            if (winSize % 2 === 0) winSize++; // Coeff window boundaries must be odd numbered integers
+            if (isNaN(winSize) || winSize < 3) { winSize = 11; document.getElementById('smooth-window-input').value = "11"; }
+            if (winSize % 2 === 0) winSize++; 
             
             const datasetKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_") && !k.startsWith("__ref_"));
             if (datasetKeys.length === 0) return;
             
-            saveToHistory();
-            clearFittedModelsCache();
+            saveToHistory(); clearFittedModelsCache();
             
             datasetKeys.forEach(key => {
-                const intensities = persistentDatasets[key].intensities;
-                if (intensities.length <= winSize) return;
-                
-                const smoothed = new Array(intensities.length);
-                const half = Math.floor(winSize / 2);
-                
-                // Precompute symmetric standard deviation matrix kernel factors to filter residual noise
-                let kernel = [];
-                let sigma = half / 2.2;
-                let sum = 0;
+                const intensities = persistentDatasets[key].intensities; if (intensities.length <= winSize) return;
+                const smoothed = new Array(intensities.length); const half = Math.floor(winSize / 2);
+                let kernel = []; let sigma = half / 2.2; let sum = 0;
                 for (let i = -half; i <= half; i++) {
-                    let g = Math.exp(-(i * i) / (2 * sigma * sigma));
-                    kernel.push(g);
-                    sum += g;
+                    let g = Math.exp(-(i * i) / (2 * sigma * sigma)); kernel.push(g); sum += g;
                 }
                 kernel = kernel.map(v => v / sum);
-                
                 for (let i = 0; i < intensities.length; i++) {
                     let kSum = 0;
                     for (let w = -half; w <= half; w++) {
-                        let idx = i + w;
-                        // Clamp out of bounds edge conditions arrays indices to prevent tail decay
-                        if (idx < 0) idx = 0;
-                        if (idx >= intensities.length) idx = intensities.length - 1;
+                        let idx = i + w; if (idx < 0) idx = 0; if (idx >= intensities.length) idx = intensities.length - 1;
                         kSum += intensities[idx] * kernel[w + half];
                     }
                     smoothed[i] = kSum;
                 }
                 persistentDatasets[key].intensities = smoothed;
             });
-            refreshCheckboxTargetsPanel();
-            updateChartCanvas();
+            refreshCheckboxTargetsPanel(); updateChartCanvas();
+        }
+
+        // NEW FUNCTIONALITY: Rigid 2-Theta translation execution block handler
+        function applyTwoThetaShift() {
+            let shiftVal = parseFloat(document.getElementById('shift-window-input').value);
+            if (isNaN(shiftVal) || shiftVal === 0.0) return;
+
+            const datasetKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_") && !k.startsWith("__ref_"));
+            if (datasetKeys.length === 0) return;
+
+            saveToHistory(); clearFittedModelsCache();
+
+            datasetKeys.forEach(key => {
+                for (let i = 0; i < persistentDatasets[key].angles.length; i++) {
+                    persistentDatasets[key].angles[i] += shiftVal;
+                }
+            });
+            refreshCheckboxTargetsPanel(); updateChartCanvas();
         }
 
         function refreshCheckboxTargetsPanel() {
-            const panel = document.getElementById('fit-targets-panel');
-            const datasetKeys = Object.keys(persistentDatasets);
-            const historicalCheckedStates = {};
-            panel.querySelectorAll('input[type="checkbox"]').forEach(cb => { historicalCheckedStates[cb.value] = cb.checked; });
+            const panel = document.getElementById('fit-targets-panel'); const datasetKeys = Object.keys(persistentDatasets);
+            const historicalCheckedStates = {}; panel.querySelectorAll('input[type="checkbox"]').forEach(cb => { historicalCheckedStates[cb.value] = cb.checked; });
             
             panel.innerHTML = "";
-            if (datasetKeys.length === 0) {
-                panel.innerHTML = '<div style="color: #888888; font-size: 0.85rem; font-style: italic;">No Scans Loaded</div>';
-                return;
-            }
+            if (datasetKeys.length === 0) { panel.innerHTML = '<div style="color: #888888; font-size: 0.85rem; font-style: italic;">No Scans Loaded</div>'; return; }
             
             datasetKeys.forEach(key => {
-                const wrapper = document.createElement('div');
-                wrapper.style.display = 'flex'; wrapper.style.alignItems = 'center'; wrapper.style.justifyContent = 'space-between'; wrapper.style.width = '100%'; wrapper.style.margin = '4px 0';
+                const wrapper = document.createElement('div'); wrapper.style.display = 'flex'; wrapper.style.alignItems = 'center'; wrapper.style.justifyContent = 'space-between'; wrapper.style.width = '100%'; wrapper.style.margin = '4px 0';
                 const leftDiv = document.createElement('div'); leftDiv.className = 'checkbox-container'; leftDiv.style.margin = '0';
                 
                 const isFitOrRef = key.startsWith("__fit_") || key.startsWith("__ref_");
@@ -373,24 +375,18 @@
                     const label = document.createElement('label'); label.htmlFor = cb.id; label.innerText = persistentDatasets[key].label; label.style.fontSize = '0.85rem'; label.style.cursor = 'pointer';
                     leftDiv.appendChild(cb); leftDiv.appendChild(label);
                 } else {
-                    const spanLabel = document.createElement('span'); spanLabel.innerText = persistentDatasets[key].label;
-                    spanLabel.style.fontSize = '0.85rem'; spanLabel.style.fontStyle = 'italic'; spanLabel.style.color = '#555555';
+                    const spanLabel = document.createElement('span'); spanLabel.innerText = persistentDatasets[key].label; spanLabel.style.fontSize = '0.85rem'; spanLabel.style.fontStyle = 'italic'; spanLabel.style.color = '#555555';
                     leftDiv.appendChild(spanLabel);
                 }
-                
-                const delSpan = document.createElement('span');
-                delSpan.innerText = "❌"; delSpan.style.cursor = "pointer"; delSpan.style.fontSize = "0.82rem"; delSpan.style.marginLeft = "8px";
+                const delSpan = document.createElement('span'); delSpan.innerText = "❌"; delSpan.style.cursor = "pointer"; delSpan.style.fontSize = "0.82rem"; delSpan.style.marginLeft = "8px";
                 delSpan.onclick = function() { removeSpecificDataset(key); };
-                
                 wrapper.appendChild(leftDiv); wrapper.appendChild(delSpan); panel.appendChild(wrapper);
             });
         }
 
         function removeSpecificDataset(key) {
-            saveToHistory();
-            if (persistentDatasets[key]) { delete persistentDatasets[key]; }
+            saveToHistory(); if (persistentDatasets[key]) { delete persistentDatasets[key]; }
             Object.keys(persistentDatasets).forEach(k => { if (k.endsWith('_' + key)) { delete persistentDatasets[k]; } });
-            
             if (Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_")).length === 0) {
                 document.querySelector("#results-matrix-sheet tbody").innerHTML = ""; document.getElementById('results-dashboard').style.display = "none"; peakGuessesX = [];
             }
@@ -399,11 +395,9 @@
 
         function toggleNormalizationMode() {
             if (Object.keys(persistentDatasets).length === 0) { alert("Load profiles into data spaces first."); return; }
-            normalizationModeActive = !normalizationModeActive;
-            const btn = document.getElementById('btn-normalize-toggle');
+            normalizationModeActive = !normalizationModeActive; const btn = document.getElementById('btn-normalize-toggle');
             if (normalizationModeActive) {
-                if (fittingModeActive) toggleFittingMode(); 
-                btn.innerText = "⚖️ Mode: SELECT PEAK"; btn.classList.add('active');
+                if (fittingModeActive) toggleFittingMode(); btn.innerText = "⚖️ Mode: SELECT PEAK"; btn.classList.add('active');
             } else {
                 btn.innerText = "⚖️ Normalize to Peak"; btn.classList.remove('active');
             }
@@ -411,23 +405,19 @@
 
         function toggleFittingMode() {
             if (Object.keys(persistentDatasets).length === 0) { alert("Load profiles into data spaces first."); return; }
-            fittingModeActive = !fittingModeActive;
-            const btn = document.getElementById('btn-fit-toggle'); const runBtn = document.getElementById('btn-run-fit');
+            fittingModeActive = !fittingModeActive; const btn = document.getElementById('btn-fit-toggle'); const runBtn = document.getElementById('btn-run-fit');
             if (fittingModeActive) {
-                if (normalizationModeActive) toggleNormalizationMode();
-                btn.innerText = "🎯 Peak Selection: ACTIVE"; btn.classList.add('active'); runBtn.style.display = "block";
+                if (normalizationModeActive) toggleNormalizationMode(); btn.innerText = "🎯 Peak Selection: ACTIVE"; btn.classList.add('active'); runBtn.style.display = "block";
             } else {
                 btn.innerText = "🎯 Peak Selection: OFF"; btn.classList.remove('active'); runBtn.style.display = "none";
             }
         }
 
         function subtractBackgroundFromPlotted() {
-            const dataKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_"));
-            if (dataKeys.length === 0) { alert("No active datasets loaded to execute baseline filters."); return; }
+            const dataKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_")); if (dataKeys.length === 0) { alert("No active datasets loaded to execute baseline filters."); return; }
             saveToHistory(); clearFittedModelsCache();
             dataKeys.forEach(key => {
-                const dataset = persistentDatasets[key]; const intensities = dataset.intensities;
-                if (intensities.length < 3) return;
+                const dataset = persistentDatasets[key]; const intensities = dataset.intensities; if (intensities.length < 3) return;
                 const bg = snipBackground(intensities, 40);
                 for (let i = 0; i < intensities.length; i++) dataset.intensities[i] = intensities[i] - bg[i];
             });
@@ -436,20 +426,17 @@
 
         function executePeakOptimization() {
             if (peakGuessesX.length === 0) { alert("Right-click on the graph canvas to specify initial peak centers."); return; }
-            const panel = document.getElementById('fit-targets-panel'); let keysToFit = [];
-            panel.querySelectorAll('input[type="checkbox"]:checked').forEach(cb => { keysToFit.push(cb.value); });
+            const panel = document.getElementById('fit-targets-panel'); let keysToFit = []; panel.querySelectorAll('input[type="checkbox"]:checked').forEach(cb => { keysToFit.push(cb.value); });
             if (keysToFit.length === 0) { alert("Please select at least one target sample checkbox in the panel list."); return; }
             
-            saveToHistory();
-            Object.keys(persistentDatasets).forEach(k => { if(k.startsWith("__fit_")) delete persistentDatasets[k]; });
+            saveToHistory(); Object.keys(persistentDatasets).forEach(k => { if(k.startsWith("__fit_")) delete persistentDatasets[k]; });
             const tableBody = document.querySelector("#results-matrix-sheet tbody"); tableBody.innerHTML = ""; 
             
             keysToFit.forEach(key => {
                 const rawX = persistentDatasets[key].angles; const rawY = persistentDatasets[key].intensities; const labelBase = persistentDatasets[key].label;
                 let xFit = [...rawX], yFit = [...rawY];
                 if (xFit.length > 1200) {
-                    let samplingInterval = Math.ceil(xFit.length / 1200);
-                    xFit = xFit.filter((_, i) => i % samplingInterval === 0); yFit = yFit.filter((_, i) => i % samplingInterval === 0);
+                    let samplingInterval = Math.ceil(xFit.length / 1200); xFit = xFit.filter((_, i) => i % samplingInterval === 0); yFit = yFit.filter((_, i) => i % samplingInterval === 0);
                 }
                 let initialGuess = [];
                 peakGuessesX.forEach(g_x => {
@@ -464,8 +451,7 @@
                     for (let i = 0; i < xFit.length; i++) {
                         let x = xFit[i]; let modelY = 0;
                         for (let p = 0; p < params.length; p += 3) {
-                            let amp = params[p]; let cent = params[p+1]; let wid = params[p+2];
-                            if (amp < 0 || wid < 0.002) return Infinity; 
+                            let amp = params[p]; let cent = params[p+1]; let wid = params[p+2]; if (amp < 0 || wid < 0.002) return Infinity; 
                             modelY += amp * Math.exp(-Math.pow((x - cent) / wid, 2));
                         }
                         sse += Math.pow(yFit[i] - modelY, 2);
@@ -481,8 +467,7 @@
                     }
                     persistentDatasets[`__fit_peak_${peakCounter}_${key}`] = { angles: rawX, intensities: yPeak, label: `${labelBase} Pk ${peakCounter} Fit` };
                     let fwhm = 2.0 * Math.sqrt(Math.LN2) * wid;
-                    let tr = document.createElement('tr');
-                    tr.innerHTML = `<td>${labelBase}</td><td>Peak ${peakCounter}</td><td>${cent.toFixed(4)}°</td><td>${amp.toFixed(1)}</td><td>${fwhm.toFixed(4)}°</td>`;
+                    let tr = document.createElement('tr'); tr.innerHTML = `<td>${labelBase}</td><td>Peak ${peakCounter}</td><td>${cent.toFixed(4)}°</td><td>${amp.toFixed(1)}</td><td>${fwhm.toFixed(4)}°</td>`;
                     tableBody.appendChild(tr); peakCounter++;
                 }
                 persistentDatasets[`__fit_composite_${key}`] = { angles: rawX, intensities: yFitTotal, label: `${labelBase} Total Fit` };
@@ -498,13 +483,10 @@
                 const reader = new FileReader(); const extension = file.name.split('.').pop().toLowerCase();
                 reader.onload = function(e) {
                     try {
-                        let parsedData;
-                        if (extension === 'csv') parsedData = parseCSV(e.target.result, file.name);
-                        else if (extension === 'xrdml') parsedData = parseXRDML(e.target.result, file.name);
+                        let parsedData; if (extension === 'csv') parsedData = parseCSV(e.target.result, file.name); else if (extension === 'xrdml') parsedData = parseXRDML(e.target.result, file.name);
                         if (parsedData) { saveToHistory(); persistentDatasets[file.name] = parsedData; }
                     } catch (err) { alert(`Parsing structural error: ${file.name}\nReason: ${err.message}`); }
-                    itemsProcessed++;
-                    if (itemsProcessed === files.length) { refreshCheckboxTargetsPanel(); updateChartCanvas(); event.target.value = ''; }
+                    itemsProcessed++; if (itemsProcessed === files.length) { refreshCheckboxTargetsPanel(); updateChartCanvas(); event.target.value = ''; }
                 };
                 reader.readAsText(file);
             }
@@ -513,18 +495,15 @@
         function parseCSV(text, filename) {
             const lines = text.split(/\r?\n/); let sampleId = filename.split('.')[0]; let dataStartIndex = -1;
             for (let i = 0; i < lines.length; i++) {
-                const line = lines[i];
-                if (line.includes('Sample identification')) { const parts = line.split(','); if (parts[1] && parts[1].trim()) sampleId = parts[1].trim(); }
+                const line = lines[i]; if (line.includes('Sample identification')) { const parts = line.split(','); if (parts[1] && parts[1].trim()) sampleId = parts[1].trim(); }
                 if (line.includes('[Scan points]')) { dataStartIndex = i + 2; break; }
             }
             if (dataStartIndex === -1 || dataStartIndex >= lines.length) throw new Error("Missing '[Scan points]' tags.");
             const angles = []; const intensities = [];
             for (let i = dataStartIndex; i < lines.length; i++) {
                 const line = lines[i].trim(); if (!line) continue;
-                const parts = line.split(',');
-                if (parts.length >= 3) {
-                    const angleVal = parseFloat(parts[0]); const intensityVal = parseFloat(parts[2]);
-                    if (!isNaN(angleVal) && !isNaN(intensityVal)) { angles.push(angleVal); intensities.push(intensityVal); }
+                const parts = line.split(','); if (parts.length >= 3) {
+                    const angleVal = parseFloat(parts[0]); const intensityVal = parseFloat(parts[2]); if (!isNaN(angleVal) && !isNaN(intensityVal)) { angles.push(angleVal); intensities.push(intensityVal); }
                 }
             }
             return { angles, intensities, label: sampleId };
@@ -532,123 +511,20 @@
 
         function parseXRDML(xmlText, filename) {
             const parser = new DOMParser(); const xmlDoc = parser.parseFromString(xmlText, "text/xml");
-            let sampleId = filename.split('.')[0]; const sampleIdEl = xmlDoc.getElementsByTagName("id")[0];
-            if (sampleIdEl && sampleIdEl.textContent) sampleId = sampleIdEl.textContent.trim();
-            const countsEl = xmlDoc.getElementsByTagName("counts")[0];
-            if (!countsEl || !countsEl.textContent) throw new Error("Intensity tracking counts missing.");
-            const intensities = countsEl.textContent.trim().split(/\s+/).map(Number);
-            const positionsEl = xmlDoc.getElementsByTagName("positions"); let angles = [];
+            let sampleId = filename.split('.')[0]; const sampleIdEl = xmlDoc.getElementsByTagName("id")[0]; if (sampleIdEl && sampleIdEl.textContent) sampleId = sampleIdEl.textContent.trim();
+            const countsEl = xmlDoc.getElementsByTagName("counts")[0]; if (!countsEl || !countsEl.textContent) throw new Error("Intensity tracking counts missing.");
+            const intensities = countsEl.textContent.trim().split(/\s+/).map(Number); const positionsEl = xmlDoc.getElementsByTagName("positions"); let angles = [];
             for (let i = 0; i < positionsEl.length; i++) {
-                const node = positionsEl[i];
-                if (node.getAttribute("axis") === "2Theta") {
-                    const listPositionEl = node.getElementsByTagName("listPosition")[0];
-                    if (listPositionEl && listPositionEl.textContent) angles = listPositionEl.textContent.trim().split(/\s+/).map(Number);
+                const node = positionsEl[i]; if (node.getAttribute("axis") === "2Theta") {
+                    const listPositionEl = node.getElementsByTagName("listPosition")[0]; if (listPositionEl && listPositionEl.textContent) angles = listPositionEl.textContent.trim().split(/\s+/).map(Number);
                     else {
-                        const startEl = xmlDoc.getElementsByTagName("startPosition")[0]; const endEl = xmlDoc.getElementsByTagName("endPosition")[0];
-                        if (startEl && endEl) angles = linspace(parseFloat(startEl.textContent), parseFloat(endEl.textContent), intensities.length);
+                        const startEl = xmlDoc.getElementsByTagName("startPosition")[0]; const endEl = xmlDoc.getElementsByTagName("endPosition")[0]; if (startEl && endEl) angles = linspace(parseFloat(startEl.textContent), parseFloat(endEl.textContent), intensities.length);
                     }
                     break;
                 }
             }
             if (angles.length !== intensities.length) throw new Error("Vector array bounds mismatch.");
             return { angles, intensities, label: sampleId };
-        }
-
-        function snipBackground(y, iterations = 40) {
-            let bg = [...y]; let n = bg.length;
-            let maxIter = Math.min(iterations, Math.floor(n / 2) - 1);
-            if (maxIter < 1) return new Array(n).fill(0);
-            for (let p = 1; p <= maxIter; p++) {
-                let temp = [...bg];
-                for (let i = p; i < n - p; i++) {
-                    let val = (temp[i - p] + temp[i + p]) / 2.0; if (val < bg[i]) bg[i] = val;
-                }
-            }
-            return bg;
-        }
-
-        function linspace(start, end, num) {
-            if (num === 1) return [start];
-            const arr = []; const step = (end - start) / (num - 1);
-            for (let i = 0; i < num; i++) arr.push(start + (i * step)); return arr;
-        }
-
-        function updateChartCanvas() {
-            const datasetKeys = Object.keys(persistentDatasets); const dataKeysWithoutFits = datasetKeys.filter(k => !k.startsWith("__fit_"));
-            document.getElementById('status-display').innerHTML = `Active profiles loaded: <b>${dataKeysWithoutFits.length}</b>`;
-            if (datasetKeys.length === 0) { renderPlaceholderCanvas(); return; }
-            const tooltipEnabled = document.getElementById('toggle-tooltip').checked; const traces = [];
-            datasetKeys.forEach(key => {
-                const data = persistentDatasets[key]; const isFitCurve = key.startsWith("__fit_");
-                let lineConfig = { width: 1.5 };
-                if (key.startsWith("__fit_composite")) lineConfig = { width: 2.0, dash: 'solid' };
-                else if (isFitCurve) lineConfig = { width: 1.2, dash: 'dot' };
-                traces.push({
-                    x: data.angles, y: data.intensities, type: 'scatter', mode: 'lines', name: data.label, line: lineConfig,
-                    hoverinfo: tooltipEnabled ? 'all' : 'none', hovertemplate: tooltipEnabled ? '%{y:.1f} counts<extra></extra>' : null
-                });
-            });
-            const verticalShapes = peakGuessesX.map(x_g => ({
-                type: 'line', xref: 'x', yref: 'paper', x0: x_g, y0: 0, x1: x_g, y1: 1, line: { color: '#d63384', width: 1.5, dash: 'dashdot' }
-            }));
-            const layout = {
-                title: { text: 'XRD Diffraction Multi-Pattern Overlays', font: { size: 15, family: 'Arial, sans-serif', weight: 'bold' } },
-                xaxis: { 
-                    title: '2θ Angle (degrees)', showgrid: true, gridcolor: '#e9ecef', ticks: 'outside', showspikes: true, spikemode: 'across', spikethickness: 1.0,
-                    spikedash: tooltipEnabled ? 'solid' : 'dash', spikecolor: tooltipEnabled ? '#495057' : '#dc3545'  
-                },
-                yaxis: { title: 'Intensity (Normalized or Counts)', showgrid: true, gridcolor: '#e9ecef', ticks: 'outside' },
-                hovermode: tooltipEnabled ? 'x unified' : 'x', template: 'plotly_white', legend: { orientation: 'h', yanchor: 'bottom', y: 1.02, xanchor: 'right', x: 1 },
-                margin: { l: 60, r: 30, t: 80, b: 50 }, shapes: verticalShapes
-            };
-            Plotly.newPlot('chart-container', traces, layout, { responsive: true, displaylogo: false });
-
-            const chartDiv = document.getElementById('chart-container');
-            chartDiv.on('plotly_hover', function(data) {
-                if (data && data.points && data.points.length > 0) {
-                    currentMouseHoverX = data.points[0].x; document.getElementById('cursor-bar').innerHTML = `Cursor Position: 2θ = <b>${currentMouseHoverX.toFixed(4)}°</b>`;
-                }
-            });
-            chartDiv.on('plotly_unhover', function() { currentMouseHoverX = null; document.getElementById('cursor-bar').innerHTML = `Cursor Position: 2θ = --`; });
-            chartDiv.on('plotly_click', function(plotlyData) {
-                if (normalizationModeActive && plotlyData && plotlyData.points && plotlyData.points.length > 0) {
-                    const xClick = plotlyData.points[0].x;
-                    let windowSize = parseFloat(document.getElementById('norm-span-input').value);
-                    if (isNaN(windowSize) || windowSize <= 0) { windowSize = 0.3; document.getElementById('norm-span-input').value = "0.3"; }
-                    
-                    const datasetKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_"));
-                    let willNormalize = false;
-                    datasetKeys.forEach(key => {
-                        const dataset = persistentDatasets[key]; let globalMax = -Infinity; let localPeakMax = -Infinity;
-                        for (let i = 0; i < dataset.angles.length; i++) {
-                            if (dataset.intensities[i] > globalMax) globalMax = dataset.intensities[i];
-                            if (dataset.angles[i] >= xClick - windowSize && dataset.angles[i] <= xClick + windowSize) {
-                                if (dataset.intensities[i] > localPeakMax) localPeakMax = dataset.intensities[i];
-                            }
-                        }
-                        if (localPeakMax > 0 && localPeakMax !== -Infinity && localPeakMax >= (0.05 * globalMax)) willNormalize = true;
-                    });
-                    if (willNormalize) saveToHistory();
-                    
-                    let normalizedAny = false;
-                    datasetKeys.forEach(key => {
-                        const dataset = persistentDatasets[key]; let globalMax = -Infinity; let localPeakMax = -Infinity;
-                        for (let i = 0; i < dataset.angles.length; i++) {
-                            if (dataset.intensities[i] > globalMax) globalMax = dataset.intensities[i];
-                            if (dataset.angles[i] >= xClick - windowSize && dataset.angles[i] <= xClick + windowSize) {
-                                if (dataset.intensities[i] > localPeakMax) localPeakMax = dataset.intensities[i];
-                            }
-                        }
-                        if (localPeakMax > 0 && localPeakMax !== -Infinity && localPeakMax >= (0.05 * globalMax)) {
-                            for (let i = 0; i < dataset.intensities.length; i++) dataset.intensities[i] = dataset.intensities[i] / localPeakMax;
-                            normalizedAny = true;
-                        }
-                    });
-                    if (normalizedAny) { clearFittedModelsCache(); updateChartCanvas(); }
-                    normalizationModeActive = false; const btn = document.getElementById('btn-normalize-toggle');
-                    btn.innerText = "⚖️ Normalize to Peak"; btn.classList.remove('active');
-                }
-            });
         }
 
         function renderPlaceholderCanvas() {
@@ -662,10 +538,8 @@
 
         function cropToView() {
             const datasetKeys = Object.keys(persistentDatasets); if (datasetKeys.length === 0) return;
-            const chartDiv = document.getElementById('chart-container');
-            let range = chartDiv.layout.xaxis.range;
-            if (!range && chartDiv._fullLayout && chartDiv._fullLayout.xaxis) range = chartDiv._fullLayout.xaxis.range;
-            if (!range || range.length < 2) return;
+            const chartDiv = document.getElementById('chart-container'); let range = chartDiv.layout.xaxis.range;
+            if (!range && chartDiv._fullLayout && chartDiv._fullLayout.xaxis) range = chartDiv._fullLayout.xaxis.range; if (!range || range.length < 2) return;
             const xmin = range[0]; const xmax = range[1];
             
             saveToHistory(); clearFittedModelsCache();
@@ -677,8 +551,7 @@
                 }
                 dataset.angles = newAngles; dataset.intensities = newIntensities;
             });
-            refreshCheckboxTargetsPanel(); updateChartCanvas();
-            Plotly.relayout('chart-container', { 'xaxis.autorange': true, 'yaxis.autorange': true });
+            refreshCheckboxTargetsPanel(); updateChartCanvas(); Plotly.relayout('chart-container', { 'xaxis.autorange': true, 'yaxis.autorange': true });
         }
 
         function handleTooltipToggle() {
@@ -693,8 +566,7 @@
             const datasetKeys = Object.keys(persistentDatasets); if (datasetKeys.length === 0) return;
             datasetKeys.forEach(key => {
                 const dataset = persistentDatasets[key]; if (dataset.angles.length === 0) return;
-                let csvString = "Angle,Intensity\n";
-                for (let i = 0; i < dataset.angles.length; i++) csvString += `${dataset.angles[i].toFixed(6)},${dataset.intensities[i].toFixed(1)}\n`;
+                let csvString = "Angle,Intensity\n"; for (let i = 0; i < dataset.angles.length; i++) csvString += `${dataset.angles[i].toFixed(6)},${dataset.intensities[i].toFixed(1)}\n`;
                 const csvBlob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' }); const virtualUrl = URL.createObjectURL(csvBlob);
                 const downloadAnchor = document.createElement("a"); const cleanBaseName = key.startsWith("__fit_") ? key.replace("__fit_", "fit_") : `clean_${key.split('.')[0]}`;
                 downloadAnchor.setAttribute("href", virtualUrl); downloadAnchor.setAttribute("download", `${cleanBaseName}.csv`);
