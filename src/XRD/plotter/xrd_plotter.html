@@ -4,11 +4,30 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Web XRD Pattern Visualizer & Peak Fitting Tool</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.24.1/plotly.min.js"></script>
     <script>
-        if (typeof Plotly === 'undefined') {
-            document.write('<script src="https://unpkg.com/plotly.js-dist@2.24.1/plotly.min.js"><\/script>');
-        }
+        // Robust Plotly loader: tries multiple CDNs in order via onerror,
+        // without document.write (which modern browsers block for cross-site,
+        // parser-blocking scripts). Resolves window.__plotlyReady when loaded.
+        (function () {
+            const sources = [
+                "https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.24.1/plotly.min.js",
+                "https://unpkg.com/plotly.js-dist@2.24.1/plotly.min.js",
+                "https://cdn.jsdelivr.net/npm/plotly.js-dist@2.24.1/plotly.min.js"
+            ];
+            window.__plotlyReady = new Promise(function (resolve, reject) {
+                let idx = 0;
+                function tryNext() {
+                    if (typeof Plotly !== 'undefined') { resolve(); return; }
+                    if (idx >= sources.length) { reject(new Error("Plotly failed to load from all CDNs")); return; }
+                    const s = document.createElement('script');
+                    s.src = sources[idx++];
+                    s.onload = function () { resolve(); };
+                    s.onerror = function () { tryNext(); };
+                    document.head.appendChild(s);
+                }
+                tryNext();
+            });
+        })();
     </script>
     <style>
         body {
@@ -25,10 +44,11 @@
         .btn-upload {
             border: 2px dashed #b8c2cc; color: #495057; background-color: #f1f3f5; padding: 15px;
             border-radius: 8px; font-size: 0.9rem; font-weight: bold; width: 100%; box-sizing: border-box;
-            cursor: pointer; text-align: center; transition: all 0.2s ease;
+            cursor: pointer; text-align: center; transition: all 0.2s ease; display: block;
         }
         .btn-upload:hover { background-color: #e8ecef; border-color: #0d6efd; }
-        .upload-btn-wrapper input[type=file] { font-size: 100px; position: absolute; left: 0; top: 0; opacity: 0; cursor: pointer; }
+        /* Visually hide the file input but keep it accessible and clickable via its label */
+        #xrd-files { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
         
         .btn-bg-sub { background-color: #0dcaf0; color: #212529; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
         .btn-bg-sub:hover { background-color: #0bacd0; }
@@ -80,10 +100,8 @@
         <h2>🔬 XRD Data Analyzer</h2>
         <p class="info-text">Load data tracks, isolate regions of interest, and trigger peak optimization routines.</p>
         
-        <div class="upload-btn-wrapper">
-            <div class="btn-upload">📁 Click to Select File(s)</div>
-            <input type="file" id="xrd-files" accept=".csv,.xrdml" multiple onchange="handleFileSelections(event)">
-        </div>
+        <label class="btn-upload" for="xrd-files">📁 Click to Select File(s)</label>
+        <input type="file" id="xrd-files" accept=".csv,.xrdml" multiple onchange="handleFileSelections(event)">
 
         <hr style="border: 0; border-top: 1px solid #e9ecef; margin: 3px 0;">
         
@@ -174,7 +192,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "v2026.06.26.1";
+        const VERSION_TAG = "v2026.06.26.2";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -185,16 +203,26 @@
 
         window.onload = function() {
             document.getElementById('app-version-container').innerText = VERSION_TAG;
-            renderPlaceholderCanvas();
-            
-            const chartDiv = document.getElementById('chart-container');
-            chartDiv.addEventListener('contextmenu', function(e) {
-                if (fittingModeActive && currentMouseHoverX !== null) {
-                    e.preventDefault();
-                    saveToHistory(); 
-                    peakGuessesX.push(currentMouseHoverX);
-                    updateChartCanvas();
-                }
+
+            const startChart = function () {
+                renderPlaceholderCanvas();
+                const chartDiv = document.getElementById('chart-container');
+                chartDiv.addEventListener('contextmenu', function(e) {
+                    if (fittingModeActive && currentMouseHoverX !== null) {
+                        e.preventDefault();
+                        saveToHistory();
+                        peakGuessesX.push(currentMouseHoverX);
+                        updateChartCanvas();
+                    }
+                });
+            };
+
+            const readyPromise = window.__plotlyReady || Promise.resolve();
+            readyPromise.then(startChart).catch(function () {
+                document.getElementById('chart-container').innerHTML =
+                    '<div style="padding:40px; text-align:center; color:#dc3545; font-size:0.95rem;">' +
+                    'Could not load the Plotly charting library (network blocked?).<br>' +
+                    'Check your internet connection or network/firewall settings and reload.</div>';
             });
         };
 
@@ -579,6 +607,86 @@
             }
             if (angles.length !== intensities.length) throw new Error("Vector array bounds mismatch.");
             return { angles, intensities, label: sampleId };
+        }
+
+        function nelderMeadOptimization(fn, x0, options) {
+            // Standard Nelder-Mead downhill simplex minimizer.
+            // fn: objective taking an array of params and returning a scalar.
+            // x0: initial parameter array. Returns the best parameter array found.
+            options = options || {};
+            const maxIter = options.maxIter || 2000;
+            const tol = options.tol || 1e-8;
+            const n = x0.length;
+            if (n === 0) return x0.slice();
+
+            const alpha = 1.0;   // reflection
+            const gamma = 2.0;   // expansion
+            const rho = 0.5;     // contraction
+            const sigma = 0.5;   // shrink
+
+            // Build initial simplex of n+1 vertices.
+            let simplex = [];
+            simplex.push({ x: x0.slice(), f: fn(x0) });
+            for (let i = 0; i < n; i++) {
+                const point = x0.slice();
+                const step = (point[i] !== 0) ? 0.05 * point[i] : 0.00025;
+                point[i] += step;
+                simplex.push({ x: point, f: fn(point) });
+            }
+
+            for (let iter = 0; iter < maxIter; iter++) {
+                // Sort by objective value (best first).
+                simplex.sort((a, b) => a.f - b.f);
+
+                // Convergence check: spread of function values is tiny.
+                const fBest = simplex[0].f;
+                const fWorst = simplex[n].f;
+                if (Math.abs(fWorst - fBest) < tol) break;
+
+                // Centroid of all points except the worst.
+                const centroid = new Array(n).fill(0);
+                for (let i = 0; i < n; i++) {
+                    for (let j = 0; j < n; j++) centroid[j] += simplex[i].x[j];
+                }
+                for (let j = 0; j < n; j++) centroid[j] /= n;
+
+                const worst = simplex[n];
+
+                // Reflection
+                const xr = new Array(n);
+                for (let j = 0; j < n; j++) xr[j] = centroid[j] + alpha * (centroid[j] - worst.x[j]);
+                const fr = fn(xr);
+
+                if (fr < simplex[0].f) {
+                    // Expansion
+                    const xe = new Array(n);
+                    for (let j = 0; j < n; j++) xe[j] = centroid[j] + gamma * (xr[j] - centroid[j]);
+                    const fe = fn(xe);
+                    simplex[n] = (fe < fr) ? { x: xe, f: fe } : { x: xr, f: fr };
+                } else if (fr < simplex[n - 1].f) {
+                    // Accept reflection
+                    simplex[n] = { x: xr, f: fr };
+                } else {
+                    // Contraction
+                    const xc = new Array(n);
+                    for (let j = 0; j < n; j++) xc[j] = centroid[j] + rho * (worst.x[j] - centroid[j]);
+                    const fc = fn(xc);
+                    if (fc < worst.f) {
+                        simplex[n] = { x: xc, f: fc };
+                    } else {
+                        // Shrink toward the best vertex.
+                        const best = simplex[0].x;
+                        for (let i = 1; i <= n; i++) {
+                            const xs = new Array(n);
+                            for (let j = 0; j < n; j++) xs[j] = best[j] + sigma * (simplex[i].x[j] - best[j]);
+                            simplex[i] = { x: xs, f: fn(xs) };
+                        }
+                    }
+                }
+            }
+
+            simplex.sort((a, b) => a.f - b.f);
+            return simplex[0].x;
         }
 
         function snipBackground(y, iterations = 40) {

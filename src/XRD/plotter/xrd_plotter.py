@@ -24,7 +24,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.06.26.1"
+VERSION_TAG = "v2026.06.26.2"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 
@@ -401,10 +401,6 @@ class XRDPlotterGUI:
             
         self.replot_and_refresh_canvas()
         
-        for g_x in self.peak_guesses:
-            guess_line = self.ax.axvline(g_x, color='#d63384', linestyle=':', linewidth=1.5)
-            self.guess_lines_artists.append(guess_line)
-            
         if not self.history_stack:
             self.btn_undo.config(state="disabled")
 
@@ -716,9 +712,13 @@ class XRDPlotterGUI:
         self.ax.clear()
         self.configure_axis_labels()
         self.cursor_line = None
+        # ax.clear() detached every artist; rebuild the tracking lists from scratch
+        # so they don't accumulate stale references across replots.
+        self.fitted_curves_artists = []
+        self.guess_lines_artists = []
         
         for file_path, data in self.active_datasets.items():
-            if file_path.startswith("__fit_composite"):
+            if file_path.startswith("__fit_overall_composite"):
                 line, = self.ax.plot(data['angles'], data['intensities'], color='#000000', linestyle='-', linewidth=2.0, label=data['label'])
                 self.fitted_curves_artists.append(line)
             elif file_path.startswith("__fit_"):
@@ -728,6 +728,12 @@ class XRDPlotterGUI:
                 self.ax.plot(data['angles'], data['intensities'], linestyle='-.', linewidth=1.5, alpha=0.8, label=data['label'])
             else:
                 self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
+        
+        # Redraw the peak-center guess markers so they survive a replot
+        # (e.g. after removing a dataset), mirroring the web version's behaviour.
+        for g_x in self.peak_guesses:
+            guess_line = self.ax.axvline(g_x, color='#d63384', linestyle=':', linewidth=1.5)
+            self.guess_lines_artists.append(guess_line)
                 
         if self.active_datasets:
             self.ax.legend(loc="upper right", frameon=True, fontsize=8)
@@ -951,7 +957,7 @@ class XRDPlotterGUI:
     def select_and_plot_files(self):
         files = filedialog.askopenfilenames(
             title="Select XRD Data Files",
-            filetypes=[("XRD Datasets (*.csv, *.xrdml)", "*.csv;*.xrdml"), ("Spreadsheets (*.csv)", "*.csv"), ("XML Readouts (*.xrdml)", "*.xrdml"), ("All Files", "*.*")]
+            filetypes=[("XRD Datasets", ("*.csv", "*.xrdml")), ("Spreadsheets", "*.csv"), ("XML Readouts", "*.xrdml"), ("All Files", "*.*")]
         )
         if not files: return
         
@@ -1000,7 +1006,14 @@ class XRDPlotterGUI:
         success_count = 0
         for path_key, data in self.active_datasets.items():
             try:
-                b_name = os.path.splitext(os.path.basename(path_key))[0] if not path_key.startswith("__fit_") and not path_key.startswith("__ref_") else path_key.strip("__")
+                if path_key.startswith("__fit_") or path_key.startswith("__ref_"):
+                    # Synthetic curves have no real path; build a safe name from the label.
+                    raw_name = data.get('label', path_key)
+                    b_name = "".join(c if (c.isalnum() or c in "-.") else "_" for c in raw_name).strip("_")
+                    if not b_name:
+                        b_name = "curve"
+                else:
+                    b_name = os.path.splitext(os.path.basename(path_key))[0]
                 out_path = os.path.join(out_dir, f"clean_{b_name}.csv")
                 pd.DataFrame({'Angle': data['angles'], 'Intensity': data['intensities']}).to_csv(out_path, index=False)
                 success_count += 1
