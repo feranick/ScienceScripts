@@ -24,7 +24,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.06.16.1"
+VERSION_TAG = "v2026.06.26.1"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 
@@ -89,13 +89,14 @@ def calculate_crystallographic_match_score(theoretical_angles, experimental_gues
 # ==========================================
 
 def load_xrd_data(file_path):
-    """Parses custom XRD CSV or native XML XRDML configuration files layout."""
+    """Parses custom instrument-tagged XRD CSV, simple tabular CSV, or native XML XRDML files."""
     ext = os.path.splitext(file_path)[1].lower()
     filename = os.path.basename(file_path)
     sample_id = os.path.splitext(filename)[0]
     
     if ext == '.csv':
         skiprows = 0
+        has_scan_points = False
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 for idx, line in enumerate(f):
@@ -105,22 +106,33 @@ def load_xrd_data(file_path):
                             sample_id = parts[1].strip()
                     if '[Scan points]' in line:
                         skiprows = idx + 1
+                        has_scan_points = True
                         break
         except Exception as e:
-            raise IOError(f"Error reading CSV header: {e}")
-            
-        if skiprows == 0:
-            raise ValueError("Could not locate '[Scan points]' tag in CSV data frame.")
+            raise IOError(f"Error reading CSV structure headers: {e}")
             
         try:
-            df = pd.read_csv(file_path, skiprows=skiprows)
-            df.columns = df.columns.str.strip()
-            if 'Angle' in df.columns and 'Intensity' in df.columns:
-                return df['Angle'].values, df['Intensity'].values, sample_id
+            if has_scan_points:
+                df = pd.read_csv(file_path, skiprows=skiprows)
             else:
-                raise ValueError("Missing required 'Angle' or 'Intensity' columns.")
+                # Fall back immediately to a clean, direct column layout parse strategy
+                df = pd.read_csv(file_path)
+                
+            df.columns = df.columns.str.strip()
+            
+            # Match columns dynamically based on variations of common shorthand syntax keys
+            angle_col = [c for c in df.columns if 'angle' in c.lower() or '2theta' in c.lower() or '2θ' in c.lower()]
+            intensity_col = [c for c in df.columns if 'intensity' in c.lower() or 'count' in c.lower()]
+            
+            if angle_col and intensity_col:
+                return df[angle_col[0]].values, df[intensity_col[0]].values, sample_id
+            elif len(df.columns) >= 2:
+                # Positional fallback to indices 0 and 1 if tracking text headers are completely modified
+                return df.iloc[:, 0].values, df.iloc[:, 1].values, sample_id
+            else:
+                raise ValueError("Missing required distinct Angle and Intensity coordinate streams.")
         except Exception as e:
-            raise ValueError(f"Parsing error inside CSV rows: {e}")
+            raise ValueError(f"Parsing index exception inside CSV array: {e}")
 
     elif ext == '.xrdml':
         try:
@@ -207,7 +219,7 @@ class XRDPlotterGUI:
         self.ent_smooth_win.insert(0, "11")
         self.ent_smooth_win.pack(side="left", padx=1)
         
-        # NEW FUNCTIONALITY: Rigid 2-Theta Zero-Offset Calibration Interface row
+        # Rigid 2-Theta Zero-Offset Calibration Interface row
         shift_row = ttk.Frame(sidebar_frame)
         shift_row.pack(side="top", fill="x", pady=3)
         
@@ -675,7 +687,6 @@ class XRDPlotterGUI:
             self.replot_and_refresh_canvas()
             self.status_var.set(f"Smoothed residual noise across {smoothed_count} layers (Savgol window={window}).")
 
-    # NEW FUNCTIONALITY: Rigid 2-Theta translation execution block handler
     def apply_two_theta_shift(self):
         """Linearly shifts the independent 2-Theta coordinates vector array to calibrate zero-offset artifacts."""
         if not self.active_datasets:
