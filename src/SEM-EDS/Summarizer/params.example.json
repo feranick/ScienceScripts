@@ -1,0 +1,16 @@
+{
+  "sample": "20260626_TiO2_run11_crystal",
+  "field_label": "faceted-grain field",
+  "magnification": "4700 x",
+  "field_width": "147 \u00b5m",
+  "hv": "15 kV",
+  "wd": "5.036 mm",
+  "vacuum": "0.10 Pa (low-vacuum)",
+  "scale_bar": "30 \u00b5m",
+  "detector": "Mixed SE/BSE (Mix 50%)",
+  "date": "2026-06-26 16:16",
+  "observations": [
+    "Optional free-text bullets you write yourself appear in an Observations section.",
+    "Leave this key out and no interpretation section is added."
+  ]
+}

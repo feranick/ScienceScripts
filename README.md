@@ -13,3 +13,6 @@ Collection of Scripts for Handling Scientific Data
     - Smoothing curves
     - Background subtraction (via regularization or through reference diffractogram).
     - Correct angular offsets with reference data.
+
+## SEM/EDS
+1. **Summarizer**: Create a summary given the spectra and the images. 
