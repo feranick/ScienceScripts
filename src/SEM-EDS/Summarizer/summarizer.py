@@ -157,31 +157,59 @@ def register_unicode_font():
 # File discovery & parsing
 # --------------------------------------------------------------------------- #
 
-MAP_RE = re.compile(r"map_([A-Za-z]+)_+(\d+)x(\d+)_points", re.IGNORECASE)
+IMAGE_EXTS = (".png", ".tif", ".tiff", ".jpg", ".jpeg", ".bmp")
+
+# Lenient: just need "map" + an element-like token. Resolution is parsed separately.
+MAP_RE = re.compile(r"map[_\-\s]*([A-Za-z]{1,14})", re.IGNORECASE)
+RES_RE = re.compile(r"(\d+)\s*[x\u00d7]\s*(\d+)", re.IGNORECASE)
 
 
-def discover_files(input_dir):
-    """Return (sem_path, spectrum_path, [(symbol, name, w, h, path), ...])."""
-    pngs = sorted(glob.glob(os.path.join(input_dir, "*.png")) +
-                  glob.glob(os.path.join(input_dir, "*.tif")) +
-                  glob.glob(os.path.join(input_dir, "*.tiff")) +
-                  glob.glob(os.path.join(input_dir, "*.jpg")))
-    maps, sem, spectrum = [], None, None
-    for p in pngs:
+def _list_images(input_dir):
+    """List image files in a folder, case-insensitive on extension."""
+    if not os.path.isdir(input_dir):
+        return []
+    out = []
+    for fn in sorted(os.listdir(input_dir)):
+        if fn.startswith("."):
+            continue
+        if os.path.splitext(fn)[1].lower() in IMAGE_EXTS:
+            out.append(os.path.join(input_dir, fn))
+    return out
+
+
+def discover_files(input_dir, verbose=False):
+    """Return (sem_path, spectrum_path, [(symbol, name, w, h, path), ...], diagnostics)."""
+    files = _list_images(input_dir)
+    maps, sem, spectrum, diag = [], None, None, []
+    for p in files:
         base = os.path.basename(p)
         low = base.lower()
         m = MAP_RE.search(base)
-        if m:
+        # A map must contain "map<elem>" AND either a known element name or a WxH token,
+        # so we don't misread an arbitrary image that merely contains the substring "map".
+        res = RES_RE.search(base)
+        is_known = m and m.group(1).lower() in NAME_TO_SYMBOL
+        if m and (is_known or res):
             name = m.group(1)
             sym = NAME_TO_SYMBOL.get(name.lower(), name[:2].capitalize())
-            maps.append((sym, name, int(m.group(2)), int(m.group(3)), p))
+            w, h = (int(res.group(1)), int(res.group(2))) if res else (0, 0)
+            maps.append((sym, name, w, h, p))
+            diag.append((base, f"MAP -> {sym}" + (f" {w}x{h}" if w else " (no resolution in name)")))
         elif "spectrum" in low:
             spectrum = p
+            diag.append((base, "SPECTRUM"))
         elif "map" not in low and "analysis" not in low:
-            # first non-map, non-spectrum image is taken as the SEM micrograph
             if sem is None:
                 sem = p
-    return sem, spectrum, maps
+                diag.append((base, "SEM micrograph"))
+            else:
+                diag.append((base, "ignored (extra non-map image)"))
+        else:
+            diag.append((base, "ignored (looks map-related but no element/resolution recognised)"))
+    if verbose:
+        for b, why in diag:
+            print(f"  {b}  ->  {why}")
+    return sem, spectrum, maps, diag
 
 
 # --------------------------------------------------------------------------- #
@@ -218,7 +246,8 @@ def coverage_stats(maps, box):
     for sym, name, w, h, path in maps:
         b = _lum(path)[top:bottom, left:right]
         out.append({
-            "symbol": sym, "name": name, "res": f"{w}\u00d7{h}",
+            "symbol": sym, "name": name,
+            "res": f"{w}\u00d7{h}" if w else "\u2014",
             "lit": float((b > 45).mean() * 100.0),
             "mean": float(b.mean()),
         })
@@ -469,19 +498,41 @@ def main():
     ap.add_argument("--output", "-o", default=None, help="Output PDF path (default: <input>/SEM_EDX_summary.pdf).")
     ap.add_argument("--params", "-p", default=None, help="Optional JSON file with acquisition params and observations.")
     ap.add_argument("--ocr", action="store_true", help="Try OCR of the SEM banner (needs pytesseract + tesseract).")
+    ap.add_argument("--verbose", "-v", action="store_true", help="Print how each file in the folder was classified.")
     args = ap.parse_args()
 
     if not os.path.isdir(args.input):
-        sys.exit(f"Input folder not found: {args.input}")
+        sys.exit(f"Input folder not found: {args.input}  (cwd: {os.getcwd()})")
 
     params = {}
     if args.params:
         with open(args.params) as fh:
             params = json.load(fh)
 
-    sem, spectrum, maps = discover_files(args.input)
+    sem, spectrum, maps, diag = discover_files(args.input, verbose=args.verbose)
     if not maps:
-        sys.exit("No elemental maps found (expected files like '..._map_<Element>__WxH_points_.png').")
+        all_files = sorted(os.listdir(args.input))
+        msg = ["No elemental maps found in: " + os.path.abspath(args.input),
+               "",
+               "Expected map files named like:  ..._map_<Element>__480x264_points_.png",
+               "(needs the substring 'map' + an element name, e.g. 'map_Titanium').",
+               ""]
+        if not all_files:
+            msg.append("The folder is EMPTY. Check the path / that the files are really in here.")
+        else:
+            msg.append("Files actually in the folder (%d):" % len(all_files))
+            for fn in all_files:
+                tag = ""
+                if os.path.splitext(fn)[1].lower() not in IMAGE_EXTS and not fn.startswith("."):
+                    tag = "   <- not a recognised image extension"
+                msg.append("   " + fn + tag)
+            if diag:
+                msg.append("")
+                msg.append("How each image was classified:")
+                for b, why in diag:
+                    msg.append(f"   {b}  ->  {why}")
+        sys.exit("\n".join(msg))
+
     print(f"SEM: {os.path.basename(sem) if sem else '(none)'} | "
           f"spectrum: {os.path.basename(spectrum) if spectrum else '(none)'} | "
           f"maps: {', '.join(s for s, *_ in maps)}")
