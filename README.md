@@ -16,3 +16,6 @@ Collection of Scripts for Handling Scientific Data
 
 ## SEM/EDS
 1. **Summarizer**: Create a summary given the spectra and the images. 
+
+## PyMol Plotter
+1. **plot_pymol_structures**: Plot a 'necklace' of spherical particles from a PACKMOL-style PDB file.
