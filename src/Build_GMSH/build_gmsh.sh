@@ -99,7 +99,10 @@ download() {
 if [[ ! -x "${MINICONDA_PREFIX}/bin/conda" ]]; then
     echo ">> Installing Miniconda to ${MINICONDA_PREFIX}"
     download "${MINICONDA_URL}" "${WORKDIR}/${MINICONDA_INSTALLER}"
-    bash "${WORKDIR}/${MINICONDA_INSTALLER}" -b -p "${MINICONDA_PREFIX}"
+    # -u: install into / update an existing directory. This lets the script
+    # recover from a partial/leftover miniconda3 dir instead of aborting with
+    # "File or directory already exists".
+    bash "${WORKDIR}/${MINICONDA_INSTALLER}" -b -u -p "${MINICONDA_PREFIX}"
 else
     echo ">> Miniconda already installed at ${MINICONDA_PREFIX}"
 fi
