@@ -14,7 +14,7 @@ import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from scipy.optimize import curve_fit
-from scipy.signal import savgol_filter
+from scipy.signal import savgol_filter, find_peaks
 
 # HDF5 support (HORIBA LabSpec 6 .h5). Optional so the app still launches
 # if h5py is not installed; the user is told how to add it on first use.
@@ -58,6 +58,46 @@ def multi_gaussian_composite(x, *params):
         wid = params[i+2]
         y += gaussian_profile(x, amp, cent, wid)
     return y
+
+def detect_reference_peaks(x, y, max_peaks=40, min_prominence=0.04):
+    """Detects the most prominent band positions (cm-1) in a reference spectrum.
+    Intensities are min-max normalized so the prominence threshold is scale-free."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if len(y) < 5:
+        return np.array([])
+    rng = np.ptp(y)
+    if rng <= 0:
+        return np.array([])
+    yn = (y - y.min()) / rng
+    peaks, props = find_peaks(yn, prominence=min_prominence, distance=3)
+    if len(peaks) == 0:
+        return np.array([])
+    proms = props.get('prominences', np.ones(len(peaks)))
+    order = np.argsort(proms)[::-1][:max_peaks]
+    return np.sort(x[peaks[order]])
+
+
+def peak_match_score(reference_peaks, experimental_peaks, tolerance):
+    """Figure-of-merit for how well a reference's peaks explain the marked peaks.
+    Returns (score_percent, average_closeness, matched_count)."""
+    ref = np.asarray(reference_peaks, dtype=float)
+    exp = list(experimental_peaks)
+    if not exp or ref.size == 0:
+        return 0.0, float(tolerance), 0
+    matched = 0
+    cumulative = 0.0
+    for ex in exp:
+        delta = np.min(np.abs(ref - ex))
+        if delta <= tolerance:
+            matched += 1
+            cumulative += delta
+        else:
+            cumulative += tolerance  # out-of-tolerance penalty
+    score = (matched / len(exp)) * 100.0
+    avg = cumulative / len(exp)
+    return score, avg, matched
+
 
 def snip_background(y, iterations=40):
     """Estimates a smooth baseline (fluorescence/background) using the SNIP algorithm."""
@@ -336,8 +376,8 @@ class RamanPlotterGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Raman Spectra Analysis Toolkit")
-        self.root.geometry("1050x780")
-        self.root.minsize(850, 600)
+        self.root.geometry("1240x900")
+        self.root.minsize(1000, 640)
 
         style = ttk.Style()
         style.theme_use('clam')
@@ -360,9 +400,36 @@ class RamanPlotterGUI:
         self.line_map = {}               # dataset key -> Line2D (for fast updates)
         self._adjust_key_by_label = {}
 
-        # --- Left Sidebar Panel Layout ---
-        sidebar_frame = ttk.Frame(root, padding=12, relief="flat")
-        sidebar_frame.pack(side="left", fill="y", padx=5, pady=5)
+        # --- Left Sidebar Panel Layout (scrollable so nothing is ever clipped) ---
+        sidebar_container = ttk.Frame(root)
+        sidebar_container.pack(side="left", fill="y", padx=5, pady=5)
+        sidebar_canvas = tk.Canvas(sidebar_container, borderwidth=0, highlightthickness=0, width=300)
+        sidebar_vscroll = ttk.Scrollbar(sidebar_container, orient="vertical", command=sidebar_canvas.yview)
+        sidebar_canvas.configure(yscrollcommand=sidebar_vscroll.set)
+        sidebar_vscroll.pack(side="right", fill="y")
+        sidebar_canvas.pack(side="left", fill="both", expand=True)
+
+        sidebar_frame = ttk.Frame(sidebar_canvas, padding=12)
+        sidebar_window = sidebar_canvas.create_window((0, 0), window=sidebar_frame, anchor="nw")
+        sidebar_frame.bind("<Configure>", lambda e: sidebar_canvas.configure(scrollregion=sidebar_canvas.bbox("all")))
+        sidebar_canvas.bind("<Configure>", lambda e: sidebar_canvas.itemconfig(sidebar_window, width=e.width))
+
+        def _sidebar_wheel(event):
+            if event.num == 5 or event.delta < 0:
+                sidebar_canvas.yview_scroll(1, "units")
+            elif event.num == 4 or event.delta > 0:
+                sidebar_canvas.yview_scroll(-1, "units")
+
+        # Only capture the wheel while the pointer is over the sidebar, so it
+        # doesn't interfere with the plot's own wheel-adjust behaviour.
+        sidebar_canvas.bind("<Enter>", lambda e: (
+            sidebar_canvas.bind_all("<MouseWheel>", _sidebar_wheel),
+            sidebar_canvas.bind_all("<Button-4>", _sidebar_wheel),
+            sidebar_canvas.bind_all("<Button-5>", _sidebar_wheel)))
+        sidebar_canvas.bind("<Leave>", lambda e: (
+            sidebar_canvas.unbind_all("<MouseWheel>"),
+            sidebar_canvas.unbind_all("<Button-4>"),
+            sidebar_canvas.unbind_all("<Button-5>")))
 
         ttk.Label(sidebar_frame, text="🔬 Raman Spectra Analyzer", font=("Helvetica", 12, "bold")).pack(side="top", anchor="w", pady=(0, 10))
 
@@ -425,7 +492,12 @@ class RamanPlotterGUI:
         self.ent_scale_step = ttk.Entry(s_row, width=5)
         self.ent_scale_step.insert(0, "5")
         self.ent_scale_step.pack(side="left", padx=1)
-        ttk.Label(adjust_frame, text="Pick a target, click Offset or Scale, then scroll the wheel over the plot.",
+        # Step buttons: click to nudge (no scroll wheel required, e.g. on a MacBook)
+        step_btn_row = ttk.Frame(adjust_frame)
+        step_btn_row.pack(fill="x", pady=(4, 0))
+        ttk.Button(step_btn_row, text="➖ Down", command=lambda: self.adjust_step_button(-1)).pack(side="left", fill="x", expand=True)
+        ttk.Button(step_btn_row, text="Up ➕", command=lambda: self.adjust_step_button(1)).pack(side="left", fill="x", expand=True, padx=(4, 0))
+        ttk.Label(adjust_frame, text="Pick a target and mode, then use ➖ / ➕ (or scroll the wheel / two-finger scroll over the plot).",
                   font=("Helvetica", 8), foreground="#555555", wraplength=250).pack(anchor="w", pady=(3, 0))
 
         self.btn_fit_toggle = ttk.Button(sidebar_frame, text="🎯 Peak Selection: OFF", command=self.toggle_fitting_mode)
@@ -474,6 +546,17 @@ class RamanPlotterGUI:
         self.rruff_search_hits = []
 
         ttk.Button(panel_rruff, text="➕ Overlay Selected Reference", command=self.rruff_overlay_selected).pack(fill="x", pady=(0, 2))
+
+        ttk.Separator(panel_rruff, orient="horizontal").pack(fill="x", pady=4)
+        tol_row = ttk.Frame(panel_rruff)
+        tol_row.pack(fill="x", pady=(0, 2))
+        ttk.Label(tol_row, text="Match tol. ±", font=("Helvetica", 8, "bold")).pack(side="left")
+        self.ent_match_tol = ttk.Entry(tol_row, width=5)
+        self.ent_match_tol.insert(0, "12")
+        self.ent_match_tol.pack(side="left", padx=(2, 1))
+        ttk.Label(tol_row, text="cm⁻¹", font=("Helvetica", 8)).pack(side="left")
+        self.btn_rruff_match = ttk.Button(panel_rruff, text="🎯 Match by Selected Peaks", command=self.rruff_match_by_peaks)
+        self.btn_rruff_match.pack(fill="x", pady=(0, 2))
 
         self.rruff_status_var = tk.StringVar(value="RRUFF: no set cached.")
         ttk.Label(panel_rruff, textvariable=self.rruff_status_var, font=("Helvetica", 8), foreground="#555555", wraplength=250).pack(anchor="w")
@@ -1015,17 +1098,30 @@ class RamanPlotterGUI:
             self.status_var.set("Wheel-adjust off.")
 
     def on_scroll(self, event):
+        # Two-finger trackpad scroll (where the backend forwards it) or a mouse wheel.
         if self.adjust_mode is None or event.inaxes != self.ax:
-            return
-        label = self.combo_adjust_target.get()
-        key = self._adjust_key_by_label.get(label)
-        if key is None or key not in self.active_datasets:
             return
         step_val = getattr(event, 'step', 0) or 0
         if step_val == 0:
             step_val = 1 if getattr(event, 'button', None) == 'up' else -1
-        direction = 1.0 if step_val > 0 else -1.0
+        self._apply_adjust(1.0 if step_val > 0 else -1.0)
 
+    def adjust_step_button(self, direction):
+        """Discrete +/- step from the on-screen buttons (no wheel needed)."""
+        if not self.active_datasets:
+            messagebox.showwarning("No Data", "Load spectra first.")
+            return
+        if self.adjust_mode is None:
+            # Default to Offset so the buttons work without arming a mode first.
+            self.set_adjust_mode('offset')
+        self._apply_adjust(float(direction))
+
+    def _apply_adjust(self, direction):
+        """Applies one offset/scale step to the selected target spectrum."""
+        label = self.combo_adjust_target.get()
+        key = self._adjust_key_by_label.get(label)
+        if key is None or key not in self.active_datasets:
+            return
         if not self.adjust_armed:
             self.save_to_history()
             self.adjust_armed = True
@@ -1158,6 +1254,146 @@ class RamanPlotterGUI:
         if added:
             self.replot_and_refresh_canvas()
             self.rruff_status_var.set(f"RRUFF: overlaid {added} reference spectrum(s).")
+
+    def _rruff_candidate_files(self, query=""):
+        """Returns [(name, id, path)] for the active RRUFF source, optional filter."""
+        if self.rruff_local_dir and os.path.isdir(self.rruff_local_dir):
+            base = self.rruff_local_dir
+        else:
+            ds = self.combo_rruff_dataset.get()
+            base = rruff_dataset_dir(ds) if ds else None
+        out = []
+        if not base or not os.path.isdir(base):
+            return out
+        q = (query or "").strip().lower()
+        for fn in sorted(os.listdir(base)):
+            if not fn.lower().endswith('.txt'):
+                continue
+            parts = fn.split('__')
+            name = parts[0] if parts else fn
+            rid = parts[1] if len(parts) > 1 else ''
+            if q and q not in f"{name} {rid} {fn}".lower():
+                continue
+            out.append((name, rid, os.path.join(base, fn)))
+        return out
+
+    def rruff_match_by_peaks(self):
+        """Rank RRUFF references by how well their peaks match the marked peaks."""
+        if not self.peak_guesses:
+            messagebox.showinfo(
+                "Mark Peaks First",
+                "Turn on '🎯 Peak Selection', then right-click on the plot to mark the "
+                "peaks you want to match. Then run 'Match by Selected Peaks'.")
+            return
+        candidates = self._rruff_candidate_files(self.ent_rruff_query.get())
+        if not candidates:
+            messagebox.showinfo(
+                "No RRUFF Data",
+                "Download a RRUFF set (or point to a local RRUFF folder) first.\n"
+                "A search-box term, if present, restricts which references are scanned.")
+            return
+        try:
+            tolerance = float(self.ent_match_tol.get().strip())
+        except ValueError:
+            tolerance = 12.0
+        exp_peaks = list(self.peak_guesses)
+
+        self.btn_rruff_match.config(state="disabled")
+        self.rruff_status_var.set(f"Matching {len(candidates)} references ...")
+
+        def worker():
+            scored = []
+            total = len(candidates)
+            for i, (name, rid, path) in enumerate(candidates):
+                try:
+                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                        x, y, _ = _parse_two_column_text(f.read(), name)
+                    if len(x) < 5:
+                        continue
+                    ref_peaks = detect_reference_peaks(x, y)
+                    score, avg, matched = peak_match_score(ref_peaks, exp_peaks, tolerance)
+                    if matched > 0:
+                        scored.append((score, avg, matched, name, rid, path))
+                except Exception:
+                    continue
+                if (i % 200) == 0:
+                    self.root.after(0, lambda i=i: self.rruff_status_var.set(
+                        f"Matching {i}/{total} references ..."))
+            scored.sort(key=lambda t: (-t[0], t[1]))
+            self.root.after(0, lambda: self._show_rruff_match_results(scored[:100], len(exp_peaks), tolerance))
+            self.root.after(0, lambda: self.btn_rruff_match.config(state="normal"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_rruff_match_results(self, scored, n_exp, tolerance):
+        if not scored:
+            self.rruff_status_var.set("RRUFF: no references matched the marked peaks.")
+            messagebox.showinfo("No Matches",
+                                "No RRUFF reference had bands near your marked peaks.\n"
+                                "Try a larger match tolerance or different peaks.")
+            return
+        self.rruff_status_var.set(f"RRUFF: {len(scored)} candidate(s) ranked (tol ±{tolerance:g}).")
+
+        pop = tk.Toplevel(self.root)
+        pop.title("RRUFF Search & Match — Candidate Ranking")
+        pop.geometry("640x340")
+        pop.transient(self.root)
+        pop.grab_set()
+        ttk.Label(pop, text=f"Ranked by alignment of RRUFF bands with your {n_exp} marked peak(s) "
+                            f"(±{tolerance:g} cm⁻¹):", font=("Helvetica", 9, "bold")).pack(pady=6, padx=8, anchor="w")
+
+        frame = ttk.Frame(pop)
+        frame.pack(fill="both", expand=True, padx=8, pady=4)
+        scroll = ttk.Scrollbar(frame)
+        scroll.pack(side="right", fill="y")
+        tree = ttk.Treeview(frame, columns=("Score", "Mineral", "ID", "Matched"),
+                            show="headings", yscrollcommand=scroll.set, height=10, selectmode="extended")
+        tree.heading("Score", text="Match Score")
+        tree.heading("Mineral", text="Mineral")
+        tree.heading("ID", text="RRUFF ID")
+        tree.heading("Matched", text="Peaks Matched")
+        tree.column("Score", width=110, anchor="center")
+        tree.column("Mineral", width=230, anchor="w")
+        tree.column("ID", width=110, anchor="center")
+        tree.column("Matched", width=120, anchor="center")
+        tree.pack(fill="both", expand=True)
+        scroll.config(command=tree.yview)
+
+        row_map = {}
+        for score, avg, matched, name, rid, path in scored:
+            iid = tree.insert("", "end", values=(f"{score:.0f}%", name, rid, f"{matched}/{n_exp}"))
+            row_map[iid] = {'name': name, 'id': rid, 'path': path}
+
+        def overlay_chosen():
+            sel = tree.selection()
+            if not sel:
+                return
+            pop.destroy()
+            self.save_to_history()
+            added = 0
+            for iid in sel:
+                hit = row_map[iid]
+                try:
+                    with open(hit['path'], 'r', encoding='utf-8', errors='ignore') as f:
+                        x, y, label = _parse_two_column_text(f.read(), hit['name'])
+                    if len(x) == 0:
+                        continue
+                except Exception:
+                    continue
+                data_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_") and not k.startswith("__ref_")]
+                if data_keys and np.max(y) > 0:
+                    max_scale = max(np.max(self.active_datasets[k]['intensities']) for k in data_keys)
+                    y = (y / np.max(y)) * max_scale
+                if not label.startswith("RRUFF"):
+                    label = f"RRUFF: {hit['name']}" + (f" ({hit['id']})" if hit['id'] else "")
+                key = f"__ref_{hit['name']}_{hit['id']}_match"
+                self.active_datasets[key] = {'angles': x, 'intensities': y, 'label': label}
+                added += 1
+            if added:
+                self.replot_and_refresh_canvas()
+                self.rruff_status_var.set(f"RRUFF: overlaid {added} matched reference(s).")
+
+        ttk.Button(pop, text="➕ Overlay Selected Match(es)", command=overlay_chosen).pack(pady=8)
 
     def clear_canvas(self):
         if self.active_datasets:
