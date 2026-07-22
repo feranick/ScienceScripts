@@ -159,7 +159,11 @@
                 <span style="margin-left: 6px;">×%</span>
                 <input type="number" id="scale-step" value="5" step="1" min="0.1" style="width: 52px; padding: 6px; border: 1px solid #ced4da; border-radius: 6px;">
             </div>
-            <div style="font-size: 0.78rem; color: #6c757d;">Pick a target, click Offset or Scale, then scroll the wheel over the plot.</div>
+            <div style="display: flex; gap: 4px;">
+                <button class="btn-crop" style="flex: 1; font-size: 1.05rem;" onclick="adjustStep(-1)">➖ Down</button>
+                <button class="btn-crop" style="flex: 1; font-size: 1.05rem;" onclick="adjustStep(1)">Up ➕</button>
+            </div>
+            <div style="font-size: 0.78rem; color: #6c757d;">Pick a target and mode, then use ➖ / ➕ (or two-finger scroll over the plot).</div>
         </div>
 
         <button id="btn-fit-toggle" class="btn-fit-toggle" onclick="toggleFittingMode()">🎯 Peak Selection: OFF</button>
@@ -264,33 +268,16 @@
                     }
                 });
                 // LabSpec-style wheel adjust: add a constant (offset) or multiply (scale)
-                // the selected spectrum. Only intercepts the wheel when a mode is armed.
+                // the selected spectrum. Two-finger trackpad scroll also fires 'wheel'.
+                // Capture phase + preventDefault so Plotly doesn't swallow the gesture.
                 chartDiv.addEventListener('wheel', function(e) {
                     if (!adjustMode) return;
                     const sel = document.getElementById('adjust-target');
-                    const key = sel && sel.value;
-                    if (!key || !persistentDatasets[key]) return;
+                    if (!sel || !sel.value || !persistentDatasets[sel.value]) return;
                     e.preventDefault();
-                    const dir = (e.deltaY < 0) ? 1 : -1;
-                    if (!adjustArmed) { saveToHistory(); adjustArmed = true; }
-                    const ds = persistentDatasets[key];
-                    if (adjustMode === 'offset') {
-                        let step = parseFloat(document.getElementById('offset-step').value);
-                        if (isNaN(step)) step = 100;
-                        ds.intensities = ds.intensities.map(v => v + step * dir);
-                    } else {
-                        let pct = parseFloat(document.getElementById('scale-step').value);
-                        if (isNaN(pct)) pct = 5;
-                        const f = Math.pow(1 + pct / 100, dir);
-                        ds.intensities = ds.intensities.map(v => v * f);
-                    }
-                    const idx = traceIndexByKey[key];
-                    if (idx !== undefined) {
-                        Plotly.restyle('chart-container', { y: [ds.intensities] }, [idx]);
-                    } else {
-                        updateChartCanvas();
-                    }
-                }, { passive: false });
+                    e.stopPropagation();
+                    applyAdjust(e.deltaY < 0 ? 1 : -1);
+                }, { passive: false, capture: true });
             };
 
             const readyPromise = window.__plotlyReady || Promise.resolve();
@@ -475,6 +462,7 @@
                 if (!isFitOrRef) {
                     const cb = document.createElement('input'); cb.type = 'checkbox'; cb.id = `fit-check-${key}`; cb.value = key;
                     cb.checked = historicalCheckedStates[key] !== undefined ? historicalCheckedStates[key] : true;
+                    cb.onchange = updateChartCanvas;  // toggle spectrum visibility
                     const label = document.createElement('label'); label.htmlFor = cb.id; label.innerText = persistentDatasets[key].label; label.style.fontSize = '0.85rem'; label.style.cursor = 'pointer';
                     leftDiv.appendChild(cb); leftDiv.appendChild(label);
                 } else {
@@ -512,6 +500,36 @@
             }
             document.getElementById('btn-adjust-offset').classList.toggle('adjust-on', adjustMode === 'offset');
             document.getElementById('btn-adjust-scale').classList.toggle('adjust-on', adjustMode === 'scale');
+        }
+
+        // Discrete step from the on-screen buttons (no wheel needed, e.g. on a MacBook).
+        function adjustStep(dir) {
+            const sel = document.getElementById('adjust-target');
+            if (!sel || !sel.value || !persistentDatasets[sel.value]) { alert("Select a target spectrum first."); return; }
+            if (!adjustMode) setAdjustMode('offset');  // default so the buttons work without arming
+            applyAdjust(dir);
+        }
+
+        // Shared offset/scale application used by both the wheel and the +/- buttons.
+        function applyAdjust(dir) {
+            const sel = document.getElementById('adjust-target');
+            const key = sel && sel.value;
+            if (!key || !persistentDatasets[key]) return;
+            if (!adjustArmed) { saveToHistory(); adjustArmed = true; }
+            const ds = persistentDatasets[key];
+            if (adjustMode === 'scale') {
+                let pct = parseFloat(document.getElementById('scale-step').value);
+                if (isNaN(pct)) pct = 5;
+                const f = Math.pow(1 + pct / 100, dir);
+                ds.intensities = ds.intensities.map(v => v * f);
+            } else {
+                let step = parseFloat(document.getElementById('offset-step').value);
+                if (isNaN(step)) step = 100;
+                ds.intensities = ds.intensities.map(v => v + step * dir);
+            }
+            const idx = traceIndexByKey[key];
+            if (idx !== undefined) { Plotly.restyle('chart-container', { y: [ds.intensities] }, [idx]); }
+            else { updateChartCanvas(); }
         }
 
         function removeSpecificDataset(key) {
@@ -962,6 +980,11 @@
             traceIndexByKey = {};
             datasetKeys.forEach(key => {
                 const data = persistentDatasets[key]; const isFitCurve = key.startsWith("__fit_");
+                // Honor the layer checkbox: unchecked raw spectra are hidden.
+                if (!isFitCurve && !key.startsWith("__ref_")) {
+                    const cbEl = document.getElementById('fit-check-' + key);
+                    if (cbEl && !cbEl.checked) return;
+                }
                 let lineConfig = { width: 1.5 };
                 if (key.startsWith("__fit_composite")) lineConfig = { width: 2.0, dash: 'solid' };
                 else if (isFitCurve) lineConfig = { width: 1.2, dash: 'dot' };

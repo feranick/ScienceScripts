@@ -676,7 +676,9 @@ class RamanPlotterGUI:
             if not key.startswith("__fit_") and not key.startswith("__ref_"):
                 if key not in self.target_checkbox_vars:
                     self.target_checkbox_vars[key] = tk.BooleanVar(value=True)
-                cb = ttk.Checkbutton(row_frame, text=data['label'], variable=self.target_checkbox_vars[key])
+                cb = ttk.Checkbutton(row_frame, text=data['label'],
+                                     variable=self.target_checkbox_vars[key],
+                                     command=self.redraw_plot)
                 cb.pack(side="left", anchor="w")
             else:
                 lbl = ttk.Label(row_frame, text=data['label'], font=("Helvetica", 9, "italic"), foreground="#555555")
@@ -899,6 +901,14 @@ class RamanPlotterGUI:
         self.status_var.set(f"Applied a rigid Raman-shift calibration of {shift_val} cm⁻¹.")
 
     def replot_and_refresh_canvas(self):
+        """Full refresh: redraw the plot and rebuild the sidebar panels."""
+        self.redraw_plot()
+        self.refresh_checkbox_targets_panel()
+        self.refresh_adjust_targets()
+
+    def redraw_plot(self):
+        """Redraws only the plot from current data + visibility, leaving the
+        sidebar layer panel untouched (so its scroll position is preserved)."""
         self.ax.clear()
         self.configure_axis_labels()
         self.cursor_line = None
@@ -916,15 +926,19 @@ class RamanPlotterGUI:
                 line, = self.ax.plot(data['angles'], data['intensities'], linestyle='-.', linewidth=1.5, alpha=0.8, label=data['label'])
                 self.line_map[file_path] = line
             else:
+                # Honor the layer checkbox: unchecked spectra are hidden.
+                var = self.target_checkbox_vars.get(file_path)
+                if var is not None and not var.get():
+                    continue
                 line, = self.ax.plot(data['angles'], data['intensities'], label=data['label'], linewidth=1.2)
                 self.line_map[file_path] = line
         for g_x in self.peak_guesses:
             guess_line = self.ax.axvline(g_x, color='#d63384', linestyle=':', linewidth=1.5)
             self.guess_lines_artists.append(guess_line)
-        if self.active_datasets:
+        handles, _labels = self.ax.get_legend_handles_labels()
+        if handles:
             self.ax.legend(loc="upper right", frameon=True, fontsize=8)
-        self.ax.relim(); self.ax.autoscale_view(); self.refresh_checkbox_targets_panel()
-        self.refresh_adjust_targets(); self.canvas.draw()
+        self.ax.relim(); self.ax.autoscale_view(); self.canvas.draw()
 
     def run_peak_optimization(self):
         if not self.peak_guesses:
