@@ -1,4 +1,7 @@
 import os
+import io
+import re
+import zipfile
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import xml.etree.ElementTree as ET
@@ -11,7 +14,7 @@ import webbrowser
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from scipy.optimize import curve_fit
-from scipy.signal import savgol_filter
+from scipy.signal import savgol_filter, find_peaks
 
 # Conditional Imports to ensure app stability if packages are absent on launch
 try:
@@ -21,11 +24,23 @@ try:
 except ImportError:
     MP_LIBRARIES_AVAILABLE = False
 
+# HDF5 support for the optional RRUFF powder .h5 reference library.
+try:
+    import h5py
+    H5_AVAILABLE = True
+except ImportError:
+    H5_AVAILABLE = False
+
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.06.26.2"
+VERSION_TAG = "v2026.07.23.1"
 KEY_FILE_NAME = "mp_api_key.txt"
+
+# RRUFF powder reference library (patterns calculated for Cu radiation, i.e. the
+# same CuKa convention used for Materials Project simulated patterns).
+SYNTH_MIN, SYNTH_MAX, SYNTH_STEP, SYNTH_SIGMA = 5.0, 90.0, 0.02, 0.10
+_REF_DATA_ROW = re.compile(r'^\d+\.\d+(?:\s+-?\d+){3,4}$')
 
 
 # ==========================================
@@ -82,6 +97,194 @@ def calculate_crystallographic_match_score(theoretical_angles, experimental_gues
     score_percentage = (matched_peaks_count / len(experimental_guesses)) * 100.0
     average_closeness_error = cumulative_proximity_delta / len(experimental_guesses)
     return score_percentage, average_closeness_error
+
+
+# ==========================================
+# RRUFF POWDER REFERENCE DATABASE (added alongside Materials Project)
+# ==========================================
+
+def detect_reference_peaks(x, y, max_peaks=60, min_prominence=0.02):
+    """Detects prominent 2-theta band positions in a continuous pattern."""
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    if len(y) < 5:
+        return np.array([])
+    rng = np.ptp(y)
+    if rng <= 0:
+        return np.array([])
+    yn = (y - y.min()) / rng
+    peaks, props = find_peaks(yn, prominence=min_prominence, distance=2)
+    if len(peaks) == 0:
+        return np.array([])
+    proms = props.get('prominences', np.ones(len(peaks)))
+    order = np.argsort(proms)[::-1][:max_peaks]
+    return np.sort(x[peaks[order]])
+
+
+def peak_match_score(reference_peaks, experimental_peaks, tolerance):
+    """FOM for how well a reference's peaks explain the marked peaks.
+    Returns (score_percent, average_closeness, matched_count)."""
+    ref = np.asarray(reference_peaks, dtype=float)
+    exp = list(experimental_peaks)
+    if not exp or ref.size == 0:
+        return 0.0, float(tolerance), 0
+    matched = 0; cumulative = 0.0
+    for ex in exp:
+        delta = np.min(np.abs(ref - ex))
+        if delta <= tolerance:
+            matched += 1; cumulative += delta
+        else:
+            cumulative += tolerance
+    return (matched / len(exp)) * 100.0, cumulative / len(exp), matched
+
+
+def _synth_profile(tth, inten):
+    x = np.arange(SYNTH_MIN, SYNTH_MAX + SYNTH_STEP, SYNTH_STEP)
+    y = np.zeros_like(x)
+    for c, h in zip(tth, inten):
+        y += h * np.exp(-((x - c) / SYNTH_SIGMA) ** 2)
+    if y.max() > 0:
+        y = y / y.max() * 100.0
+    return x, y
+
+
+def parse_rruff_powder(text):
+    """Parses any RRUFF powder collection -> (x, y, peaks_or_None, meta).
+    XY profile -> continuous x,y (peaks None); DIF / refinement_data /
+    refinement_output_data -> 2-theta peak list + a synthesized display profile."""
+    meta = {}
+    lines = text.splitlines()
+    for raw in lines:
+        line = raw.strip()
+        m = re.match(r'#+\s*([A-Za-z ]+)\s*=\s*(.*)', line)
+        if m:
+            meta[m.group(1).strip().upper()] = m.group(2).strip()
+        mw = re.search(r'X-?RAY WAVELENGTH\s*(?:#\d+\s*)?[:=]?\s*([\d.]+)', line, re.IGNORECASE)
+        if mw:
+            meta.setdefault('WAVELENGTH', mw.group(1))
+    upper = text.upper()
+
+    def clamp(a):
+        return 1.0 <= a <= 170.0
+
+    # DIF: "2-THETA INTENSITY D-SPACING H K L"
+    if 'INTENSITY' in upper and re.search(r'2-?\s*THETA', upper):
+        start = 0
+        for i, raw in enumerate(lines):
+            if re.search(r'2-?\s*THETA', raw, re.IGNORECASE) and re.search(r'INTENSITY', raw, re.IGNORECASE):
+                start = i + 1; break
+        tth, inten = [], []
+        for raw in lines[start:]:
+            s = raw.strip()
+            if not s or set(s) <= set('='):
+                if tth:
+                    break
+                continue
+            parts = s.split()
+            try:
+                a = float(parts[0]); b = float(parts[1])
+            except (ValueError, IndexError):
+                if tth:
+                    break
+                continue
+            if clamp(a):
+                tth.append(a); inten.append(b)
+        if tth:
+            x, y = _synth_profile(tth, inten)
+            return x, y, np.array(tth), meta
+
+    # refinement_output_data (REFINE program listing)
+    if 'PROGRAM REFINE' in upper or ('OBSERVED' in upper and 'CALCULATED' in upper):
+        tth = []
+        for raw in lines:
+            parts = raw.split()
+            if len(parts) < 6:
+                continue
+            try:
+                a = float(parts[0])
+            except ValueError:
+                continue
+            if clamp(a):
+                tth.append(a)
+        if tth:
+            x, y = _synth_profile(tth, [100.0] * len(tth))
+            return x, y, np.array(tth), meta
+
+    # refinement_data ("2theta h k l [wave#]")
+    ref_rows = [l.strip() for l in lines if _REF_DATA_ROW.match(l.strip())]
+    if len(ref_rows) >= 3:
+        tth = [float(r.split()[0]) for r in ref_rows if clamp(float(r.split()[0]))]
+        if tth:
+            x, y = _synth_profile(tth, [100.0] * len(tth))
+            return x, y, np.array(tth), meta
+
+    # XY continuous two-column
+    xs, ys = [], []
+    for raw in lines:
+        s = raw.strip()
+        if not s or s.startswith('#'):
+            continue
+        for sep in (',', '\t', ';'):
+            if sep in s:
+                parts = s.split(sep); break
+        else:
+            parts = s.split()
+        if len(parts) < 2:
+            continue
+        try:
+            xv = float(parts[0]); yv = float(parts[1])
+        except ValueError:
+            continue
+        xs.append(xv); ys.append(yv)
+    return np.array(xs), np.array(ys), None, meta
+
+
+def rruff_meta_from_filename(fname):
+    stem = os.path.splitext(os.path.basename(fname))[0]
+    parts = stem.split('__')
+    name = parts[0] if parts else stem
+    rid = ''
+    for p in parts[1:]:
+        mm = re.match(r'(R\d{5,7})', p)
+        if mm:
+            rid = mm.group(1); break
+    return name, rid
+
+
+def rruff_url(name, rid, stored_url=None):
+    if stored_url:
+        return stored_url
+    if rid and re.match(r'^R\d+', str(rid)):
+        return f"https://rruff.info/{rid}"
+    if name:
+        return "https://rruff.info/" + str(name).strip().lower()
+    return None
+
+
+def load_rruff_powder_h5_library(path):
+    """Reads a consolidated RRUFF powder library .h5 (from build_rruff_powder_library.py).
+    Returns {'path', 'entries': [{group, name, id, url, peaks(np.array)}]}."""
+    if not H5_AVAILABLE:
+        raise ImportError("Reading .h5 libraries requires 'h5py' (pip install h5py).")
+    entries = []
+    with h5py.File(path, 'r') as f:
+        if 'spectra' not in f:
+            raise ValueError("Not a RRUFF powder library ('spectra' group missing).")
+        sp = f['spectra']
+        for gname in sp:
+            a = sp[gname].attrs
+            def dec(v):
+                return v.decode('latin1') if isinstance(v, bytes) else str(v)
+            peaks = np.asarray(a['peaks'], dtype=float) if 'peaks' in a else np.array([])
+            entries.append({
+                'group': gname,
+                'name': dec(a.get('name', gname)),
+                'id': dec(a.get('rruff_id', '')),
+                'url': dec(a.get('url', '')),
+                'peaks': peaks,
+            })
+    if not entries:
+        raise ValueError("Library contains no patterns.")
+    return {'path': path, 'entries': entries}
 
 
 # ==========================================
@@ -189,6 +392,9 @@ class XRDPlotterGUI:
         # In-memory arrays session states initialization
         self.active_datasets = {}
         self.peak_guesses = []
+        self.rruff_lib = None
+        self.rruff_local_dir = None
+        self.rruff_search_hits = []
         self.guess_lines_artists = []
         self.fitted_curves_artists = []
         self.target_checkbox_vars = {} 
@@ -293,6 +499,34 @@ class XRDPlotterGUI:
         btn_search_match = ttk.Button(panel_search, text="🎯 Search/Match by Peaks", command=lambda: self.execute_database_search(mode="peaks"))
         btn_search_match.pack(fill="x", pady=2)
 
+        # --- RRUFF (powder) Reference Database Panel ---
+        panel_rruff = ttk.LabelFrame(sidebar_frame, text=" 💎 RRUFF (powder) ", padding=(8, 6))
+        panel_rruff.pack(side="top", fill="x", pady=5)
+        rr_btns = ttk.Frame(panel_rruff)
+        rr_btns.pack(fill="x")
+        ttk.Button(rr_btns, text="📚 Open .h5 Library", command=self.rruff_open_library).pack(side="left", fill="x", expand=True)
+        ttk.Button(rr_btns, text="📂 Folder", command=self.rruff_pick_local_folder).pack(side="left", fill="x", expand=True, padx=(3, 0))
+        rr_search = ttk.Frame(panel_rruff)
+        rr_search.pack(fill="x", pady=(4, 2))
+        self.ent_rruff_query = ttk.Entry(rr_search)
+        self.ent_rruff_query.pack(side="left", fill="x", expand=True)
+        self.ent_rruff_query.bind("<Return>", lambda e: self.rruff_run_search())
+        ttk.Button(rr_search, text="🔍", width=3, command=self.rruff_run_search).pack(side="right", padx=(3, 0))
+        self.rruff_results_list = tk.Listbox(panel_rruff, height=3, exportselection=False)
+        self.rruff_results_list.pack(fill="x", pady=(0, 3))
+        self.rruff_results_list.bind("<Double-1>", self._rruff_open_selected_page)
+        ttk.Button(panel_rruff, text="➕ Overlay Selected", command=self.rruff_overlay_selected).pack(fill="x", pady=(0, 2))
+        rr_tol = ttk.Frame(panel_rruff)
+        rr_tol.pack(fill="x")
+        ttk.Label(rr_tol, text="Match tol. ±", font=("Helvetica", 8, "bold")).pack(side="left")
+        self.ent_rruff_tol = ttk.Entry(rr_tol, width=5)
+        self.ent_rruff_tol.insert(0, "0.2")
+        self.ent_rruff_tol.pack(side="left", padx=(2, 1))
+        ttk.Label(rr_tol, text="°2θ", font=("Helvetica", 8)).pack(side="left")
+        ttk.Button(panel_rruff, text="🎯 Match by Selected Peaks (RRUFF)", command=self.rruff_match_by_peaks).pack(fill="x", pady=(2, 2))
+        self.rruff_status_var = tk.StringVar(value="RRUFF: open an .h5 library or a folder of powder files.")
+        ttk.Label(panel_rruff, textvariable=self.rruff_status_var, font=("Helvetica", 8), foreground="#555555", wraplength=250).pack(anchor="w")
+
         # --- Active Layers Control Panel Frame Container ---
         self.panel_fit_targets = ttk.LabelFrame(sidebar_frame, text=" 📋 Plotted Canvas Layers ", padding=(8, 6))
         self.panel_fit_targets.pack(side="top", fill="x", pady=8, expand=True)
@@ -367,7 +601,10 @@ class XRDPlotterGUI:
             'active_datasets': {k: {
                 'angles': np.copy(v['angles']),
                 'intensities': np.copy(v['intensities']),
-                'label': v['label']
+                'label': v['label'],
+                'rruff_name': v.get('rruff_name'),
+                'rruff_id': v.get('rruff_id'),
+                'rruff_url': v.get('rruff_url')
             } for k, v in self.active_datasets.items()},
             'peak_guesses': list(self.peak_guesses),
             'table_data': tree_cache
@@ -449,7 +686,13 @@ class XRDPlotterGUI:
                 cb = ttk.Checkbutton(row_frame, text=data['label'], variable=self.target_checkbox_vars[key])
                 cb.pack(side="left", anchor="w")
             else:
-                lbl = ttk.Label(row_frame, text=data['label'], font=("Helvetica", 9, "italic"), foreground="#555555")
+                url = rruff_url(data.get('rruff_name'), data.get('rruff_id'), data.get('rruff_url')) if key.startswith("__ref_rruff_") else None
+                if url:
+                    lbl = ttk.Label(row_frame, text=data['label'], font=("Helvetica", 9, "underline"),
+                                    foreground="#0d6efd", cursor="hand2")
+                    lbl.bind("<Button-1>", lambda e, u=url: webbrowser.open_new_tab(u))
+                else:
+                    lbl = ttk.Label(row_frame, text=data['label'], font=("Helvetica", 9, "italic"), foreground="#555555")
                 lbl.pack(side="left", anchor="w", padx=4)
             
             btn_del = ttk.Button(row_frame, text="❌", width=2, command=lambda k=key: self.remove_specific_dataset(k))
@@ -1034,6 +1277,228 @@ class XRDPlotterGUI:
             except Exception: pass
         self.guess_lines_artists.clear()
         self.peak_guesses.clear()
+
+    # ==========================================
+    # RRUFF (powder) reference database methods
+    # ==========================================
+    def rruff_open_library(self):
+        path = filedialog.askopenfilename(
+            title="Open a consolidated RRUFF powder .h5 library",
+            filetypes=[("RRUFF powder library", ("*.h5", "*.hdf5")), ("All Files", "*.*")])
+        if not path:
+            return
+        try:
+            self.rruff_lib = load_rruff_powder_h5_library(path)
+        except Exception as e:
+            messagebox.showerror("Library Error", f"Could not open library:\n{e}")
+            return
+        self.rruff_local_dir = None
+        self.rruff_status_var.set(f"RRUFF library: {len(self.rruff_lib['entries'])} patterns (precomputed peaks). Search or Match.")
+
+    def rruff_pick_local_folder(self):
+        d = filedialog.askdirectory(title="Select a folder of RRUFF powder .txt files")
+        if not d:
+            return
+        if not any(fn.lower().endswith('.txt') for fn in os.listdir(d)):
+            messagebox.showwarning("No Files", "That folder contains no .txt files.")
+            return
+        self.rruff_local_dir = d
+        self.rruff_lib = None
+        n = len([f for f in os.listdir(d) if f.lower().endswith('.txt')])
+        self.rruff_status_var.set(f"RRUFF folder: {n} files. Search or Match by peaks.")
+
+    def _rruff_read_reference(self, hit):
+        """Returns (x, y, label) for a hit from the .h5 library or a powder file."""
+        if hit.get('group') is not None and self.rruff_lib:
+            with h5py.File(self.rruff_lib['path'], 'r') as f:
+                g = f['spectra'][hit['group']]
+                x = np.array(g['x'][:], dtype=float); y = np.array(g['y'][:], dtype=float)
+        else:
+            with open(hit['path'], 'r', encoding='utf-8', errors='ignore') as fh:
+                x, y, _peaks, _meta = parse_rruff_powder(fh.read())
+        label = f"RRUFF: {hit['name']}" + (f" ({hit['id']})" if hit['id'] else "")
+        return x, y, label
+
+    def _rruff_add_reference(self, x, y, label, key, name=None, rid=None, url=None):
+        data_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_") and not k.startswith("__ref_")]
+        if data_keys and np.max(y) > 0:
+            max_scale = max(np.max(self.active_datasets[k]['intensities']) for k in data_keys)
+            y = (y / np.max(y)) * max_scale
+        self.active_datasets[key] = {'angles': x, 'intensities': y, 'label': label,
+                                     'rruff_name': name, 'rruff_id': rid, 'rruff_url': url}
+
+    def _rruff_candidates(self, query=""):
+        """[(name, id, url_or_None, key_dict)] from the active RRUFF source."""
+        q = (query or "").strip().lower()
+        out = []
+        if self.rruff_lib:
+            for e in self.rruff_lib['entries']:
+                if not q or q in f"{e['name']} {e['id']}".lower():
+                    out.append({'name': e['name'], 'id': e['id'], 'url': e.get('url'),
+                                'group': e['group'], 'peaks': e['peaks']})
+        elif self.rruff_local_dir:
+            for fn in sorted(os.listdir(self.rruff_local_dir)):
+                if not fn.lower().endswith('.txt'):
+                    continue
+                name, rid = rruff_meta_from_filename(fn)
+                if not q or q in f"{name} {rid} {fn}".lower():
+                    out.append({'name': name, 'id': rid, 'url': None,
+                                'path': os.path.join(self.rruff_local_dir, fn)})
+        return out
+
+    def rruff_run_search(self):
+        self.rruff_results_list.delete(0, tk.END)
+        self.rruff_search_hits = []
+        if not self.rruff_lib and not self.rruff_local_dir:
+            messagebox.showinfo("No RRUFF Source", "Open an .h5 library or a local folder first.")
+            return
+        hits = self._rruff_candidates(self.ent_rruff_query.get())
+        if not hits:
+            self.rruff_status_var.set("RRUFF: no matches.")
+            return
+        self.rruff_search_hits = hits[:500]
+        for h in self.rruff_search_hits:
+            self.rruff_results_list.insert(tk.END, f"{h['name']}" + (f" · {h['id']}" if h['id'] else ""))
+        self.rruff_status_var.set(f"RRUFF: {len(hits)} match(es)" + (" (first 500)." if len(hits) > 500 else "."))
+
+    def _rruff_open_selected_page(self, event=None):
+        for idx in self.rruff_results_list.curselection():
+            if idx < len(self.rruff_search_hits):
+                h = self.rruff_search_hits[idx]
+                url = rruff_url(h['name'], h.get('id'), h.get('url'))
+                if url:
+                    webbrowser.open_new_tab(url)
+
+    def rruff_overlay_selected(self):
+        sel = self.rruff_results_list.curselection()
+        if not sel or not self.rruff_search_hits:
+            messagebox.showinfo("Nothing Selected", "Search, then select a RRUFF entry to overlay.")
+            return
+        self.save_to_history()
+        added = 0
+        for idx in sel:
+            if idx >= len(self.rruff_search_hits):
+                continue
+            hit = self.rruff_search_hits[idx]
+            try:
+                x, y, label = self._rruff_read_reference(hit)
+                if len(x) == 0:
+                    continue
+            except Exception:
+                continue
+            key = f"__ref_rruff_{hit['name']}_{hit['id']}_{idx}"
+            self._rruff_add_reference(x, y, label, key, name=hit['name'], rid=hit['id'], url=hit.get('url'))
+            added += 1
+        if added:
+            self.replot_and_refresh_canvas()
+            self.rruff_status_var.set(f"RRUFF: overlaid {added} reference(s).")
+
+    def rruff_match_by_peaks(self):
+        if not self.peak_guesses:
+            messagebox.showinfo("Mark Peaks First",
+                                "Turn on '🎯 Peak Selection', right-click on the plot to mark peaks, then Match.")
+            return
+        if not self.rruff_lib and not self.rruff_local_dir:
+            messagebox.showinfo("No RRUFF Source", "Open an .h5 library or a local folder first.")
+            return
+        try:
+            tolerance = float(self.ent_rruff_tol.get().strip())
+        except ValueError:
+            tolerance = 0.2
+        exp = list(self.peak_guesses)
+        candidates = self._rruff_candidates(self.ent_rruff_query.get())
+        if not candidates:
+            messagebox.showinfo("No Candidates", "No RRUFF references to match (check the search filter).")
+            return
+
+        self.rruff_status_var.set(f"Matching {len(candidates)} references ...")
+
+        def worker():
+            scored = []
+            total = len(candidates)
+            for i, hit in enumerate(candidates):
+                try:
+                    if hit.get('peaks') is not None:
+                        ref_peaks = hit['peaks']  # precomputed (library)
+                    else:
+                        with open(hit['path'], 'r', encoding='utf-8', errors='ignore') as fh:
+                            x, y, pk, _m = parse_rruff_powder(fh.read())
+                        ref_peaks = pk if pk is not None else detect_reference_peaks(x, y)
+                    score, avg, matched = peak_match_score(ref_peaks, exp, tolerance)
+                    if matched > 0:
+                        rec = dict(hit); rec.update({'score': score, 'avg': avg, 'matched': matched})
+                        scored.append(rec)
+                except Exception:
+                    continue
+                if (i % 200) == 0:
+                    self.root.after(0, lambda i=i: self.rruff_status_var.set(f"Matching {i}/{total} ..."))
+            scored.sort(key=lambda t: (-t['score'], t['avg']))
+            self.root.after(0, lambda: self._show_rruff_match_results(scored[:100], len(exp), tolerance))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_rruff_match_results(self, scored, n_exp, tolerance):
+        if not scored:
+            self.rruff_status_var.set("RRUFF: no references matched the marked peaks.")
+            messagebox.showinfo("No Matches", "No RRUFF reference had bands near your marked peaks.\nTry a larger tolerance.")
+            return
+        self.rruff_status_var.set(f"RRUFF: {len(scored)} candidate(s) ranked (tol ±{tolerance:g}°).")
+        pop = tk.Toplevel(self.root)
+        pop.title("RRUFF Powder — Search & Match")
+        pop.geometry("640x340")
+        pop.transient(self.root); pop.grab_set()
+        ttk.Label(pop, text=f"Ranked by alignment of RRUFF bands with your {n_exp} marked peak(s) "
+                            f"(±{tolerance:g}°). Double-click a row to open its RRUFF page.",
+                  font=("Helvetica", 9, "bold")).pack(pady=6, padx=8, anchor="w")
+        frame = ttk.Frame(pop)
+        frame.pack(fill="both", expand=True, padx=8, pady=4)
+        scroll = ttk.Scrollbar(frame); scroll.pack(side="right", fill="y")
+        tree = ttk.Treeview(frame, columns=("Score", "Mineral", "ID", "Matched"), show="headings",
+                            yscrollcommand=scroll.set, height=10, selectmode="extended")
+        for c, t, w in (("Score", "Match Score", 100), ("Mineral", "Mineral", 240),
+                        ("ID", "RRUFF ID", 110), ("Matched", "Peaks Matched", 120)):
+            tree.heading(c, text=t); tree.column(c, width=w, anchor=("w" if c == "Mineral" else "center"))
+        tree.pack(fill="both", expand=True); scroll.config(command=tree.yview)
+        row_map = {}
+        for rec in scored:
+            iid = tree.insert("", "end", values=(f"{rec['score']:.0f}%", rec['name'], rec['id'], f"{rec['matched']}/{n_exp}"))
+            row_map[iid] = rec
+
+        def open_pages(event=None):
+            opened = 0
+            for iid in tree.selection():
+                rec = row_map.get(iid)
+                if rec:
+                    url = rruff_url(rec['name'], rec.get('id'), rec.get('url'))
+                    if url:
+                        webbrowser.open_new_tab(url); opened += 1
+            if opened == 0:
+                messagebox.showinfo("Nothing Selected", "Select a row, then open its RRUFF page.")
+        tree.bind("<Double-1>", open_pages)
+
+        def overlay_chosen():
+            sel = tree.selection()
+            if not sel:
+                return
+            pop.destroy(); self.save_to_history(); added = 0
+            for iid in sel:
+                hit = row_map[iid]
+                try:
+                    x, y, label = self._rruff_read_reference(hit)
+                    if len(x) == 0:
+                        continue
+                except Exception:
+                    continue
+                key = f"__ref_rruff_{hit['name']}_{hit['id']}_match"
+                self._rruff_add_reference(x, y, label, key, name=hit['name'], rid=hit['id'], url=hit.get('url'))
+                added += 1
+            if added:
+                self.replot_and_refresh_canvas()
+                self.rruff_status_var.set(f"RRUFF: overlaid {added} matched reference(s).")
+
+        btn_row = ttk.Frame(pop); btn_row.pack(pady=8)
+        ttk.Button(btn_row, text="🔗 Open RRUFF Page(s)", command=open_pages).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="➕ Overlay Selected Match(es)", command=overlay_chosen).pack(side="left", padx=4)
 
     def clear_canvas(self):
         if self.active_datasets:
