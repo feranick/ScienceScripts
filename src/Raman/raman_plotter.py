@@ -27,7 +27,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "raman-v2026.07.22.2"
+VERSION_TAG = "raman-v2026.07.23.1"
 
 # RRUFF reference database (open Raman spectra of minerals).
 # Data are distributed as per-quality zip archives of two-column .txt files.
@@ -368,6 +368,42 @@ def rruff_search_cached(dataset, query):
     return results
 
 
+def load_rruff_h5_library(path):
+    """Reads a consolidated RRUFF library .h5 (built by build_rruff_library.py).
+    Returns {'path', 'entries': [{group, name, id, quality, peaks(np.array)}]}.
+    Spectra x/y are read lazily from the file when a reference is overlaid."""
+    if not H5_AVAILABLE:
+        raise ImportError("Reading .h5 libraries requires 'h5py' (pip install h5py).")
+    entries = []
+    with h5py.File(path, 'r') as f:
+        if 'spectra' not in f:
+            raise ValueError("Not a RRUFF library file ('spectra' group missing).")
+        sp = f['spectra']
+        for gname in sp:
+            g = sp[gname]
+            a = g.attrs
+            peaks = np.asarray(a['peaks'], dtype=float) if 'peaks' in a else np.array([])
+            entries.append({
+                'group': gname,
+                'name': _decode(a.get('name', gname)),
+                'id': _decode(a.get('rruff_id', '')),
+                'quality': _decode(a.get('quality', '')),
+                'peaks': peaks,
+            })
+    if not entries:
+        raise ValueError("Library contains no spectra.")
+    return {'path': path, 'entries': entries}
+
+
+def rruff_url(name, rid):
+    """Link to the RRUFF page for a sample (by ID) or mineral (by name)."""
+    if rid and re.match(r'^R\d+', str(rid)):
+        return f"https://rruff.info/{rid}"
+    if name:
+        return "https://rruff.info/" + str(name).strip().lower()
+    return None
+
+
 # ==========================================
 # GUI & EMBEDDED PLOTTING INTERFACE
 # ==========================================
@@ -532,6 +568,7 @@ class RamanPlotterGUI:
         self.btn_rruff_download = ttk.Button(panel_rruff, text="⬇️ Download / Update Set", command=self.rruff_download_selected)
         self.btn_rruff_download.pack(fill="x", pady=2)
         ttk.Button(panel_rruff, text="📂 Use Local RRUFF Folder", command=self.rruff_pick_local_folder).pack(fill="x", pady=2)
+        ttk.Button(panel_rruff, text="📚 Open RRUFF .h5 Library", command=self.rruff_open_library).pack(fill="x", pady=2)
 
         ttk.Label(panel_rruff, text="Search mineral / ID:", font=("Helvetica", 8, "bold")).pack(anchor="w", pady=(4, 0))
         search_row = ttk.Frame(panel_rruff)
@@ -543,6 +580,7 @@ class RamanPlotterGUI:
 
         self.rruff_results_list = tk.Listbox(panel_rruff, height=4, exportselection=False)
         self.rruff_results_list.pack(fill="x", pady=(0, 3))
+        self.rruff_results_list.bind("<Double-1>", self._rruff_open_selected_page)
         self.rruff_search_hits = []
 
         ttk.Button(panel_rruff, text="➕ Overlay Selected Reference", command=self.rruff_overlay_selected).pack(fill="x", pady=(0, 2))
@@ -562,6 +600,7 @@ class RamanPlotterGUI:
         ttk.Label(panel_rruff, textvariable=self.rruff_status_var, font=("Helvetica", 8), foreground="#555555", wraplength=250).pack(anchor="w")
 
         self.rruff_local_dir = None
+        self.rruff_lib = None
         self._refresh_rruff_status()
 
         # --- Active Layers Control Panel ---
@@ -633,7 +672,9 @@ class RamanPlotterGUI:
             'active_datasets': {k: {
                 'angles': np.copy(v['angles']),
                 'intensities': np.copy(v['intensities']),
-                'label': v['label']
+                'label': v['label'],
+                'rruff_name': v.get('rruff_name'),
+                'rruff_id': v.get('rruff_id')
             } for k, v in self.active_datasets.items()},
             'peak_guesses': list(self.peak_guesses),
             'table_data': tree_cache
@@ -681,7 +722,13 @@ class RamanPlotterGUI:
                                      command=self.redraw_plot)
                 cb.pack(side="left", anchor="w")
             else:
-                lbl = ttk.Label(row_frame, text=data['label'], font=("Helvetica", 9, "italic"), foreground="#555555")
+                url = rruff_url(data.get('rruff_name'), data.get('rruff_id')) if key.startswith("__ref_") else None
+                if url:
+                    lbl = ttk.Label(row_frame, text=data['label'], font=("Helvetica", 9, "underline"),
+                                    foreground="#0d6efd", cursor="hand2")
+                    lbl.bind("<Button-1>", lambda e, u=url: webbrowser.open_new_tab(u))
+                else:
+                    lbl = ttk.Label(row_frame, text=data['label'], font=("Helvetica", 9, "italic"), foreground="#555555")
                 lbl.pack(side="left", anchor="w", padx=4)
             btn_del = ttk.Button(row_frame, text="❌", width=2, command=lambda k=key: self.remove_specific_dataset(k))
             btn_del.pack(side="right", anchor="e")
@@ -1166,6 +1213,9 @@ class RamanPlotterGUI:
     # ---------- RRUFF reference database ----------
     def _refresh_rruff_status(self):
         ds = self.combo_rruff_dataset.get()
+        if self.rruff_lib:
+            self.rruff_status_var.set(f"RRUFF library: {len(self.rruff_lib['entries'])} spectra (precomputed peaks).")
+            return
         if self.rruff_local_dir:
             n = len([f for f in os.listdir(self.rruff_local_dir) if f.lower().endswith('.txt')])
             self.rruff_status_var.set(f"RRUFF: local folder ({n} spectra).")
@@ -1206,13 +1256,60 @@ class RamanPlotterGUI:
             messagebox.showwarning("No Spectra", "That folder contains no .txt spectra.")
             return
         self.rruff_local_dir = d
+        self.rruff_lib = None  # folder takes precedence when chosen
         self._refresh_rruff_status()
+
+    def rruff_open_library(self):
+        path = filedialog.askopenfilename(
+            title="Open a consolidated RRUFF .h5 library",
+            filetypes=[("RRUFF library", ("*.h5", "*.hdf5")), ("All Files", "*.*")])
+        if not path:
+            return
+        try:
+            self.rruff_lib = load_rruff_h5_library(path)
+        except Exception as e:
+            messagebox.showerror("Library Error", f"Could not open library:\n{e}")
+            return
+        self.rruff_local_dir = None  # library takes precedence
+        n = len(self.rruff_lib['entries'])
+        self.rruff_status_var.set(f"RRUFF library: {n} spectra (precomputed peaks). Search or Match.")
+
+    def _read_reference_xy(self, hit):
+        """Returns (x, y, label) for a search/match hit, from the .h5 library
+        (lazy read of the group) or a two-column file, as appropriate."""
+        if hit.get('group') is not None and self.rruff_lib:
+            with h5py.File(self.rruff_lib['path'], 'r') as f:
+                g = f['spectra'][hit['group']]
+                x = np.array(g['x'][:], dtype=float)
+                y = np.array(g['y'][:], dtype=float)
+            label = f"RRUFF: {hit['name']}" + (f" ({hit['id']})" if hit['id'] else "")
+            return x, y, label
+        with open(hit['path'], 'r', encoding='utf-8', errors='ignore') as f:
+            x, y, label = _parse_two_column_text(f.read(), hit['name'])
+        if not label.startswith("RRUFF"):
+            label = f"RRUFF: {hit['name']}" + (f" ({hit['id']})" if hit['id'] else "")
+        return x, y, label
+
+    def _add_reference(self, x, y, label, key, rruff_name=None, rruff_id=None):
+        """Scales a reference to the current data maximum and stores it."""
+        data_keys = [k for k in self.active_datasets.keys()
+                     if not k.startswith("__fit_") and not k.startswith("__ref_")]
+        if data_keys and np.max(y) > 0:
+            max_scale = max(np.max(self.active_datasets[k]['intensities']) for k in data_keys)
+            y = (y / np.max(y)) * max_scale
+        self.active_datasets[key] = {'angles': x, 'intensities': y, 'label': label,
+                                     'rruff_name': rruff_name, 'rruff_id': rruff_id}
 
     def rruff_run_search(self):
         query = self.ent_rruff_query.get().strip()
         self.rruff_results_list.delete(0, tk.END)
         self.rruff_search_hits = []
-        if self.rruff_local_dir:
+        if self.rruff_lib:
+            q = query.lower()
+            hits = [{'name': e['name'], 'id': e['id'], 'group': e['group']}
+                    for e in self.rruff_lib['entries']
+                    if not q or q in f"{e['name']} {e['id']}".lower()]
+        elif self.rruff_local_dir:
             hits = []
             q = query.lower()
             for fn in sorted(os.listdir(self.rruff_local_dir)):
@@ -1237,6 +1334,15 @@ class RamanPlotterGUI:
             self.rruff_results_list.insert(tk.END, f"{h['name']} {('· ' + h['id']) if h['id'] else ''}")
         self.rruff_status_var.set(f"RRUFF: {len(hits)} match(es)" + (" (showing first 500)." if len(hits) > 500 else "."))
 
+    def _rruff_open_selected_page(self, event=None):
+        sel = self.rruff_results_list.curselection()
+        for idx in sel:
+            if idx < len(self.rruff_search_hits):
+                h = self.rruff_search_hits[idx]
+                url = rruff_url(h['name'], h.get('id'))
+                if url:
+                    webbrowser.open_new_tab(url)
+
     def rruff_overlay_selected(self):
         sel = self.rruff_results_list.curselection()
         if not sel or not self.rruff_search_hits:
@@ -1249,21 +1355,13 @@ class RamanPlotterGUI:
                 continue
             hit = self.rruff_search_hits[idx]
             try:
-                with open(hit['path'], 'r', encoding='utf-8', errors='ignore') as f:
-                    x, y, label = _parse_two_column_text(f.read(), hit['name'])
+                x, y, label = self._read_reference_xy(hit)
                 if len(x) == 0:
                     continue
             except Exception:
                 continue
-            # Scale reference to the current data maximum for easy comparison.
-            data_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_") and not k.startswith("__ref_")]
-            if data_keys and np.max(y) > 0:
-                max_scale = max(np.max(self.active_datasets[k]['intensities']) for k in data_keys)
-                y = (y / np.max(y)) * max_scale
-            if not label.startswith("RRUFF"):
-                label = f"RRUFF: {hit['name']}" + (f" ({hit['id']})" if hit['id'] else "")
             key = f"__ref_{hit['name']}_{hit['id']}_{idx}"
-            self.active_datasets[key] = {'angles': x, 'intensities': y, 'label': label}
+            self._add_reference(x, y, label, key, rruff_name=hit['name'], rruff_id=hit['id'])
             added += 1
         if added:
             self.replot_and_refresh_canvas()
@@ -1299,18 +1397,34 @@ class RamanPlotterGUI:
                 "Turn on '🎯 Peak Selection', then right-click on the plot to mark the "
                 "peaks you want to match. Then run 'Match by Selected Peaks'.")
             return
-        candidates = self._rruff_candidate_files(self.ent_rruff_query.get())
-        if not candidates:
-            messagebox.showinfo(
-                "No RRUFF Data",
-                "Download a RRUFF set (or point to a local RRUFF folder) first.\n"
-                "A search-box term, if present, restricts which references are scanned.")
-            return
         try:
             tolerance = float(self.ent_match_tol.get().strip())
         except ValueError:
             tolerance = 12.0
         exp_peaks = list(self.peak_guesses)
+
+        # Fast path: consolidated .h5 library has precomputed peaks -> instant.
+        if self.rruff_lib:
+            q = self.ent_rruff_query.get().strip().lower()
+            scored = []
+            for e in self.rruff_lib['entries']:
+                if q and q not in f"{e['name']} {e['id']}".lower():
+                    continue
+                score, avg, matched = peak_match_score(e['peaks'], exp_peaks, tolerance)
+                if matched > 0:
+                    scored.append({'score': score, 'avg': avg, 'matched': matched,
+                                   'name': e['name'], 'id': e['id'], 'group': e['group']})
+            scored.sort(key=lambda t: (-t['score'], t['avg']))
+            self._show_rruff_match_results(scored[:100], len(exp_peaks), tolerance)
+            return
+
+        candidates = self._rruff_candidate_files(self.ent_rruff_query.get())
+        if not candidates:
+            messagebox.showinfo(
+                "No RRUFF Data",
+                "Open a RRUFF .h5 library, download a set, or point to a local RRUFF folder first.\n"
+                "A search-box term, if present, restricts which references are scanned.")
+            return
 
         self.btn_rruff_match.config(state="disabled")
         self.rruff_status_var.set(f"Matching {len(candidates)} references ...")
@@ -1327,13 +1441,14 @@ class RamanPlotterGUI:
                     ref_peaks = detect_reference_peaks(x, y)
                     score, avg, matched = peak_match_score(ref_peaks, exp_peaks, tolerance)
                     if matched > 0:
-                        scored.append((score, avg, matched, name, rid, path))
+                        scored.append({'score': score, 'avg': avg, 'matched': matched,
+                                       'name': name, 'id': rid, 'path': path})
                 except Exception:
                     continue
                 if (i % 200) == 0:
                     self.root.after(0, lambda i=i: self.rruff_status_var.set(
                         f"Matching {i}/{total} references ..."))
-            scored.sort(key=lambda t: (-t[0], t[1]))
+            scored.sort(key=lambda t: (-t['score'], t['avg']))
             self.root.after(0, lambda: self._show_rruff_match_results(scored[:100], len(exp_peaks), tolerance))
             self.root.after(0, lambda: self.btn_rruff_match.config(state="normal"))
 
@@ -1354,7 +1469,8 @@ class RamanPlotterGUI:
         pop.transient(self.root)
         pop.grab_set()
         ttk.Label(pop, text=f"Ranked by alignment of RRUFF bands with your {n_exp} marked peak(s) "
-                            f"(±{tolerance:g} cm⁻¹):", font=("Helvetica", 9, "bold")).pack(pady=6, padx=8, anchor="w")
+                            f"(±{tolerance:g} cm⁻¹). Double-click a row to open its RRUFF page.",
+                  font=("Helvetica", 9, "bold")).pack(pady=6, padx=8, anchor="w")
 
         frame = ttk.Frame(pop)
         frame.pack(fill="both", expand=True, padx=8, pady=4)
@@ -1374,9 +1490,25 @@ class RamanPlotterGUI:
         scroll.config(command=tree.yview)
 
         row_map = {}
-        for score, avg, matched, name, rid, path in scored:
-            iid = tree.insert("", "end", values=(f"{score:.0f}%", name, rid, f"{matched}/{n_exp}"))
-            row_map[iid] = {'name': name, 'id': rid, 'path': path}
+        for rec in scored:
+            iid = tree.insert("", "end", values=(f"{rec['score']:.0f}%", rec['name'],
+                                                  rec['id'], f"{rec['matched']}/{n_exp}"))
+            row_map[iid] = rec
+
+        def open_pages(event=None):
+            sel = tree.selection()
+            opened = 0
+            for iid in sel:
+                rec = row_map.get(iid)
+                if not rec:
+                    continue
+                url = rruff_url(rec['name'], rec.get('id'))
+                if url:
+                    webbrowser.open_new_tab(url)
+                    opened += 1
+            if opened == 0:
+                messagebox.showinfo("Nothing Selected", "Select a row, then open its RRUFF page.")
+        tree.bind("<Double-1>", open_pages)
 
         def overlay_chosen():
             sel = tree.selection()
@@ -1388,26 +1520,22 @@ class RamanPlotterGUI:
             for iid in sel:
                 hit = row_map[iid]
                 try:
-                    with open(hit['path'], 'r', encoding='utf-8', errors='ignore') as f:
-                        x, y, label = _parse_two_column_text(f.read(), hit['name'])
+                    x, y, label = self._read_reference_xy(hit)
                     if len(x) == 0:
                         continue
                 except Exception:
                     continue
-                data_keys = [k for k in self.active_datasets.keys() if not k.startswith("__fit_") and not k.startswith("__ref_")]
-                if data_keys and np.max(y) > 0:
-                    max_scale = max(np.max(self.active_datasets[k]['intensities']) for k in data_keys)
-                    y = (y / np.max(y)) * max_scale
-                if not label.startswith("RRUFF"):
-                    label = f"RRUFF: {hit['name']}" + (f" ({hit['id']})" if hit['id'] else "")
                 key = f"__ref_{hit['name']}_{hit['id']}_match"
-                self.active_datasets[key] = {'angles': x, 'intensities': y, 'label': label}
+                self._add_reference(x, y, label, key, rruff_name=hit['name'], rruff_id=hit['id'])
                 added += 1
             if added:
                 self.replot_and_refresh_canvas()
                 self.rruff_status_var.set(f"RRUFF: overlaid {added} matched reference(s).")
 
-        ttk.Button(pop, text="➕ Overlay Selected Match(es)", command=overlay_chosen).pack(pady=8)
+        btn_row = ttk.Frame(pop)
+        btn_row.pack(pady=8)
+        ttk.Button(btn_row, text="🔗 Open RRUFF Page(s)", command=open_pages).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="➕ Overlay Selected Match(es)", command=overlay_chosen).pack(side="left", padx=4)
 
     def clear_canvas(self):
         if self.active_datasets:

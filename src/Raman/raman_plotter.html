@@ -263,7 +263,7 @@
         <div style="background: white; padding: 22px; border-radius: 8px; width: 560px; max-height: 82vh; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
             <h3 style="margin: 0; color: #6f42c1; font-size: 1.1rem;">🎯 RRUFF Search &amp; Match</h3>
             <p class="info-text" id="rruff-match-subtitle" style="margin: 0;"></p>
-            <select id="rruff-match-list" multiple size="12" style="width: 100%; font-size: 0.82rem; padding: 6px; border: 1px solid #ced4da; border-radius: 6px; font-family: 'Consolas', monospace;"></select>
+            <div id="rruff-match-list" style="width: 100%; max-height: 320px; overflow-y: auto; padding: 6px; border: 1px solid #ced4da; border-radius: 6px; box-sizing: border-box;"></div>
             <div style="display: flex; justify-content: flex-end; gap: 8px;">
                 <button class="btn-crop" style="width: auto; padding: 8px 14px; margin: 0;" onclick="closeRruffMatchModal()">Close</button>
                 <button class="btn-ref-sub" style="width: auto; padding: 8px 14px; margin: 0;" onclick="rruffOverlayMatches()">➕ Overlay Selected Match(es)</button>
@@ -293,7 +293,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "raman-v2026.07.22.1";
+        const VERSION_TAG = "raman-v2026.07.23.1";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -523,8 +523,21 @@
                     const label = document.createElement('label'); label.htmlFor = cb.id; label.innerText = persistentDatasets[key].label; label.style.fontSize = '0.85rem'; label.style.cursor = 'pointer';
                     leftDiv.appendChild(cb); leftDiv.appendChild(label);
                 } else {
-                    const spanLabel = document.createElement('span'); spanLabel.innerText = persistentDatasets[key].label; spanLabel.style.fontSize = '0.85rem'; spanLabel.style.fontStyle = 'italic'; spanLabel.style.color = '#555555';
-                    leftDiv.appendChild(spanLabel);
+                    const data = persistentDatasets[key];
+                    const url = key.startsWith("__ref_") ? rruffUrl(data.rruffName, data.rruffId) : null;
+                    let el;
+                    if (url) {
+                        el = document.createElement('a');
+                        el.href = url; el.target = '_blank'; el.rel = 'noopener';
+                        el.title = 'Open RRUFF page';
+                        el.style.color = '#0d6efd'; el.style.textDecoration = 'underline';
+                    } else {
+                        el = document.createElement('span');
+                        el.style.fontStyle = 'italic'; el.style.color = '#555555';
+                    }
+                    el.innerText = data.label;
+                    el.style.fontSize = '0.85rem';
+                    leftDiv.appendChild(el);
                 }
                 const delSpan = document.createElement('span'); delSpan.innerText = "❌"; delSpan.title = "Remove this layer"; delSpan.style.cursor = "pointer"; delSpan.style.fontSize = "0.82rem"; delSpan.style.marginLeft = "8px";
                 delSpan.onclick = function() { removeSpecificDataset(key); };
@@ -1129,15 +1142,26 @@
             statusEl.innerText = `${hits.length} match(es)${hits.length === 300 ? ' (first 300)' : ''}. Select and overlay.`;
         }
 
+        // Link to the RRUFF page for a sample (by ID) or mineral (by name).
+        function rruffUrl(name, id) {
+            if (id && /^R\d+/.test(id)) return 'https://rruff.info/' + id;
+            if (name) return 'https://rruff.info/' + encodeURIComponent(String(name).toLowerCase());
+            return null;
+        }
+
         // Turn a search/match record into a parsed spectrum ({angles,intensities,label}).
         async function recordToParsed(rec) {
+            let parsed;
             if (rec.x && rec.y && rec.x.length) {
-                return { angles: rec.x.slice(), intensities: rec.y.slice(),
-                         label: `RRUFF: ${rec.name}${rec.id ? ' (' + rec.id + ')' : ''}` };
+                parsed = { angles: rec.x.slice(), intensities: rec.y.slice(),
+                           label: `RRUFF: ${rec.name}${rec.id ? ' (' + rec.id + ')' : ''}` };
+            } else {
+                parsed = parseTwoColumn(await rec.file.text(), rec.name);
+                if (!parsed.label || !parsed.label.startsWith("RRUFF"))
+                    parsed.label = `RRUFF: ${rec.name}${rec.id ? ' (' + rec.id + ')' : ''}`;
             }
-            const parsed = parseTwoColumn(await rec.file.text(), rec.name);
-            if (!parsed.label || !parsed.label.startsWith("RRUFF"))
-                parsed.label = `RRUFF: ${rec.name}${rec.id ? ' (' + rec.id + ')' : ''}`;
+            parsed.rruffName = rec.name;
+            parsed.rruffId = rec.id;
             return parsed;
         }
 
@@ -1256,13 +1280,27 @@
             }
             rruffMatchRecords = scored;
             document.getElementById('rruff-match-subtitle').innerText =
-                `Ranked by alignment of RRUFF bands with your ${nExp} marked peak(s) (±${tol} cm⁻¹):`;
+                `Ranked by alignment of RRUFF bands with your ${nExp} marked peak(s) (±${tol} cm⁻¹). Tick to overlay; ↗ opens the RRUFF page.`;
             scored.forEach((s, i) => {
-                const opt = document.createElement('option');
-                opt.value = String(i);
-                const scoreStr = String(Math.round(s.score)).padStart(3, ' ');
-                opt.innerText = `${scoreStr}%  ${s.matched}/${nExp}  ${s.name}${s.id ? ' · ' + s.id : ''}`;
-                listEl.appendChild(opt);
+                const row = document.createElement('div');
+                row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px'; row.style.padding = '2px 0';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox'; cb.className = 'rruff-match-cb'; cb.value = String(i); cb.id = `rmatch-${i}`;
+                const lbl = document.createElement('label');
+                lbl.htmlFor = cb.id; lbl.style.flex = '1'; lbl.style.cursor = 'pointer';
+                lbl.style.fontFamily = "'Consolas', monospace"; lbl.style.fontSize = '0.82rem';
+                const scoreStr = String(Math.round(s.score)).padStart(3, ' ');
+                lbl.innerText = `${scoreStr}%  ${s.matched}/${nExp}  ${s.name}${s.id ? ' · ' + s.id : ''}`;
+                row.appendChild(cb); row.appendChild(lbl);
+                const url = rruffUrl(s.name, s.id);
+                if (url) {
+                    const a = document.createElement('a');
+                    a.href = url; a.target = '_blank'; a.rel = 'noopener';
+                    a.innerText = '↗'; a.title = 'Open RRUFF page';
+                    a.style.textDecoration = 'none'; a.style.fontSize = '1rem'; a.style.padding = '0 4px';
+                    row.appendChild(a);
+                }
+                listEl.appendChild(row);
             });
             document.getElementById('rruff-match-modal').style.display = 'flex';
         }
@@ -1270,9 +1308,8 @@
         function closeRruffMatchModal() { document.getElementById('rruff-match-modal').style.display = 'none'; }
 
         async function rruffOverlayMatches() {
-            const listEl = document.getElementById('rruff-match-list');
-            const chosen = Array.from(listEl.selectedOptions).map(o => +o.value);
-            if (!chosen.length) { alert("Select one or more matches to overlay."); return; }
+            const chosen = Array.from(document.querySelectorAll('#rruff-match-list input.rruff-match-cb:checked')).map(cb => +cb.value);
+            if (!chosen.length) { alert("Tick one or more matches to overlay."); return; }
             closeRruffMatchModal();
             saveToHistory();
             let added = 0;
