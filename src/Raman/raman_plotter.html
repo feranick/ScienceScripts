@@ -308,6 +308,11 @@
         window.onload = function() {
             document.getElementById('app-version-container').innerText = VERSION_TAG;
 
+            // Auto-load the library independently of the chart/Plotly readiness,
+            // so a server-hosted rruff_raman_library.h5 loads even if the Plotly
+            // CDN is slow or blocked.
+            tryAutoLoadLibrary().catch(function () {});
+
             const startChart = function () {
                 renderPlaceholderCanvas();
                 const chartDiv = document.getElementById('chart-container');
@@ -330,9 +335,6 @@
                     e.stopPropagation();
                     applyAdjust(e.deltaY < 0 ? 1 : -1);
                 }, { passive: false, capture: true });
-
-                // Try a host-provided library, else restore a saved one (non-blocking).
-                tryAutoLoadLibrary().catch(function () {});
             };
 
             const readyPromise = window.__plotlyReady || Promise.resolve();
@@ -1042,23 +1044,29 @@
 
         // On startup: prefer a host-provided library, else restore the saved one.
         async function tryAutoLoadLibrary() {
+            const statusEl = document.getElementById('rruff-status');
             const params = new URLSearchParams(location.search);
             const url = params.get('lib') || HOST_LIBRARY_URL;
+            if (statusEl) statusEl.innerText = "Checking for a library on the server…";
             try {
                 const resp = await fetch(url, { cache: 'no-store' });
                 if (resp.ok) {
                     const buf = await resp.arrayBuffer();
                     const sig = new Uint8Array(buf.slice(0, 4));  // HDF5 magic: 0x89 'H' 'D' 'F'
                     if (sig[0] === 0x89 && sig[1] === 0x48 && sig[2] === 0x44 && sig[3] === 0x46) {
-                        await ingestLibraryBytes(buf, 'from page');
+                        await ingestLibraryBytes(buf, 'from server');
                         return;
                     }
+                    console.warn(`'${url}' was served but is not an HDF5 file; ignoring.`);
                 }
             } catch (e) { /* not hosted / blocked (e.g. file://) — fall through */ }
+            // No server library; try a previously saved one.
             try {
                 const saved = await idbLoadLibrary();
-                if (saved) await ingestLibraryBytes(saved, 'restored');
+                if (saved) { await ingestLibraryBytes(saved, 'restored'); return; }
             } catch (e) { /* no saved library */ }
+            if (statusEl) statusEl.innerText =
+                "No server library found. Load a library below, or place rruff_raman_library.h5 next to this page.";
         }
 
         function rruffSearch() {
