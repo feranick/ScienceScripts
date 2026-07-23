@@ -82,6 +82,22 @@
         .btn-fit-toggle { background-color: #6f42c1; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
         .btn-fit-toggle.active { background-color: #ffd43b; color: #212529; }
         .adjust-on { background-color: #ffd43b !important; color: #212529 !important; }
+
+        /* RRUFF panel: reorder when a library is loaded (search/match on top,
+           load controls pushed to the bottom). */
+        #rruff-panel > label { order: -1; }
+        #rruff-intro { order: 0; }
+        #rruff-loaded-note { display: none; order: 0; font-size: 0.82rem; font-weight: bold; color: #0f5132; background: #d1e7dd; border: 1px solid #badbcc; border-radius: 6px; padding: 6px 8px; }
+        #rruff-load-group { order: 1; }
+        #rruff-search-group { order: 2; }
+        #rruff-match-group { order: 3; }
+        #rruff-status { order: 4; }
+        #rruff-panel.lib-loaded #rruff-intro { display: none; }
+        #rruff-panel.lib-loaded #rruff-loaded-note { display: block; }
+        #rruff-panel.lib-loaded #rruff-search-group { order: 1; }
+        #rruff-panel.lib-loaded #rruff-match-group { order: 2; }
+        #rruff-panel.lib-loaded #rruff-load-group { order: 3; }
+        #rruff-panel.lib-loaded #rruff-status { order: 4; }
         .btn-run-fit { background-color: #fd7e14; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
         .btn-run-fit:hover { background-color: #e06d0f; }
 
@@ -112,6 +128,8 @@
     </style>
 </head>
 <body>
+
+    <div id="init-banner" style="display:none; position:fixed; top:14px; left:50%; transform:translateX(-50%); z-index:2000; background:#0d6efd; color:#fff; padding:10px 18px; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.25); font-size:0.9rem; font-weight:bold;">⏳ Initializing RRUFF library…</div>
 
     <div id="sidebar">
         <h2>🔬 Raman Spectra Analyzer</h2>
@@ -179,31 +197,38 @@
 
         <div class="status-badge" id="status-display">Active spectra loaded: 0</div>
 
-        <div style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 6px;">
+        <div class="rruff-panel" id="rruff-panel" style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 6px;">
             <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">🌐 RRUFF Reference Database</label>
-            <p class="info-text" style="margin: 0;">Load a local RRUFF folder (e.g. excellent_unoriented) to search, overlay, and match — fully offline.</p>
+            <p class="info-text" id="rruff-intro" style="margin: 0;">Load a local RRUFF folder (e.g. excellent_unoriented) or an .h5 library to search, overlay, and match — fully offline.</p>
+            <div id="rruff-loaded-note">✅ Library loaded</div>
 
-            <label class="btn-crop" for="rruff-folder" style="text-align: center; cursor: pointer;">📂 Load Local RRUFF Folder</label>
-            <input type="file" id="rruff-folder" webkitdirectory directory multiple style="display:none;" onchange="loadRruffFolder(event)">
-            <label class="btn-crop" for="rruff-h5" style="text-align: center; cursor: pointer;">📚 Open RRUFF .h5 Library</label>
-            <input type="file" id="rruff-h5" accept=".h5,.hdf5" style="display:none;" onchange="loadRruffLibrary(event)">
-            <button class="btn-crop" style="font-size: 0.72rem; padding: 5px;" onclick="forgetSavedLibrary()">🗑 Forget saved library</button>
-
-            <div style="display: flex; gap: 4px; align-items: center;">
-                <input type="text" id="rruff-query" placeholder="mineral or RRUFF ID (e.g. Quartz)" style="flex-grow: 1; padding: 8px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.82rem;">
-                <button class="btn-crop" style="width: auto; padding: 8px 10px;" onclick="rruffSearch()">🔍</button>
+            <div id="rruff-search-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <div style="display: flex; gap: 4px; align-items: center;">
+                    <input type="text" id="rruff-query" placeholder="mineral or RRUFF ID (e.g. Quartz)" style="flex-grow: 1; padding: 8px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.82rem;">
+                    <button class="btn-crop" style="width: auto; padding: 8px 10px;" onclick="rruffSearch()">🔍</button>
+                </div>
+                <select id="rruff-results" size="4" style="width: 100%; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.8rem; padding: 4px;"></select>
+                <button class="btn-ref-sub" onclick="rruffOverlaySelected()">➕ Overlay Selected Reference</button>
             </div>
-            <select id="rruff-results" size="4" style="width: 100%; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.8rem; padding: 4px;"></select>
-            <button class="btn-ref-sub" onclick="rruffOverlaySelected()">➕ Overlay Selected Reference</button>
 
-            <div style="display: flex; align-items: center; gap: 4px; font-size: 0.8rem; color: #495057; border-top: 1px solid #e9ecef; padding-top: 6px;">
-                <span>Match tol. ±</span>
-                <input type="number" id="rruff-match-tol" value="12" step="1" min="1" style="width: 52px; padding: 6px; border: 1px solid #ced4da; border-radius: 6px;">
-                <span>cm⁻¹</span>
+            <div id="rruff-match-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <div style="display: flex; align-items: center; gap: 4px; font-size: 0.8rem; color: #495057; border-top: 1px solid #e9ecef; padding-top: 6px;">
+                    <span>Match tol. ±</span>
+                    <input type="number" id="rruff-match-tol" value="12" step="1" min="1" style="width: 52px; padding: 6px; border: 1px solid #ced4da; border-radius: 6px;">
+                    <span>cm⁻¹</span>
+                </div>
+                <button class="btn-fit-toggle" style="background-color:#6f42c1;" onclick="rruffMatchByPeaks()">🎯 Match by Selected Peaks</button>
             </div>
-            <button class="btn-fit-toggle" style="background-color:#6f42c1;" onclick="rruffMatchByPeaks()">🎯 Match by Selected Peaks</button>
 
-            <div id="rruff-status" style="font-size: 0.78rem; color: #6c757d;">Load a folder above. To match: turn on Peak Selection, right-click to mark peaks, then Match.</div>
+            <div id="rruff-load-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <label class="btn-crop" for="rruff-folder" style="text-align: center; cursor: pointer;">📂 Load Local RRUFF Folder</label>
+                <input type="file" id="rruff-folder" webkitdirectory directory multiple style="display:none;" onchange="loadRruffFolder(event)">
+                <label class="btn-crop" for="rruff-h5" style="text-align: center; cursor: pointer;">📚 Open RRUFF .h5 Library</label>
+                <input type="file" id="rruff-h5" accept=".h5,.hdf5" style="display:none;" onchange="loadRruffLibrary(event)">
+                <button class="btn-crop" style="font-size: 0.72rem; padding: 5px;" onclick="forgetSavedLibrary()">🗑 Forget saved library</button>
+            </div>
+
+            <div id="rruff-status" style="font-size: 0.78rem; color: #6c757d;">Load a library below. To match: turn on Peak Selection, right-click to mark peaks, then Match.</div>
         </div>
 
         <div class="checkbox-container" style="flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 5px; width: 100%;">
@@ -875,40 +900,80 @@
             statusEl.innerText = rruffLocalFiles.length
                 ? `Local RRUFF folder: ${rruffLocalFiles.length} spectra. Search or Match by peaks.`
                 : "No .txt spectra found in that folder.";
+            updateRruffPanelState();
             event.target.value = '';
         }
 
         // Parse .h5 library bytes into the in-memory rruffLibrary (shared by
         // manual open, host auto-load, and IndexedDB restore).
-        async function ingestLibraryBytes(arrayBuffer, sourceLabel) {
-            const lib = await window.loadH5Wasm();
-            const h5 = lib.h5, FS = lib.FS;
-            const fsName = `rrufflib_${Date.now()}.h5`;
-            FS.writeFile(fsName, new Uint8Array(arrayBuffer));
-            let f, out = [];
-            try {
-                f = new h5.File(fsName, "r");
-                const sp = f.get("spectra");
-                if (!sp) throw new Error("Not a RRUFF library (no 'spectra' group).");
-                for (const gname of sp.keys()) {
-                    const g = f.get("spectra/" + gname);
-                    if (!g || !g.attrs) continue;
-                    const name = attrToString(g.attrs["name"]) || gname;
-                    const id = attrToString(g.attrs["rruff_id"]);
-                    const peaks = Array.from(attrToArray(g.attrs["peaks"]));
-                    const xds = f.get("spectra/" + gname + "/x");
-                    const yds = f.get("spectra/" + gname + "/y");
-                    out.push({ name, id, peaks, x: xds ? Array.from(xds.value) : [], y: yds ? Array.from(yds.value) : [] });
-                }
-            } finally {
-                try { if (f) f.close(); } catch (e) {}
-                try { FS.unlink(fsName); } catch (e) {}
+        // Reflect load state in the RRUFF panel: swap the intro for a "Library
+        // loaded" note and move search/match above the load controls.
+        function updateRruffPanelState() {
+            const panel = document.getElementById('rruff-panel');
+            if (!panel) return;
+            const loaded = (rruffLibrary && rruffLibrary.length) || (rruffLocalFiles && rruffLocalFiles.length);
+            panel.classList.toggle('lib-loaded', !!loaded);
+            const note = document.getElementById('rruff-loaded-note');
+            if (note && loaded) {
+                note.innerText = rruffLibrary.length
+                    ? `✅ Library loaded — ${rruffLibrary.length} spectra`
+                    : `✅ Folder loaded — ${rruffLocalFiles.length} spectra`;
             }
-            rruffLibrary = out;
-            rruffLocalFiles = [];  // library takes precedence
-            document.getElementById('rruff-status').innerText =
-                `RRUFF library${sourceLabel ? ' (' + sourceLabel + ')' : ''}: ${out.length} spectra (precomputed peaks). Search or Match.`;
-            return out.length;
+        }
+
+        function showInitBanner(msg) {
+            const b = document.getElementById('init-banner');
+            if (b) { b.innerText = msg; b.style.display = 'block'; }
+        }
+        function hideInitBanner() {
+            const b = document.getElementById('init-banner');
+            if (b) b.style.display = 'none';
+        }
+
+        async function ingestLibraryBytes(arrayBuffer, sourceLabel) {
+            showInitBanner('⏳ Initializing RRUFF library…');
+            await new Promise(r => setTimeout(r, 0));  // let the banner paint before the heavy work
+            try {
+                const lib = await window.loadH5Wasm();
+                const h5 = lib.h5, FS = lib.FS;
+                const fsName = `rrufflib_${Date.now()}.h5`;
+                FS.writeFile(fsName, new Uint8Array(arrayBuffer));
+                let f, out = [];
+                try {
+                    f = new h5.File(fsName, "r");
+                    const sp = f.get("spectra");
+                    if (!sp) throw new Error("Not a RRUFF library (no 'spectra' group).");
+                    const names = sp.keys();
+                    for (let idx = 0; idx < names.length; idx++) {
+                        const gname = names[idx];
+                        const g = f.get("spectra/" + gname);
+                        if (g && g.attrs) {
+                            const name = attrToString(g.attrs["name"]) || gname;
+                            const id = attrToString(g.attrs["rruff_id"]);
+                            const peaks = Array.from(attrToArray(g.attrs["peaks"]));
+                            const xds = f.get("spectra/" + gname + "/x");
+                            const yds = f.get("spectra/" + gname + "/y");
+                            out.push({ name, id, peaks, x: xds ? Array.from(xds.value) : [], y: yds ? Array.from(yds.value) : [] });
+                        }
+                        // Periodically yield so the banner repaints and the tab stays responsive.
+                        if (idx % 300 === 0) {
+                            showInitBanner(`⏳ Initializing RRUFF library… (${idx}/${names.length})`);
+                            await new Promise(r => setTimeout(r, 0));
+                        }
+                    }
+                } finally {
+                    try { if (f) f.close(); } catch (e) {}
+                    try { FS.unlink(fsName); } catch (e) {}
+                }
+                rruffLibrary = out;
+                rruffLocalFiles = [];  // library takes precedence
+                document.getElementById('rruff-status').innerText =
+                    `RRUFF library${sourceLabel ? ' (' + sourceLabel + ')' : ''}: ${out.length} spectra (precomputed peaks). Search or Match.`;
+                updateRruffPanelState();
+                return out.length;
+            } finally {
+                hideInitBanner();
+            }
         }
 
         async function loadRruffLibrary(event) {
@@ -971,6 +1036,7 @@
         async function forgetSavedLibrary() {
             try { await idbClear(); } catch (e) { /* ignore */ }
             rruffLibrary = [];
+            updateRruffPanelState();
             document.getElementById('rruff-status').innerText = "Saved library cleared. Load a folder (📂) or an .h5 library (📚).";
         }
 
