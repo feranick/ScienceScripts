@@ -181,14 +181,26 @@
 
         <div style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 6px;">
             <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">🌐 RRUFF Reference Database</label>
-            <p class="info-text" style="margin: 0;">Overlay open Raman reference spectra of minerals from RRUFF.</p>
+            <p class="info-text" style="margin: 0;">Load a local RRUFF folder (e.g. excellent_unoriented) to search, overlay, and match — fully offline.</p>
+
+            <label class="btn-crop" for="rruff-folder" style="text-align: center; cursor: pointer;">📂 Load Local RRUFF Folder</label>
+            <input type="file" id="rruff-folder" webkitdirectory directory multiple style="display:none;" onchange="loadRruffFolder(event)">
+
             <div style="display: flex; gap: 4px; align-items: center;">
                 <input type="text" id="rruff-query" placeholder="mineral or RRUFF ID (e.g. Quartz)" style="flex-grow: 1; padding: 8px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.82rem;">
                 <button class="btn-crop" style="width: auto; padding: 8px 10px;" onclick="rruffSearch()">🔍</button>
             </div>
             <select id="rruff-results" size="4" style="width: 100%; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.8rem; padding: 4px;"></select>
             <button class="btn-ref-sub" onclick="rruffOverlaySelected()">➕ Overlay Selected Reference</button>
-            <div id="rruff-status" style="font-size: 0.78rem; color: #6c757d;">Tip: many browsers block direct RRUFF downloads (CORS). If search fails, download .txt spectra from rruff.info and open them with 📁.</div>
+
+            <div style="display: flex; align-items: center; gap: 4px; font-size: 0.8rem; color: #495057; border-top: 1px solid #e9ecef; padding-top: 6px;">
+                <span>Match tol. ±</span>
+                <input type="number" id="rruff-match-tol" value="12" step="1" min="1" style="width: 52px; padding: 6px; border: 1px solid #ced4da; border-radius: 6px;">
+                <span>cm⁻¹</span>
+            </div>
+            <button class="btn-fit-toggle" style="background-color:#6f42c1;" onclick="rruffMatchByPeaks()">🎯 Match by Selected Peaks</button>
+
+            <div id="rruff-status" style="font-size: 0.78rem; color: #6c757d;">Load a folder above. To match: turn on Peak Selection, right-click to mark peaks, then Match. (Direct rruff.info access is usually blocked by CORS.)</div>
         </div>
 
         <div class="checkbox-container" style="flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 5px; width: 100%;">
@@ -215,6 +227,18 @@
             <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 5px;">
                 <button class="btn-crop" style="width: auto; padding: 8px 14px; margin: 0; font-size: 0.85rem;" onclick="closeSubtractionModal()">Cancel</button>
                 <button class="btn-run-fit" style="width: auto; padding: 8px 14px; margin: 0; display: block; background-color: #02b2af;" onclick="runReferenceSubtraction()">Subtract Reference</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="rruff-match-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+        <div style="background: white; padding: 22px; border-radius: 8px; width: 560px; max-height: 82vh; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
+            <h3 style="margin: 0; color: #6f42c1; font-size: 1.1rem;">🎯 RRUFF Search &amp; Match</h3>
+            <p class="info-text" id="rruff-match-subtitle" style="margin: 0;"></p>
+            <select id="rruff-match-list" multiple size="12" style="width: 100%; font-size: 0.82rem; padding: 6px; border: 1px solid #ced4da; border-radius: 6px; font-family: 'Consolas', monospace;"></select>
+            <div style="display: flex; justify-content: flex-end; gap: 8px;">
+                <button class="btn-crop" style="width: auto; padding: 8px 14px; margin: 0;" onclick="closeRruffMatchModal()">Close</button>
+                <button class="btn-ref-sub" style="width: auto; padding: 8px 14px; margin: 0;" onclick="rruffOverlayMatches()">➕ Overlay Selected Match(es)</button>
             </div>
         </div>
     </div>
@@ -823,65 +847,187 @@
             return out;
         }
 
-        // ---- RRUFF reference search (browser best-effort) ----
-        // Browsers usually block cross-origin requests to rruff.info (no CORS
-        // headers), so this attempts a direct fetch and, on failure, guides the
-        // user to download the .txt spectrum and open it with the file picker.
-        let rruffHits = [];
-        async function rruffSearch() {
+        // ---- RRUFF reference database (local folder; offline, no CORS) ----
+        // Point at a downloaded RRUFF folder (e.g. excellent_unoriented). Files
+        // are indexed by name; contents are read on demand for overlay/match.
+        let rruffHits = [];          // current search results (each: {name,id,file})
+        let rruffLocalFiles = [];    // indexed local library ({name,id,file})
+        let rruffMatchFiles = [];    // files backing the current match results
+
+        function loadRruffFolder(event) {
+            const files = Array.from(event.target.files || []).filter(f => f.name.toLowerCase().endsWith('.txt'));
+            rruffLocalFiles = files.map(f => {
+                const parts = f.name.split('__');
+                const name = parts[0] || f.name;
+                const id = (parts[1] && /^R\d+/.test(parts[1])) ? parts[1] : '';
+                return { name, id, file: f };
+            });
+            const statusEl = document.getElementById('rruff-status');
+            statusEl.innerText = rruffLocalFiles.length
+                ? `Local RRUFF library: ${rruffLocalFiles.length} spectra loaded. Search or Match by peaks.`
+                : "No .txt spectra found in that folder.";
+            event.target.value = '';
+        }
+
+        function rruffSearch() {
             const q = document.getElementById('rruff-query').value.trim();
             const statusEl = document.getElementById('rruff-status');
             const resultsEl = document.getElementById('rruff-results');
             resultsEl.innerHTML = ""; rruffHits = [];
-            if (!q) { statusEl.innerText = "Enter a mineral name or RRUFF ID first."; return; }
-            statusEl.innerText = "Searching rruff.info ...";
-            try {
-                // RRUFF exposes a simple text search of sample records.
-                const url = `https://rruff.info/mineral_list/list.php?p=${encodeURIComponent(q)}`;
-                const resp = await fetch(url, { mode: 'cors' });
-                if (!resp.ok) throw new Error("HTTP " + resp.status);
-                const html = await resp.text();
-                // Extract RRUFF IDs (Rxxxxxx) and nearby names from the returned HTML.
-                const ids = Array.from(new Set((html.match(/R\d{6}/g) || [])));
-                if (ids.length === 0) { statusEl.innerText = "No matches found."; return; }
-                ids.slice(0, 50).forEach(id => {
-                    rruffHits.push({ name: q, id: id });
-                    const opt = document.createElement('option');
-                    opt.value = id; opt.innerText = `${q} · ${id}`;
-                    resultsEl.appendChild(opt);
-                });
-                statusEl.innerText = `${ids.length} candidate ID(s). Select one and overlay.`;
-            } catch (err) {
-                statusEl.innerHTML = "Direct RRUFF access was blocked by the browser (CORS). " +
-                    'Search <a href="https://rruff.info/" target="_blank" rel="noopener">rruff.info</a>, ' +
-                    "download the Raman .txt (Processed), then open it with 📁 — it will be labeled automatically.";
+            if (!rruffLocalFiles.length) {
+                statusEl.innerHTML = "No local library loaded. Click 📂 and select a downloaded RRUFF folder " +
+                    '(from <a href="https://rruff.info/zipped_data_files/raman/" target="_blank" rel="noopener">rruff.info</a>).';
+                return;
             }
+            const ql = q.toLowerCase();
+            const hits = rruffLocalFiles.filter(f =>
+                !ql || (`${f.name} ${f.id} ${f.file.name}`).toLowerCase().includes(ql)).slice(0, 300);
+            if (!hits.length) { statusEl.innerText = "No local matches."; return; }
+            rruffHits = hits;
+            hits.forEach((h, i) => {
+                const opt = document.createElement('option');
+                opt.value = String(i);
+                opt.innerText = `${h.name}${h.id ? ' · ' + h.id : ''}`;
+                resultsEl.appendChild(opt);
+            });
+            statusEl.innerText = `${hits.length} local match(es)${hits.length === 300 ? ' (first 300)' : ''}. Select and overlay.`;
         }
 
         async function rruffOverlaySelected() {
             const resultsEl = document.getElementById('rruff-results');
             const statusEl = document.getElementById('rruff-status');
-            const id = resultsEl.value;
-            if (!id) { statusEl.innerText = "Select a search result first."; return; }
-            statusEl.innerText = `Fetching ${id} ...`;
+            const val = resultsEl.value;
+            if (val === '' || !rruffHits[+val]) { statusEl.innerText = "Select a search result first."; return; }
+            const hit = rruffHits[+val];
             try {
-                // Attempt to pull the processed Raman text for this RRUFF ID.
-                const url = `https://rruff.info/tmp/${id}.txt`;
-                const resp = await fetch(url, { mode: 'cors' });
-                if (!resp.ok) throw new Error("HTTP " + resp.status);
-                const text = await resp.text();
-                const parsed = parseTwoColumn(text, id);
+                const text = await hit.file.text();
+                const parsed = parseTwoColumn(text, hit.name);
                 saveToHistory();
-                // Scale to current data max for comparison.
                 scaleRefToData(parsed);
-                const key = `__ref_${id}`;
-                persistentDatasets[key] = parsed;
+                persistentDatasets[`__ref_${hit.name}_${hit.id}`] = parsed;
                 refreshCheckboxTargetsPanel(); updateChartCanvas();
-                statusEl.innerText = `Overlaid RRUFF ${id}.`;
+                statusEl.innerText = `Overlaid ${hit.name}${hit.id ? ' (' + hit.id + ')' : ''}.`;
             } catch (err) {
-                statusEl.innerHTML = "Could not fetch the spectrum directly (CORS/network). " +
-                    'Open <a href="https://rruff.info/' + id + '" target="_blank" rel="noopener">rruff.info/' + id + '</a>, ' +
-                    "download the Raman .txt, then open it with 📁.";
+                statusEl.innerText = "Could not read that file: " + err.message;
+            }
+        }
+
+        // Detect prominent band positions in a reference spectrum (mirrors the
+        // Python scipy.find_peaks(prominence, distance) behaviour, scale-free).
+        function detectReferencePeaks(x, y, maxPeaks = 40, minProm = 0.04) {
+            const n = y.length;
+            if (n < 5) return [];
+            let ymin = Infinity, ymax = -Infinity;
+            for (const v of y) { if (v < ymin) ymin = v; if (v > ymax) ymax = v; }
+            const rng = ymax - ymin;
+            if (rng <= 0) return [];
+            const yn = y.map(v => (v - ymin) / rng);
+            const cand = [];
+            for (let i = 1; i < n - 1; i++) { if (yn[i] > yn[i - 1] && yn[i] >= yn[i + 1]) cand.push(i); }
+            const peaks = [];
+            for (const i of cand) {
+                const h = yn[i];
+                let j = i - 1, leftMin = h;
+                while (j >= 0 && yn[j] < h) { if (yn[j] < leftMin) leftMin = yn[j]; j--; }
+                let k = i + 1, rightMin = h;
+                while (k < n && yn[k] < h) { if (yn[k] < rightMin) rightMin = yn[k]; k++; }
+                const prom = h - Math.max(leftMin, rightMin);
+                if (prom >= minProm) peaks.push({ i, prom });
+            }
+            peaks.sort((a, b) => b.prom - a.prom);
+            const kept = [];
+            for (const pk of peaks) {
+                if (kept.every(q => Math.abs(q.i - pk.i) >= 3)) kept.push(pk);
+                if (kept.length >= maxPeaks) break;
+            }
+            return kept.map(pk => x[pk.i]).sort((a, b) => a - b);
+        }
+
+        function peakMatchScore(refPeaks, expPeaks, tol) {
+            if (!expPeaks.length || !refPeaks.length) return { score: 0, avg: tol, matched: 0 };
+            let matched = 0, cum = 0;
+            for (const ex of expPeaks) {
+                let d = Infinity;
+                for (const r of refPeaks) { const dd = Math.abs(r - ex); if (dd < d) d = dd; }
+                if (d <= tol) { matched++; cum += d; } else { cum += tol; }
+            }
+            return { score: matched / expPeaks.length * 100, avg: cum / expPeaks.length, matched };
+        }
+
+        async function rruffMatchByPeaks() {
+            const statusEl = document.getElementById('rruff-status');
+            if (!peakGuessesX.length) {
+                alert("Mark peaks first: turn on '🎯 Peak Selection', then right-click on the plot to mark the peaks to match.");
+                return;
+            }
+            if (!rruffLocalFiles.length) { alert("Load a local RRUFF folder first (📂)."); return; }
+            let tol = parseFloat(document.getElementById('rruff-match-tol').value);
+            if (isNaN(tol)) tol = 12;
+            const q = document.getElementById('rruff-query').value.trim().toLowerCase();
+            let files = rruffLocalFiles;
+            if (q) files = files.filter(f => (`${f.name} ${f.id} ${f.file.name}`).toLowerCase().includes(q));
+            if (!files.length) { alert("No local references match the search filter."); return; }
+
+            const exp = peakGuessesX.slice();
+            const scored = [];
+            for (let i = 0; i < files.length; i++) {
+                try {
+                    const text = await files[i].file.text();
+                    const parsed = parseTwoColumn(text, files[i].name);
+                    const rp = detectReferencePeaks(parsed.angles, parsed.intensities);
+                    const s = peakMatchScore(rp, exp, tol);
+                    if (s.matched > 0) scored.push({ ...s, name: files[i].name, id: files[i].id, idx: i });
+                } catch (e) { /* skip unreadable */ }
+                if (i % 50 === 0) { statusEl.innerText = `Matching ${i}/${files.length} ...`; await new Promise(r => setTimeout(r)); }
+            }
+            scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
+            statusEl.innerText = `Matched ${scored.length}/${files.length} references (tol ±${tol}).`;
+            rruffMatchFiles = files;
+            showRruffMatchResults(scored.slice(0, 100), exp.length, tol);
+        }
+
+        function showRruffMatchResults(scored, nExp, tol) {
+            const listEl = document.getElementById('rruff-match-list');
+            listEl.innerHTML = "";
+            if (!scored.length) {
+                alert("No RRUFF reference had bands near your marked peaks. Try a larger tolerance or different peaks.");
+                return;
+            }
+            document.getElementById('rruff-match-subtitle').innerText =
+                `Ranked by alignment of RRUFF bands with your ${nExp} marked peak(s) (±${tol} cm⁻¹):`;
+            scored.forEach(s => {
+                const opt = document.createElement('option');
+                opt.value = String(s.idx);
+                const scoreStr = String(Math.round(s.score)).padStart(3, ' ');
+                opt.innerText = `${scoreStr}%  ${s.matched}/${nExp}  ${s.name}${s.id ? ' · ' + s.id : ''}`;
+                listEl.appendChild(opt);
+            });
+            document.getElementById('rruff-match-modal').style.display = 'flex';
+        }
+
+        function closeRruffMatchModal() { document.getElementById('rruff-match-modal').style.display = 'none'; }
+
+        async function rruffOverlayMatches() {
+            const listEl = document.getElementById('rruff-match-list');
+            const chosen = Array.from(listEl.selectedOptions).map(o => +o.value);
+            if (!chosen.length) { alert("Select one or more matches to overlay."); return; }
+            closeRruffMatchModal();
+            saveToHistory();
+            let added = 0;
+            for (const idx of chosen) {
+                const entry = rruffMatchFiles[idx];
+                if (!entry) continue;
+                try {
+                    const text = await entry.file.text();
+                    const parsed = parseTwoColumn(text, entry.name);
+                    scaleRefToData(parsed);
+                    persistentDatasets[`__ref_${entry.name}_${entry.id}_match`] = parsed;
+                    added++;
+                } catch (e) { /* skip */ }
+            }
+            if (added) {
+                refreshCheckboxTargetsPanel(); updateChartCanvas();
+                document.getElementById('rruff-status').innerText = `Overlaid ${added} matched reference(s).`;
             }
         }
 
