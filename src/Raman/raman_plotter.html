@@ -185,6 +185,9 @@
 
             <label class="btn-crop" for="rruff-folder" style="text-align: center; cursor: pointer;">📂 Load Local RRUFF Folder</label>
             <input type="file" id="rruff-folder" webkitdirectory directory multiple style="display:none;" onchange="loadRruffFolder(event)">
+            <label class="btn-crop" for="rruff-h5" style="text-align: center; cursor: pointer;">📚 Open RRUFF .h5 Library</label>
+            <input type="file" id="rruff-h5" accept=".h5,.hdf5" style="display:none;" onchange="loadRruffLibrary(event)">
+            <button class="btn-crop" style="font-size: 0.72rem; padding: 5px;" onclick="forgetSavedLibrary()">🗑 Forget saved library</button>
 
             <div style="display: flex; gap: 4px; align-items: center;">
                 <input type="text" id="rruff-query" placeholder="mineral or RRUFF ID (e.g. Quartz)" style="flex-grow: 1; padding: 8px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.82rem;">
@@ -200,7 +203,7 @@
             </div>
             <button class="btn-fit-toggle" style="background-color:#6f42c1;" onclick="rruffMatchByPeaks()">🎯 Match by Selected Peaks</button>
 
-            <div id="rruff-status" style="font-size: 0.78rem; color: #6c757d;">Load a folder above. To match: turn on Peak Selection, right-click to mark peaks, then Match. (Direct rruff.info access is usually blocked by CORS.)</div>
+            <div id="rruff-status" style="font-size: 0.78rem; color: #6c757d;">Load a folder above. To match: turn on Peak Selection, right-click to mark peaks, then Match.</div>
         </div>
 
         <div class="checkbox-container" style="flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 5px; width: 100%;">
@@ -302,6 +305,9 @@
                     e.stopPropagation();
                     applyAdjust(e.deltaY < 0 ? 1 : -1);
                 }, { passive: false, capture: true });
+
+                // Try a host-provided library, else restore a saved one (non-blocking).
+                tryAutoLoadLibrary().catch(function () {});
             };
 
             const readyPromise = window.__plotlyReady || Promise.resolve();
@@ -847,12 +853,14 @@
             return out;
         }
 
-        // ---- RRUFF reference database (local folder; offline, no CORS) ----
-        // Point at a downloaded RRUFF folder (e.g. excellent_unoriented). Files
-        // are indexed by name; contents are read on demand for overlay/match.
-        let rruffHits = [];          // current search results (each: {name,id,file})
-        let rruffLocalFiles = [];    // indexed local library ({name,id,file})
-        let rruffMatchFiles = [];    // files backing the current match results
+        // ---- RRUFF reference database (offline: local folder or .h5 library) ----
+        // Either point at a downloaded RRUFF folder (.txt files, read on demand),
+        // or open a consolidated .h5 library built by build_rruff_library.py
+        // (loaded into memory with precomputed peaks for instant matching).
+        let rruffHits = [];          // current search results (records)
+        let rruffLocalFiles = [];    // indexed folder ({name,id,file})
+        let rruffLibrary = [];       // in-memory .h5 library ({name,id,peaks,x,y})
+        let rruffMatchRecords = [];  // records backing the current match modal
 
         function loadRruffFolder(event) {
             const files = Array.from(event.target.files || []).filter(f => f.name.toLowerCase().endsWith('.txt'));
@@ -862,11 +870,129 @@
                 const id = (parts[1] && /^R\d+/.test(parts[1])) ? parts[1] : '';
                 return { name, id, file: f };
             });
+            rruffLibrary = [];  // folder takes precedence
             const statusEl = document.getElementById('rruff-status');
             statusEl.innerText = rruffLocalFiles.length
-                ? `Local RRUFF library: ${rruffLocalFiles.length} spectra loaded. Search or Match by peaks.`
+                ? `Local RRUFF folder: ${rruffLocalFiles.length} spectra. Search or Match by peaks.`
                 : "No .txt spectra found in that folder.";
             event.target.value = '';
+        }
+
+        // Parse .h5 library bytes into the in-memory rruffLibrary (shared by
+        // manual open, host auto-load, and IndexedDB restore).
+        async function ingestLibraryBytes(arrayBuffer, sourceLabel) {
+            const lib = await window.loadH5Wasm();
+            const h5 = lib.h5, FS = lib.FS;
+            const fsName = `rrufflib_${Date.now()}.h5`;
+            FS.writeFile(fsName, new Uint8Array(arrayBuffer));
+            let f, out = [];
+            try {
+                f = new h5.File(fsName, "r");
+                const sp = f.get("spectra");
+                if (!sp) throw new Error("Not a RRUFF library (no 'spectra' group).");
+                for (const gname of sp.keys()) {
+                    const g = f.get("spectra/" + gname);
+                    if (!g || !g.attrs) continue;
+                    const name = attrToString(g.attrs["name"]) || gname;
+                    const id = attrToString(g.attrs["rruff_id"]);
+                    const peaks = Array.from(attrToArray(g.attrs["peaks"]));
+                    const xds = f.get("spectra/" + gname + "/x");
+                    const yds = f.get("spectra/" + gname + "/y");
+                    out.push({ name, id, peaks, x: xds ? Array.from(xds.value) : [], y: yds ? Array.from(yds.value) : [] });
+                }
+            } finally {
+                try { if (f) f.close(); } catch (e) {}
+                try { FS.unlink(fsName); } catch (e) {}
+            }
+            rruffLibrary = out;
+            rruffLocalFiles = [];  // library takes precedence
+            document.getElementById('rruff-status').innerText =
+                `RRUFF library${sourceLabel ? ' (' + sourceLabel + ')' : ''}: ${out.length} spectra (precomputed peaks). Search or Match.`;
+            return out.length;
+        }
+
+        async function loadRruffLibrary(event) {
+            const file = event.target.files && event.target.files[0];
+            event.target.value = '';
+            if (!file) return;
+            const statusEl = document.getElementById('rruff-status');
+            statusEl.innerText = "Loading RRUFF .h5 library ...";
+            try {
+                const buf = await file.arrayBuffer();
+                await ingestLibraryBytes(buf, 'opened');
+                try { await idbSaveLibrary(buf); } catch (e) { /* persistence optional */ }
+            } catch (err) {
+                statusEl.innerText = "Could not open library: " + err.message;
+            }
+        }
+
+        // ---- Persistence (IndexedDB) + host-provided library ----
+        // The page can ship a library next to it: set HOST_LIBRARY_URL or pass
+        // ?lib=<url>. A manually opened library is cached and auto-restored.
+        const HOST_LIBRARY_URL = "rruff_raman_library.h5";
+        const IDB_NAME = "ramanPlotter", IDB_STORE = "rruff", IDB_KEY = "library_h5";
+
+        function idbOpen() {
+            return new Promise((res, rej) => {
+                const r = indexedDB.open(IDB_NAME, 1);
+                r.onupgradeneeded = () => r.result.createObjectStore(IDB_STORE);
+                r.onsuccess = () => res(r.result);
+                r.onerror = () => rej(r.error);
+            });
+        }
+        async function idbSaveLibrary(buf) {
+            const db = await idbOpen();
+            return new Promise((res, rej) => {
+                const tx = db.transaction(IDB_STORE, "readwrite");
+                tx.objectStore(IDB_STORE).put(buf, IDB_KEY);
+                tx.oncomplete = () => { db.close(); res(); };
+                tx.onerror = () => rej(tx.error);
+            });
+        }
+        async function idbLoadLibrary() {
+            const db = await idbOpen();
+            return new Promise((res, rej) => {
+                const tx = db.transaction(IDB_STORE, "readonly");
+                const g = tx.objectStore(IDB_STORE).get(IDB_KEY);
+                g.onsuccess = () => { db.close(); res(g.result || null); };
+                g.onerror = () => rej(g.error);
+            });
+        }
+        async function idbClear() {
+            const db = await idbOpen();
+            return new Promise((res, rej) => {
+                const tx = db.transaction(IDB_STORE, "readwrite");
+                tx.objectStore(IDB_STORE).delete(IDB_KEY);
+                tx.oncomplete = () => { db.close(); res(); };
+                tx.onerror = () => rej(tx.error);
+            });
+        }
+
+        async function forgetSavedLibrary() {
+            try { await idbClear(); } catch (e) { /* ignore */ }
+            rruffLibrary = [];
+            document.getElementById('rruff-status').innerText = "Saved library cleared. Load a folder (📂) or an .h5 library (📚).";
+        }
+
+        // On startup: prefer a host-provided library, else restore the saved one.
+        async function tryAutoLoadLibrary() {
+            const params = new URLSearchParams(location.search);
+            const url = params.get('lib') || HOST_LIBRARY_URL;
+            try {
+                const resp = await fetch(url, { cache: 'no-store' });
+                if (resp.ok) {
+                    const buf = await resp.arrayBuffer();
+                    const sig = new Uint8Array(buf.slice(0, 4));  // HDF5 magic: 0x89 'H' 'D' 'F'
+                    if (sig[0] === 0x89 && sig[1] === 0x48 && sig[2] === 0x44 && sig[3] === 0x46) {
+                        await ingestLibraryBytes(buf, 'from page');
+                        return;
+                    }
+                }
+            } catch (e) { /* not hosted / blocked (e.g. file://) — fall through */ }
+            try {
+                const saved = await idbLoadLibrary();
+                if (saved) await ingestLibraryBytes(saved, 'restored');
+            } catch (e) { /* no saved library */ }
         }
 
         function rruffSearch() {
@@ -874,15 +1000,17 @@
             const statusEl = document.getElementById('rruff-status');
             const resultsEl = document.getElementById('rruff-results');
             resultsEl.innerHTML = ""; rruffHits = [];
-            if (!rruffLocalFiles.length) {
-                statusEl.innerHTML = "No local library loaded. Click 📂 and select a downloaded RRUFF folder " +
-                    '(from <a href="https://rruff.info/zipped_data_files/raman/" target="_blank" rel="noopener">rruff.info</a>).';
+            let pool = null;
+            if (rruffLibrary.length) pool = rruffLibrary;
+            else if (rruffLocalFiles.length) pool = rruffLocalFiles;
+            if (!pool) {
+                statusEl.innerText = "No references loaded. Use 📂 (folder of .txt) or 📚 (.h5 library) first.";
                 return;
             }
             const ql = q.toLowerCase();
-            const hits = rruffLocalFiles.filter(f =>
-                !ql || (`${f.name} ${f.id} ${f.file.name}`).toLowerCase().includes(ql)).slice(0, 300);
-            if (!hits.length) { statusEl.innerText = "No local matches."; return; }
+            const hits = pool.filter(e =>
+                !ql || (`${e.name} ${e.id} ${e.file ? e.file.name : ''}`).toLowerCase().includes(ql)).slice(0, 300);
+            if (!hits.length) { statusEl.innerText = "No matches."; return; }
             rruffHits = hits;
             hits.forEach((h, i) => {
                 const opt = document.createElement('option');
@@ -890,7 +1018,19 @@
                 opt.innerText = `${h.name}${h.id ? ' · ' + h.id : ''}`;
                 resultsEl.appendChild(opt);
             });
-            statusEl.innerText = `${hits.length} local match(es)${hits.length === 300 ? ' (first 300)' : ''}. Select and overlay.`;
+            statusEl.innerText = `${hits.length} match(es)${hits.length === 300 ? ' (first 300)' : ''}. Select and overlay.`;
+        }
+
+        // Turn a search/match record into a parsed spectrum ({angles,intensities,label}).
+        async function recordToParsed(rec) {
+            if (rec.x && rec.y && rec.x.length) {
+                return { angles: rec.x.slice(), intensities: rec.y.slice(),
+                         label: `RRUFF: ${rec.name}${rec.id ? ' (' + rec.id + ')' : ''}` };
+            }
+            const parsed = parseTwoColumn(await rec.file.text(), rec.name);
+            if (!parsed.label || !parsed.label.startsWith("RRUFF"))
+                parsed.label = `RRUFF: ${rec.name}${rec.id ? ' (' + rec.id + ')' : ''}`;
+            return parsed;
         }
 
         async function rruffOverlaySelected() {
@@ -900,15 +1040,14 @@
             if (val === '' || !rruffHits[+val]) { statusEl.innerText = "Select a search result first."; return; }
             const hit = rruffHits[+val];
             try {
-                const text = await hit.file.text();
-                const parsed = parseTwoColumn(text, hit.name);
+                const parsed = await recordToParsed(hit);
                 saveToHistory();
                 scaleRefToData(parsed);
                 persistentDatasets[`__ref_${hit.name}_${hit.id}`] = parsed;
                 refreshCheckboxTargetsPanel(); updateChartCanvas();
                 statusEl.innerText = `Overlaid ${hit.name}${hit.id ? ' (' + hit.id + ')' : ''}.`;
             } catch (err) {
-                statusEl.innerText = "Could not read that file: " + err.message;
+                statusEl.innerText = "Could not read that reference: " + err.message;
             }
         }
 
@@ -960,29 +1099,43 @@
                 alert("Mark peaks first: turn on '🎯 Peak Selection', then right-click on the plot to mark the peaks to match.");
                 return;
             }
-            if (!rruffLocalFiles.length) { alert("Load a local RRUFF folder first (📂)."); return; }
             let tol = parseFloat(document.getElementById('rruff-match-tol').value);
             if (isNaN(tol)) tol = 12;
             const q = document.getElementById('rruff-query').value.trim().toLowerCase();
+            const exp = peakGuessesX.slice();
+
+            // Fast path: .h5 library with precomputed peaks -> instant.
+            if (rruffLibrary.length) {
+                const scored = [];
+                rruffLibrary.forEach(e => {
+                    if (q && !(`${e.name} ${e.id}`).toLowerCase().includes(q)) return;
+                    const s = peakMatchScore(e.peaks, exp, tol);
+                    if (s.matched > 0) scored.push({ ...s, name: e.name, id: e.id, rec: e });
+                });
+                scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
+                statusEl.innerText = `Matched ${scored.length}/${rruffLibrary.length} references (tol ±${tol}).`;
+                showRruffMatchResults(scored.slice(0, 100), exp.length, tol);
+                return;
+            }
+
+            // Folder path: read + detect peaks for each .txt.
+            if (!rruffLocalFiles.length) { alert("Load a RRUFF folder (📂) or an .h5 library (📚) first."); return; }
             let files = rruffLocalFiles;
             if (q) files = files.filter(f => (`${f.name} ${f.id} ${f.file.name}`).toLowerCase().includes(q));
             if (!files.length) { alert("No local references match the search filter."); return; }
-
-            const exp = peakGuessesX.slice();
             const scored = [];
             for (let i = 0; i < files.length; i++) {
                 try {
-                    const text = await files[i].file.text();
-                    const parsed = parseTwoColumn(text, files[i].name);
+                    const parsed = parseTwoColumn(await files[i].file.text(), files[i].name);
                     const rp = detectReferencePeaks(parsed.angles, parsed.intensities);
                     const s = peakMatchScore(rp, exp, tol);
-                    if (s.matched > 0) scored.push({ ...s, name: files[i].name, id: files[i].id, idx: i });
+                    if (s.matched > 0) scored.push({ ...s, name: files[i].name, id: files[i].id,
+                                                     rec: { name: files[i].name, id: files[i].id, file: files[i].file } });
                 } catch (e) { /* skip unreadable */ }
                 if (i % 50 === 0) { statusEl.innerText = `Matching ${i}/${files.length} ...`; await new Promise(r => setTimeout(r)); }
             }
             scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
             statusEl.innerText = `Matched ${scored.length}/${files.length} references (tol ±${tol}).`;
-            rruffMatchFiles = files;
             showRruffMatchResults(scored.slice(0, 100), exp.length, tol);
         }
 
@@ -993,11 +1146,12 @@
                 alert("No RRUFF reference had bands near your marked peaks. Try a larger tolerance or different peaks.");
                 return;
             }
+            rruffMatchRecords = scored;
             document.getElementById('rruff-match-subtitle').innerText =
                 `Ranked by alignment of RRUFF bands with your ${nExp} marked peak(s) (±${tol} cm⁻¹):`;
-            scored.forEach(s => {
+            scored.forEach((s, i) => {
                 const opt = document.createElement('option');
-                opt.value = String(s.idx);
+                opt.value = String(i);
                 const scoreStr = String(Math.round(s.score)).padStart(3, ' ');
                 opt.innerText = `${scoreStr}%  ${s.matched}/${nExp}  ${s.name}${s.id ? ' · ' + s.id : ''}`;
                 listEl.appendChild(opt);
@@ -1015,13 +1169,12 @@
             saveToHistory();
             let added = 0;
             for (const idx of chosen) {
-                const entry = rruffMatchFiles[idx];
-                if (!entry) continue;
+                const rec = rruffMatchRecords[idx] && rruffMatchRecords[idx].rec;
+                if (!rec) continue;
                 try {
-                    const text = await entry.file.text();
-                    const parsed = parseTwoColumn(text, entry.name);
+                    const parsed = await recordToParsed(rec);
                     scaleRefToData(parsed);
-                    persistentDatasets[`__ref_${entry.name}_${entry.id}_match`] = parsed;
+                    persistentDatasets[`__ref_${rec.name}_${rec.id}_match`] = parsed;
                     added++;
                 } catch (e) { /* skip */ }
             }
