@@ -1,0 +1,1512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web FTIR Spectra Visualizer & Peak Fitting Tool</title>
+    <script>
+        // Robust Plotly loader: tries multiple CDNs in order via onerror.
+        (function () {
+            const sources = [
+                "https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.24.1/plotly.min.js",
+                "https://unpkg.com/plotly.js-dist@2.24.1/plotly.min.js",
+                "https://cdn.jsdelivr.net/npm/plotly.js-dist@2.24.1/plotly.min.js"
+            ];
+            window.__plotlyReady = new Promise(function (resolve, reject) {
+                let idx = 0;
+                function tryNext() {
+                    if (typeof Plotly !== 'undefined') { resolve(); return; }
+                    if (idx >= sources.length) { reject(new Error("Plotly failed to load from all CDNs")); return; }
+                    const s = document.createElement('script');
+                    s.src = sources[idx++];
+                    s.onload = function () { resolve(); };
+                    s.onerror = function () { tryNext(); };
+                    document.head.appendChild(s);
+                }
+                tryNext();
+            });
+        })();
+
+        // h5wasm (HDF5 reader) is an ES module loaded lazily the first time an
+        // .h5 file is opened. Cached on window.__h5wasmReady.
+        window.loadH5Wasm = function () {
+            if (!window.__h5wasmReady) {
+                window.__h5wasmReady = import("https://cdn.jsdelivr.net/npm/h5wasm@0.7.8/dist/esm/hdf5_hl.js")
+                    .then(function (mod) {
+                        const h5 = mod.default || mod;
+                        // h5wasm.ready resolves to the Emscripten Module, which
+                        // carries the FS (filesystem) object. The File class lives
+                        // on the module namespace itself.
+                        return Promise.resolve(h5.ready).then(function (Module) {
+                            const FS = (Module && Module.FS) || h5.FS;
+                            return { h5: h5, FS: FS };
+                        });
+                    });
+            }
+            return window.__h5wasmReady;
+        };
+    </script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0; padding: 0; display: flex; background-color: #f8f9fa; height: 100vh;
+        }
+        #sidebar {
+            width: 320px; background-color: #ffffff; border-right: 1px solid #e9ecef;
+            padding: 22px; box-sizing: border-box; display: flex; flex-direction: column; gap: 12px;
+            overflow-y: auto;
+        }
+        h2 { margin-top: 0; font-size: 1.15rem; color: #212529; border-bottom: 2px solid #0d6efd; padding-bottom: 8px; margin-bottom: 2px; }
+        .info-text { font-size: 0.85rem; color: #6c757d; line-height: 1.4; margin-bottom: 2px; }
+        .btn-upload {
+            border: 2px dashed #b8c2cc; color: #495057; background-color: #f1f3f5; padding: 15px;
+            border-radius: 8px; font-size: 0.9rem; font-weight: bold; width: 100%; box-sizing: border-box;
+            cursor: pointer; text-align: center; transition: all 0.2s ease; display: block;
+        }
+        .btn-upload:hover { background-color: #e8ecef; border-color: #0d6efd; }
+        #ftir-files { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+        .btn-bg-sub { background-color: #0dcaf0; color: #212529; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
+        .btn-bg-sub:hover { background-color: #0bacd0; }
+        .btn-ref-sub { background-color: #02b2af; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
+        .btn-ref-sub:hover { background-color: #01928f; }
+        .btn-smooth { background-color: #198754; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
+        .btn-smooth:hover { background-color: #146c43; }
+        .btn-shift { background-color: #ffc107; color: #212529; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
+        .btn-shift:hover { background-color: #e0a800; }
+
+        .btn-normalize { background-color: #0d6efd; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
+        .btn-normalize:hover { background-color: #0b5ed7; }
+        .btn-normalize.active { background-color: #ffd43b; color: #212529; }
+
+        .btn-fit-toggle { background-color: #6f42c1; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
+        .btn-fit-toggle.active { background-color: #ffd43b; color: #212529; }
+        .adjust-on { background-color: #ffd43b !important; color: #212529 !important; }
+
+        /* RRUFF panel: reorder when a library is loaded (search/match on top,
+           load controls pushed to the bottom). */
+        #rruff-panel > label { order: -1; }
+        #rruff-intro { order: 0; }
+        #rruff-loaded-note { display: none; order: 0; font-size: 0.82rem; font-weight: bold; color: #0f5132; background: #d1e7dd; border: 1px solid #badbcc; border-radius: 6px; padding: 6px 8px; }
+        #rruff-load-group { order: 1; }
+        #rruff-search-group { order: 2; }
+        #rruff-match-group { order: 3; }
+        #rruff-status { order: 4; }
+        #rruff-panel.lib-loaded #rruff-intro { display: none; }
+        #rruff-panel.lib-loaded #rruff-loaded-note { display: block; }
+        #rruff-panel.lib-loaded #rruff-match-group { order: 1; }
+        #rruff-panel.lib-loaded #rruff-search-group { order: 2; }
+        #rruff-panel.lib-loaded #rruff-load-group { order: 3; }
+        #rruff-panel.lib-loaded #rruff-status { order: 4; }
+        .btn-run-fit { background-color: #fd7e14; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
+        .btn-run-fit:hover { background-color: #e06d0f; }
+
+        .btn-crop { background-color: #eef1f6; color: #333333; border: 1px solid #ced4da; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
+        .btn-crop:hover { background-color: #dfe4ec; }
+        .btn-export { background-color: #198754; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; }
+        .btn-export:hover { background-color: #157347; }
+        .btn-clear { background-color: #dc3545; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; }
+        .btn-clear:hover { background-color: #bb2d3b; }
+
+        .btn-undo { background-color: #6c757d; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
+        .btn-undo:hover { background-color: #5c636a; }
+        .btn-undo:disabled { background-color: #e9ecef; color: #adb5bd; cursor: not-allowed; border: 1px solid #dee2e6; }
+
+        .checkbox-container { display: flex; align-items: center; gap: 8px; font-size: 0.9rem; color: #212529; user-select: none; margin: 2px 0; }
+        .checkbox-container input { cursor: pointer; width: 15px; height: 15px; }
+        .status-badge { background-color: #cff4fc; color: #055160; border: 1px solid #b6effb; padding: 8px; border-radius: 6px; font-size: 0.8rem; font-weight: 500; text-align: center; }
+        .version-tag { font-size: 0.75rem; color: #adb5bd; text-align: center; margin-top: auto; padding-top: 8px; font-family: monospace; }
+
+        #main-content { flex-grow: 1; padding: 22px; box-sizing: border-box; display: flex; flex-direction: column; }
+        #chart-container { width: 100%; flex-grow: 1; background: white; border: 1px solid #dee2e6; border-radius: 8px 8px 0 0; box-shadow: 0 4px 6px rgba(0,0,0,0.02); }
+        #cursor-bar { background-color: #e9ecef; color: #212529; padding: 10px 15px; border-radius: 0; font-family: "Consolas", monospace; font-size: 0.9rem; font-weight: bold; border: 1px solid #dee2e6; border-top: none; }
+
+        #results-dashboard { display: none; background-color: #ffffff; border: 1px solid #dee2e6; border-top: none; border-radius: 0 0 8px 8px; padding: 15px; box-sizing: border-box; max-height: 180px; overflow-y: auto; }
+        .results-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; text-align: left; }
+        .results-table th { background-color: #f1f3f5; padding: 6px; border-bottom: 2px solid #dee2e6; font-weight: bold; }
+        .results-table td { padding: 6px; border-bottom: 1px solid #eee; font-family: "Consolas", monospace; }
+    </style>
+</head>
+<body>
+
+    <div id="init-banner" style="display:none; position:fixed; top:14px; left:50%; transform:translateX(-50%); z-index:2000; background:#0d6efd; color:#fff; padding:10px 18px; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.25); font-size:0.9rem; font-weight:bold;">⏳ Initializing RRUFF library…</div>
+
+    <div id="sidebar">
+        <h2>🔬 FTIR Spectra Analyzer</h2>
+        <p class="info-text">Load FTIR spectra (JCAMP-DX .jdx or two-column text), isolate regions of interest, and fit bands.</p>
+
+        <button type="button" class="btn-upload" onclick="pickFiles()">📁 Click to Select File(s)</button>
+        <input type="file" id="ftir-files" multiple onchange="handleFileSelections(event)">
+        <div style="font-size: 0.72rem; color: #6c757d; margin: -4px 0 2px;">Supported: .jdx, .dx, .csv, .txt, .dat, .asc &nbsp;·&nbsp; (or <b>All Files</b>).</div>
+
+        <hr style="border: 0; border-top: 1px solid #e9ecef; margin: 3px 0;">
+
+        <button class="btn-crop" onclick="cropToView()">✂️ Crop to View</button>
+        <button class="btn-bg-sub" onclick="subtractBackgroundFromPlotted()">✨ Subtract Baseline</button>
+        <button class="btn-ref-sub" onclick="openSubtractionModal()">🧪 Subtract Reference Scan</button>
+
+        <div style="display: flex; align-items: center; width: 100%; gap: 4px;">
+            <button class="btn-smooth" style="flex-grow: 1;" onclick="smoothNoise()">🍃 Smooth Noise</button>
+            <span style="font-size: 0.85rem; color: #495057; padding-left: 2px;">Win:</span>
+            <input type="number" id="smooth-window-input" value="11" step="2" min="3" style="width: 45px; padding: 8px 4px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.85rem; text-align: center;">
+        </div>
+
+        <div style="display: flex; align-items: center; width: 100%; gap: 4px;">
+            <button class="btn-shift" style="flex-grow: 1;" onclick="applyShift()">📐 Shift Wavenumber</button>
+            <span style="font-size: 0.85rem; color: #495057; padding-left: 2px;">Δ:</span>
+            <input type="number" id="shift-window-input" value="0.0" step="0.5" style="width: 45px; padding: 8px 4px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.85rem; text-align: center;">
+            <span style="font-size: 0.85rem; color: #495057;">cm⁻¹</span>
+        </div>
+
+        <div style="display: flex; align-items: center; width: 100%; gap: 4px;">
+            <button id="btn-normalize-toggle" class="btn-normalize" style="flex-grow: 1;" onclick="toggleNormalizationMode()">⚖️ Normalize to Peak</button>
+            <span style="font-size: 0.9rem; color: #495057; padding-left: 2px;">±</span>
+            <input type="number" id="norm-span-input" value="10" step="1" min="0.1" style="width: 45px; padding: 8px 4px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.85rem; text-align: center;">
+            <span style="font-size: 0.85rem; color: #495057;">cm⁻¹</span>
+        </div>
+
+        <div style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 6px;">
+            <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">🎚️ Interactive Adjust (mouse wheel)</label>
+            <select id="adjust-target" style="width: 100%; padding: 6px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.82rem;"></select>
+            <div style="display: flex; gap: 4px;">
+                <button id="btn-adjust-offset" class="btn-crop" style="flex: 1;" onclick="setAdjustMode('offset')">➕ Offset</button>
+                <button id="btn-adjust-scale" class="btn-crop" style="flex: 1;" onclick="setAdjustMode('scale')">✖ Scale</button>
+            </div>
+            <div style="display: flex; align-items: center; gap: 4px; font-size: 0.8rem; color: #495057;">
+                <span>Δ+</span>
+                <input type="number" id="offset-step" value="100" step="10" style="width: 62px; padding: 6px; border: 1px solid #ced4da; border-radius: 6px;">
+                <span style="margin-left: 6px;">×%</span>
+                <input type="number" id="scale-step" value="5" step="1" min="0.1" style="width: 52px; padding: 6px; border: 1px solid #ced4da; border-radius: 6px;">
+            </div>
+            <div style="display: flex; gap: 4px;">
+                <button class="btn-crop" style="flex: 1; font-size: 1.05rem;" onclick="adjustStep(-1)">➖ Down</button>
+                <button class="btn-crop" style="flex: 1; font-size: 1.05rem;" onclick="adjustStep(1)">Up ➕</button>
+            </div>
+            <div style="font-size: 0.78rem; color: #6c757d;">Pick a target and mode, then use ➖ / ➕ (or two-finger scroll over the plot).</div>
+        </div>
+
+        <button id="btn-fit-toggle" class="btn-fit-toggle" onclick="toggleFittingMode()">🎯 Peak Selection: OFF</button>
+        <button id="btn-run-fit" class="btn-run-fit" onclick="executePeakOptimization()" style="display: none;">⚡ Fit</button>
+        <button class="btn-export" onclick="exportPlottedToCSV()">📥 Export Plotted to CSV</button>
+        <button class="btn-clear" onclick="clearCanvas()">🗑️ Clear Canvas</button>
+        <button id="btn-undo" class="btn-undo" onclick="undoLastAction()" disabled>↩️ Undo Last Action</button>
+
+        <div class="checkbox-container">
+            <input type="checkbox" id="toggle-tooltip" checked onchange="handleTooltipToggle()">
+            <label for="toggle-tooltip">Enable Live Tooltip</label>
+        </div>
+
+        <div class="status-badge" id="status-display">Active spectra loaded: 0</div>
+
+        <div class="rruff-panel" id="rruff-panel" style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 6px;">
+            <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">💎 RRUFF (infrared)</label>
+            <p class="info-text" id="rruff-intro" style="margin: 0;">Open a RRUFF infrared .h5 library or a local folder to search, overlay, and match — fully offline.</p>
+            <div id="rruff-loaded-note">✅ Library loaded</div>
+
+            <div id="rruff-search-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <div style="display: flex; gap: 4px; align-items: center;">
+                    <input type="text" id="rruff-query" placeholder="mineral or RRUFF ID (e.g. Quartz)" style="flex-grow: 1; padding: 8px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.82rem;">
+                    <button class="btn-crop" style="width: auto; padding: 8px 10px;" onclick="rruffSearch()">🔍</button>
+                </div>
+                <select id="rruff-results" size="4" style="width: 100%; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.8rem; padding: 4px;"></select>
+                <button class="btn-ref-sub" onclick="rruffOverlaySelected()">➕ Overlay Selected Reference</button>
+            </div>
+
+            <div id="rruff-match-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <div style="display: flex; align-items: center; gap: 4px; font-size: 0.8rem; color: #495057;">
+                    <span>Match tol. ±</span>
+                    <input type="number" id="rruff-match-tol" value="8" step="1" min="1" style="width: 52px; padding: 6px; border: 1px solid #ced4da; border-radius: 6px;">
+                    <span>cm⁻¹</span>
+                </div>
+                <button class="btn-fit-toggle" style="background-color:#6f42c1;" onclick="rruffMatchByPeaks()">🎯 Match by Selected Peaks</button>
+            </div>
+
+            <div id="rruff-load-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <label class="btn-crop" for="rruff-folder" style="text-align: center; cursor: pointer;">📂 Load Local RRUFF Folder</label>
+                <input type="file" id="rruff-folder" webkitdirectory directory multiple style="display:none;" onchange="loadRruffFolder(event)">
+                <label class="btn-crop" for="rruff-h5" style="text-align: center; cursor: pointer;">📚 Open RRUFF .h5 Library</label>
+                <input type="file" id="rruff-h5" accept=".h5,.hdf5" style="display:none;" onchange="loadRruffLibrary(event)">
+                <button class="btn-crop" style="font-size: 0.72rem; padding: 5px;" onclick="forgetSavedLibrary()">🗑 Forget saved library</button>
+            </div>
+
+            <div id="rruff-status" style="font-size: 0.78rem; color: #6c757d;">Load a library below. To match: turn on Peak Selection, right-click to mark peaks, then Match.</div>
+        </div>
+
+        <div class="checkbox-container" style="flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 5px; width: 100%;">
+            <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">📋 Plotted Spectra Layers:</label>
+            <div id="fit-targets-panel" style="width: 100%; max-height: 140px; overflow-y: auto; border: 1px solid #ced4da; border-radius: 6px; background-color: #fff; padding: 8px; box-sizing: border-box;">
+                <div style="color: #888888; font-size: 0.85rem; font-style: italic;">No Spectra Loaded</div>
+            </div>
+        </div>
+
+        <div class="version-tag" id="app-version-container"></div>
+    </div>
+
+    <div id="subtraction-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+        <div style="background: white; padding: 22px; border-radius: 8px; width: 420px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); display: flex; flex-direction: column; gap: 12px;">
+            <h3 style="margin: 0; color: #02b2af; font-size: 1.1rem;">🧪 Reference Spectrum Subtraction</h3>
+            <p class="info-text">Select a reference/substrate spectrum to subtract from your target scans.</p>
+
+            <label style="font-weight: bold; font-size: 0.85rem; color: #495057;">Select Reference Scan:</label>
+            <select id="modal-blank-select" style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #ced4da; font-size: 0.85rem; background-color: #fff; cursor: pointer;"></select>
+
+            <label style="font-weight: bold; font-size: 0.85rem; color: #495057;">Select Target Scan(s) to Clean:</label>
+            <div id="modal-targets-container" style="max-height: 120px; overflow-y: auto; border: 1px solid #ced4da; border-radius: 6px; padding: 8px; box-sizing: border-box; background: #f8f9fa;"></div>
+
+            <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 5px;">
+                <button class="btn-crop" style="width: auto; padding: 8px 14px; margin: 0; font-size: 0.85rem;" onclick="closeSubtractionModal()">Cancel</button>
+                <button class="btn-run-fit" style="width: auto; padding: 8px 14px; margin: 0; display: block; background-color: #02b2af;" onclick="runReferenceSubtraction()">Subtract Reference</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="rruff-match-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+        <div style="background: white; padding: 22px; border-radius: 8px; width: 560px; max-height: 82vh; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
+            <h3 style="margin: 0; color: #6f42c1; font-size: 1.1rem;">🎯 RRUFF Search &amp; Match</h3>
+            <p class="info-text" id="rruff-match-subtitle" style="margin: 0;"></p>
+            <div id="rruff-match-list" style="width: 100%; max-height: 320px; overflow-y: auto; padding: 6px; border: 1px solid #ced4da; border-radius: 6px; box-sizing: border-box;"></div>
+            <div style="display: flex; justify-content: flex-end; gap: 8px;">
+                <button class="btn-crop" style="width: auto; padding: 8px 14px; margin: 0;" onclick="closeRruffMatchModal()">Close</button>
+                <button class="btn-ref-sub" style="width: auto; padding: 8px 14px; margin: 0;" onclick="rruffOverlayMatches()">➕ Overlay Selected Match(es)</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="main-content">
+        <div id="chart-container"></div>
+        <div id="cursor-bar">Cursor Position: Wavenumber = --</div>
+
+        <div id="results-dashboard">
+            <h4 style="margin: 0 0 10px 0; color:#198754;">📊 Peak Fit Results</h4>
+            <table class="results-table" id="results-matrix-sheet">
+                <thead>
+                    <tr>
+                        <th>Dataset / Spectrum</th>
+                        <th>Peak ID</th>
+                        <th>Center (cm⁻¹)</th>
+                        <th>Amplitude (counts)</th>
+                        <th>FWHM (cm⁻¹)</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        const VERSION_TAG = "ftir-v2026.07.24.1";
+
+        let persistentDatasets = {};
+        let fittingModeActive = false;
+        let normalizationModeActive = false;
+        let peakGuessesX = [];
+        let currentMouseHoverX = null;
+        let historyStack = [];
+        let adjustMode = null;       // null | 'offset' | 'scale'
+        let adjustArmed = false;     // one history snapshot per wheel session
+        let traceIndexByKey = {};    // dataset key -> Plotly trace index
+
+        window.onload = function() {
+            document.getElementById('app-version-container').innerText = VERSION_TAG;
+
+            // Auto-load the library independently of the chart/Plotly readiness,
+            // so a server-hosted rruff_ir_library.h5 loads even if the Plotly
+            // CDN is slow or blocked.
+            tryAutoLoadLibrary().catch(function () {});
+
+            const startChart = function () {
+                renderPlaceholderCanvas();
+                const chartDiv = document.getElementById('chart-container');
+                chartDiv.addEventListener('contextmenu', function(e) {
+                    if (fittingModeActive && currentMouseHoverX !== null) {
+                        e.preventDefault();
+                        saveToHistory();
+                        peakGuessesX.push(currentMouseHoverX);
+                        updateChartCanvas();
+                    }
+                });
+                // Wheel adjust: add a constant (offset) or multiply (scale)
+                // the selected spectrum. Two-finger trackpad scroll also fires 'wheel'.
+                // Capture phase + preventDefault so Plotly doesn't swallow the gesture.
+                chartDiv.addEventListener('wheel', function(e) {
+                    if (!adjustMode) return;
+                    const sel = document.getElementById('adjust-target');
+                    if (!sel || !sel.value || !persistentDatasets[sel.value]) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    applyAdjust(e.deltaY < 0 ? 1 : -1);
+                }, { passive: false, capture: true });
+            };
+
+            const readyPromise = window.__plotlyReady || Promise.resolve();
+            readyPromise.then(startChart).catch(function () {
+                document.getElementById('chart-container').innerHTML =
+                    '<div style="padding:40px; text-align:center; color:#dc3545; font-size:0.95rem;">' +
+                    'Could not load the Plotly charting library (network blocked?).<br>' +
+                    'Check your internet connection or network/firewall settings and reload.</div>';
+            });
+        };
+
+        function saveToHistory() {
+            if (historyStack.length >= 25) {
+                historyStack.shift();
+            }
+            const datasetsCacheCopy = {};
+            for (const key in persistentDatasets) {
+                datasetsCacheCopy[key] = {
+                    angles: [...persistentDatasets[key].angles],
+                    intensities: [...persistentDatasets[key].intensities],
+                    label: persistentDatasets[key].label
+                };
+            }
+            const resultsTableCacheCopy = [];
+            document.querySelectorAll("#results-matrix-sheet tbody tr").forEach(tr => {
+                const tds = tr.querySelectorAll("td");
+                if (tds.length === 5) {
+                    resultsTableCacheCopy.push([tds[0].innerText, tds[1].innerText, tds[2].innerText, tds[3].innerText, tds[4].innerText]);
+                }
+            });
+            historyStack.push({
+                persistentDatasets: datasetsCacheCopy,
+                peakGuessesX: [...peakGuessesX],
+                tableData: resultsTableCacheCopy,
+                dashboardDisplay: document.getElementById('results-dashboard').style.display
+            });
+            document.getElementById('btn-undo').disabled = false;
+        }
+
+        function undoLastAction() {
+            if (historyStack.length === 0) return;
+            const snapshot = historyStack.pop();
+            persistentDatasets = snapshot.persistentDatasets;
+            peakGuessesX = snapshot.peakGuessesX;
+
+            const tableBody = document.querySelector("#results-matrix-sheet tbody");
+            tableBody.innerHTML = "";
+            snapshot.tableData.forEach(rowData => {
+                const tr = document.createElement('tr');
+                rowData.forEach(textCell => {
+                    const td = document.createElement('td'); td.innerText = textCell; tr.appendChild(td);
+                });
+                tableBody.appendChild(tr);
+            });
+            document.getElementById('results-dashboard').style.display = snapshot.dashboardDisplay;
+            if (historyStack.length === 0) document.getElementById('btn-undo').disabled = true;
+
+            refreshCheckboxTargetsPanel();
+            updateChartCanvas();
+        }
+
+        function interpolateArray(targetX, blankX, blankY) {
+            let resultY = [];
+            for (let i = 0; i < targetX.length; i++) {
+                let tx = targetX[i];
+                if (tx <= blankX[0]) {
+                    resultY.push(blankY[0]);
+                } else if (tx >= blankX[blankX.length - 1]) {
+                    resultY.push(blankY[blankY.length - 1]);
+                } else {
+                    let idx = 0;
+                    while (idx < blankX.length - 1 && blankX[idx + 1] < tx) { idx++; }
+                    let x0 = blankX[idx], x1 = blankX[idx + 1];
+                    let y0 = blankY[idx], y1 = blankY[idx + 1];
+                    resultY.push(y0 + (tx - x0) * (y1 - y0) / (x1 - x0));
+                }
+            }
+            return resultY;
+        }
+
+        function openSubtractionModal() {
+            const datasetKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_"));
+            if (datasetKeys.length < 2) {
+                alert("You must have at least two spectra loaded to execute subtraction.");
+                return;
+            }
+            const selectEl = document.getElementById('modal-blank-select');
+            selectEl.innerHTML = "";
+            datasetKeys.forEach(key => {
+                const opt = document.createElement('option'); opt.value = key; opt.innerText = persistentDatasets[key].label; selectEl.appendChild(opt);
+            });
+
+            const containerEl = document.getElementById('modal-targets-container');
+            containerEl.innerHTML = "";
+            datasetKeys.forEach((key, idx) => {
+                const div = document.createElement('div'); div.className = 'checkbox-container'; div.style.margin = '4px 0';
+                const cb = document.createElement('input'); cb.type = 'checkbox'; cb.className = 'modal-target-cb'; cb.id = `modal-target-${key}`; cb.value = key; cb.checked = idx > 0;
+                const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.innerText = persistentDatasets[key].label; lbl.style.fontSize = '0.85rem'; lbl.style.cursor = 'pointer';
+                div.appendChild(cb); div.appendChild(lbl); containerEl.appendChild(div);
+            });
+            document.getElementById('subtraction-modal').style.display = 'flex';
+        }
+
+        function closeSubtractionModal() { document.getElementById('subtraction-modal').style.display = 'none'; }
+
+        function runReferenceSubtraction() {
+            const blankKey = document.getElementById('modal-blank-select').value;
+            const checkedBoxes = document.querySelectorAll('.modal-target-cb:checked');
+            if (checkedBoxes.length === 0) { alert("Please pick at least one target spectrum to clean."); return; }
+            saveToHistory(); clearFittedModelsCache();
+
+            const blankX = persistentDatasets[blankKey].angles; const blankY = persistentDatasets[blankKey].intensities;
+            checkedBoxes.forEach(cb => {
+                const targetKey = cb.value; if (targetKey === blankKey) return;
+                const targetX = persistentDatasets[targetKey].angles; const targetY = persistentDatasets[targetKey].intensities;
+                const interpolatedBlankY = interpolateArray(targetX, blankX, blankY);
+                for (let i = 0; i < targetY.length; i++) { persistentDatasets[targetKey].intensities[i] = targetY[i] - interpolatedBlankY[i]; }
+            });
+            closeSubtractionModal(); refreshCheckboxTargetsPanel(); updateChartCanvas();
+        }
+
+        function smoothNoise() {
+            let winSize = parseInt(document.getElementById('smooth-window-input').value);
+            if (isNaN(winSize) || winSize < 3) { winSize = 11; document.getElementById('smooth-window-input').value = "11"; }
+            if (winSize % 2 === 0) winSize++;
+
+            const datasetKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_") && !k.startsWith("__ref_"));
+            if (datasetKeys.length === 0) return;
+
+            saveToHistory(); clearFittedModelsCache();
+
+            datasetKeys.forEach(key => {
+                const intensities = persistentDatasets[key].intensities; if (intensities.length <= winSize) return;
+                const smoothed = new Array(intensities.length); const half = Math.floor(winSize / 2);
+                let kernel = []; let sigma = half / 2.2; let sum = 0;
+                for (let i = -half; i <= half; i++) {
+                    let g = Math.exp(-(i * i) / (2 * sigma * sigma)); kernel.push(g); sum += g;
+                }
+                kernel = kernel.map(v => v / sum);
+                for (let i = 0; i < intensities.length; i++) {
+                    let kSum = 0;
+                    for (let w = -half; w <= half; w++) {
+                        let idx = i + w; if (idx < 0) idx = 0; if (idx >= intensities.length) idx = intensities.length - 1;
+                        kSum += intensities[idx] * kernel[w + half];
+                    }
+                    smoothed[i] = kSum;
+                }
+                persistentDatasets[key].intensities = smoothed;
+            });
+            refreshCheckboxTargetsPanel(); updateChartCanvas();
+        }
+
+        function applyShift() {
+            let shiftVal = parseFloat(document.getElementById('shift-window-input').value);
+            if (isNaN(shiftVal) || shiftVal === 0.0) return;
+
+            const datasetKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_") && !k.startsWith("__ref_"));
+            if (datasetKeys.length === 0) return;
+
+            saveToHistory(); clearFittedModelsCache();
+
+            datasetKeys.forEach(key => {
+                for (let i = 0; i < persistentDatasets[key].angles.length; i++) {
+                    persistentDatasets[key].angles[i] += shiftVal;
+                }
+            });
+            refreshCheckboxTargetsPanel(); updateChartCanvas();
+        }
+
+        function refreshCheckboxTargetsPanel() {
+            const panel = document.getElementById('fit-targets-panel'); const datasetKeys = Object.keys(persistentDatasets);
+            const historicalCheckedStates = {}; panel.querySelectorAll('input[type="checkbox"]').forEach(cb => { historicalCheckedStates[cb.value] = cb.checked; });
+
+            panel.innerHTML = "";
+            if (datasetKeys.length === 0) { panel.innerHTML = '<div style="color: #888888; font-size: 0.85rem; font-style: italic;">No Spectra Loaded</div>'; return; }
+
+            datasetKeys.forEach(key => {
+                const wrapper = document.createElement('div'); wrapper.style.display = 'flex'; wrapper.style.alignItems = 'center'; wrapper.style.justifyContent = 'space-between'; wrapper.style.width = '100%'; wrapper.style.margin = '4px 0';
+                const leftDiv = document.createElement('div'); leftDiv.className = 'checkbox-container'; leftDiv.style.margin = '0';
+
+                const isFitOrRef = key.startsWith("__fit_") || key.startsWith("__ref_");
+                if (!isFitOrRef) {
+                    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.id = `fit-check-${key}`; cb.value = key;
+                    cb.checked = historicalCheckedStates[key] !== undefined ? historicalCheckedStates[key] : true;
+                    cb.onchange = updateChartCanvas;  // toggle spectrum visibility
+                    const label = document.createElement('label'); label.htmlFor = cb.id; label.innerText = persistentDatasets[key].label; label.style.fontSize = '0.85rem'; label.style.cursor = 'pointer';
+                    leftDiv.appendChild(cb); leftDiv.appendChild(label);
+                } else {
+                    const data = persistentDatasets[key];
+                    const url = key.startsWith("__ref_") ? rruffUrl(data.rruffName, data.rruffId) : null;
+                    let el;
+                    if (url) {
+                        el = document.createElement('a');
+                        el.href = url; el.target = '_blank'; el.rel = 'noopener';
+                        el.title = 'Open RRUFF page';
+                        el.style.color = '#0d6efd'; el.style.textDecoration = 'underline';
+                    } else {
+                        el = document.createElement('span');
+                        el.style.fontStyle = 'italic'; el.style.color = '#555555';
+                    }
+                    el.innerText = data.label;
+                    el.style.fontSize = '0.85rem';
+                    leftDiv.appendChild(el);
+                }
+                const delSpan = document.createElement('span'); delSpan.innerText = "❌"; delSpan.title = "Remove this layer"; delSpan.style.cursor = "pointer"; delSpan.style.fontSize = "0.82rem"; delSpan.style.marginLeft = "8px";
+                delSpan.onclick = function() { removeSpecificDataset(key); };
+                wrapper.appendChild(leftDiv); wrapper.appendChild(delSpan); panel.appendChild(wrapper);
+            });
+            refreshAdjustTargets();
+        }
+
+        function refreshAdjustTargets() {
+            const sel = document.getElementById('adjust-target');
+            if (!sel) return;
+            const prev = sel.value;
+            const keys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_"));
+            sel.innerHTML = "";
+            keys.forEach(k => {
+                const o = document.createElement('option');
+                o.value = k; o.innerText = persistentDatasets[k].label;
+                sel.appendChild(o);
+            });
+            if (keys.indexOf(prev) !== -1) sel.value = prev;
+        }
+
+        function setAdjustMode(mode) {
+            if (Object.keys(persistentDatasets).length === 0) { alert("Load spectra first."); return; }
+            adjustMode = (adjustMode === mode) ? null : mode;
+            adjustArmed = false;
+            if (adjustMode) {
+                if (fittingModeActive) toggleFittingMode();
+                if (normalizationModeActive) toggleNormalizationMode();
+            }
+            document.getElementById('btn-adjust-offset').classList.toggle('adjust-on', adjustMode === 'offset');
+            document.getElementById('btn-adjust-scale').classList.toggle('adjust-on', adjustMode === 'scale');
+        }
+
+        // Discrete step from the on-screen buttons (no wheel needed, e.g. on a MacBook).
+        function adjustStep(dir) {
+            const sel = document.getElementById('adjust-target');
+            if (!sel || !sel.value || !persistentDatasets[sel.value]) { alert("Select a target spectrum first."); return; }
+            if (!adjustMode) setAdjustMode('offset');  // default so the buttons work without arming
+            applyAdjust(dir);
+        }
+
+        // Shared offset/scale application used by both the wheel and the +/- buttons.
+        function applyAdjust(dir) {
+            const sel = document.getElementById('adjust-target');
+            const key = sel && sel.value;
+            if (!key || !persistentDatasets[key]) return;
+            if (!adjustArmed) { saveToHistory(); adjustArmed = true; }
+            const ds = persistentDatasets[key];
+            if (adjustMode === 'scale') {
+                let pct = parseFloat(document.getElementById('scale-step').value);
+                if (isNaN(pct)) pct = 5;
+                const f = Math.pow(1 + pct / 100, dir);
+                ds.intensities = ds.intensities.map(v => v * f);
+            } else {
+                let step = parseFloat(document.getElementById('offset-step').value);
+                if (isNaN(step)) step = 100;
+                ds.intensities = ds.intensities.map(v => v + step * dir);
+            }
+            const idx = traceIndexByKey[key];
+            if (idx !== undefined) { Plotly.restyle('chart-container', { y: [ds.intensities] }, [idx]); }
+            else { updateChartCanvas(); }
+        }
+
+        function removeSpecificDataset(key) {
+            saveToHistory(); if (persistentDatasets[key]) { delete persistentDatasets[key]; }
+            Object.keys(persistentDatasets).forEach(k => { if (k.endsWith('_' + key)) { delete persistentDatasets[k]; } });
+            if (Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_")).length === 0) {
+                document.querySelector("#results-matrix-sheet tbody").innerHTML = ""; document.getElementById('results-dashboard').style.display = "none"; peakGuessesX = [];
+            }
+            refreshCheckboxTargetsPanel(); updateChartCanvas();
+        }
+
+        function toggleNormalizationMode() {
+            if (Object.keys(persistentDatasets).length === 0) { alert("Load spectra first."); return; }
+            normalizationModeActive = !normalizationModeActive; const btn = document.getElementById('btn-normalize-toggle');
+            if (normalizationModeActive) {
+                if (fittingModeActive) toggleFittingMode(); btn.innerText = "⚖️ Mode: SELECT PEAK"; btn.classList.add('active');
+            } else {
+                btn.innerText = "⚖️ Normalize to Peak"; btn.classList.remove('active');
+            }
+        }
+
+        function toggleFittingMode() {
+            if (Object.keys(persistentDatasets).length === 0) { alert("Load spectra first."); return; }
+            fittingModeActive = !fittingModeActive; const btn = document.getElementById('btn-fit-toggle'); const runBtn = document.getElementById('btn-run-fit');
+            if (fittingModeActive) {
+                if (normalizationModeActive) toggleNormalizationMode(); btn.innerText = "🎯 Peak Selection: ACTIVE"; btn.classList.add('active'); runBtn.style.display = "block";
+            } else {
+                btn.innerText = "🎯 Peak Selection: OFF"; btn.classList.remove('active'); runBtn.style.display = "none";
+            }
+        }
+
+        function subtractBackgroundFromPlotted() {
+            const dataKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_")); if (dataKeys.length === 0) { alert("No active spectra loaded to baseline-correct."); return; }
+            saveToHistory(); clearFittedModelsCache();
+            dataKeys.forEach(key => {
+                const dataset = persistentDatasets[key]; const intensities = dataset.intensities; if (intensities.length < 3) return;
+                const bg = snipBackground(intensities, 40);
+                for (let i = 0; i < intensities.length; i++) dataset.intensities[i] = intensities[i] - bg[i];
+            });
+            updateChartCanvas();
+        }
+
+        function executePeakOptimization() {
+            if (peakGuessesX.length === 0) { alert("Right-click on the plot to specify initial band centers."); return; }
+            const panel = document.getElementById('fit-targets-panel'); let keysToFit = []; panel.querySelectorAll('input[type="checkbox"]:checked').forEach(cb => { keysToFit.push(cb.value); });
+            if (keysToFit.length === 0) { alert("Please select at least one target spectrum checkbox in the panel list."); return; }
+
+            saveToHistory(); Object.keys(persistentDatasets).forEach(k => { if(k.startsWith("__fit_")) delete persistentDatasets[k]; });
+            const tableBody = document.querySelector("#results-matrix-sheet tbody"); tableBody.innerHTML = "";
+
+            keysToFit.forEach(key => {
+                const rawX = persistentDatasets[key].angles; const rawY = persistentDatasets[key].intensities; const labelBase = persistentDatasets[key].label;
+                let xFit = [...rawX], yFit = [...rawY];
+                if (xFit.length > 1200) {
+                    let samplingInterval = Math.ceil(xFit.length / 1200); xFit = xFit.filter((_, i) => i % samplingInterval === 0); yFit = yFit.filter((_, i) => i % samplingInterval === 0);
+                }
+                let initialGuess = [];
+                peakGuessesX.forEach(g_x => {
+                    let closestIdx = 0, minDiff = Infinity;
+                    for (let i = 0; i < xFit.length; i++) {
+                        let diff = Math.abs(xFit[i] - g_x); if (diff < minDiff) { minDiff = diff; closestIdx = i; }
+                    }
+                    // FTIR bands are typically several cm-1 wide
+                    initialGuess.push(yFit[closestIdx], g_x, 10.0);
+                });
+                function sumOfSquaredErrors(params) {
+                    let sse = 0;
+                    for (let i = 0; i < xFit.length; i++) {
+                        let x = xFit[i]; let modelY = 0;
+                        for (let p = 0; p < params.length; p += 3) {
+                            let amp = params[p]; let cent = params[p+1]; let wid = params[p+2]; if (amp < 0 || wid < 0.3) return Infinity;
+                            modelY += amp * Math.exp(-Math.pow((x - cent) / wid, 2));
+                        }
+                        sse += Math.pow(yFit[i] - modelY, 2);
+                    }
+                    return sse;
+                }
+                const pOpt = nelderMeadOptimization(sumOfSquaredErrors, initialGuess);
+                let yFitTotal = new Array(rawX.length).fill(0); let peakCounter = 1;
+                for (let p = 0; p < pOpt.length; p += 3) {
+                    let amp = pOpt[p], cent = pOpt[p+1], wid = pOpt[p+2]; let yPeak = [];
+                    for (let i = 0; i < rawX.length; i++) {
+                        let val = amp * Math.exp(-Math.pow((rawX[i] - cent) / wid, 2)); yPeak.push(val); yFitTotal[i] += val;
+                    }
+                    persistentDatasets[`__fit_peak_${peakCounter}_${key}`] = { angles: rawX, intensities: yPeak, label: `${labelBase} Pk ${peakCounter} Fit` };
+                    let fwhm = 2.0 * Math.sqrt(Math.LN2) * wid;
+                    let tr = document.createElement('tr'); tr.innerHTML = `<td>${labelBase}</td><td>Peak ${peakCounter}</td><td>${cent.toFixed(2)}</td><td>${amp.toFixed(1)}</td><td>${fwhm.toFixed(2)}</td>`;
+                    tableBody.appendChild(tr); peakCounter++;
+                }
+                persistentDatasets[`__fit_composite_${key}`] = { angles: rawX, intensities: yFitTotal, label: `${labelBase} Total Fit` };
+            });
+            document.getElementById('results-dashboard').style.display = "block"; refreshCheckboxTargetsPanel(); updateChartCanvas();
+        }
+
+        // Named filter groups mirroring the desktop (tkinter) dialog. Used by the
+        // File System Access API when available (Chrome/Edge); "All Files" is added.
+        const FILE_PICKER_TYPES = [
+            { description: "FTIR Datasets (.jdx .dx .csv .txt .dat .asc)", accept: { "application/octet-stream": [".jdx", ".dx", ".jcm", ".csv", ".txt", ".dat", ".asc"] } },
+            { description: "JCAMP-DX (.jdx, .dx, .jcm)", accept: { "application/octet-stream": [".jdx", ".dx", ".jcm"] } },
+            { description: "Text / CSV / RRUFF (.csv .txt .dat .asc)", accept: { "text/plain": [".csv", ".txt", ".dat", ".asc"] } }
+        ];
+
+        async function pickFiles() {
+            if (window.showOpenFilePicker) {
+                try {
+                    const handles = await window.showOpenFilePicker({ multiple: true, excludeAcceptAllOption: false, types: FILE_PICKER_TYPES });
+                    const files = [];
+                    for (const h of handles) files.push(await h.getFile());
+                    if (files.length) handleFileSelections({ target: { files: files, value: '' } });
+                    return;
+                } catch (e) {
+                    if (e && e.name === 'AbortError') return;  // user cancelled
+                    // any other error (e.g. unsupported context) -> classic input
+                }
+            }
+            document.getElementById('ftir-files').click();
+        }
+
+        function handleFileSelections(event) {
+            const files = event.target.files; if (!files.length) return;
+            let itemsProcessed = 0;
+            const finalize = function () {
+                itemsProcessed++;
+                if (itemsProcessed === files.length) { refreshCheckboxTargetsPanel(); updateChartCanvas(); event.target.value = ''; }
+            };
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const extension = file.name.split('.').pop().toLowerCase();
+                if (persistentDatasets[file.name]) { finalize(); continue; }
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    try {
+                        let parsed;
+                        if (extension === 'jdx' || extension === 'dx' || extension === 'jcm') parsed = parseJCAMP(e.target.result, file.name);
+                        else parsed = parseTwoColumn(e.target.result, file.name);
+                        if (parsed) { saveToHistory(); persistentDatasets[file.name] = parsed; }
+                    } catch (err) { alert(`Parsing error: ${file.name}\nReason: ${err.message}`); }
+                    finalize();
+                };
+                reader.onerror = function () { alert(`Failed to read file: ${file.name}`); finalize(); };
+                reader.readAsText(file);
+            }
+        }
+
+        // JCAMP-DX (X++(Y..Y)) parser (Thermo Nicolet, etc.).
+        function parseJCAMP(text, filename) {
+            const lines = text.split(/\r?\n/);
+            const hdr = {};
+            let dataStart = -1;
+            let title = filename.split('.').slice(0, -1).join('.') || filename;
+            for (let i = 0; i < lines.length; i++) {
+                const s = lines[i].trim();
+                const m = s.match(/^##\s*([^=]+)=(.*)$/);
+                if (m) {
+                    const key = m[1].trim().toUpperCase(), val = m[2].trim();
+                    hdr[key] = val;
+                    if (key === 'TITLE' && val) title = val;
+                    if (key === 'XYDATA' || key === 'XYPOINTS' || key === 'DATA TABLE') { dataStart = i + 1; break; }
+                }
+            }
+            if (dataStart < 0) throw new Error("No ##XYDATA block found.");
+            const num = (k, d) => { const v = parseFloat(hdr[k]); return isNaN(v) ? d : v; };
+            const xfactor = num('XFACTOR', 1), yfactor = num('YFACTOR', 1);
+            const firstx = num('FIRSTX', null), lastx = num('LASTX', null), deltax = num('DELTAX', null);
+            const ys = [];
+            for (let i = dataStart; i < lines.length; i++) {
+                const s = lines[i].trim();
+                if (!s) continue;
+                if (s.startsWith('##')) break;
+                const toks = s.split(/\s+/);
+                for (let t = 1; t < toks.length; t++) { const v = parseFloat(toks[t]); if (!isNaN(v)) ys.push(v); }
+            }
+            if (!ys.length) throw new Error("No numeric data parsed from JCAMP file.");
+            const y = ys.map(v => v * (yfactor || 1));
+            const n = y.length;
+            const angles = [];
+            if (firstx !== null && lastx !== null && n > 1) {
+                const step = (lastx - firstx) / (n - 1);
+                for (let k = 0; k < n; k++) angles.push((firstx + k * step) * (xfactor || 1));
+            } else if (firstx !== null && deltax !== null) {
+                for (let k = 0; k < n; k++) angles.push((firstx + k * deltax) * (xfactor || 1));
+            } else { for (let k = 0; k < n; k++) angles.push(k); }
+            return { angles: angles, intensities: y, label: title };
+        }
+
+        // h5wasm returns attributes either as raw values or {value, shape, ...}
+        function attrRaw(a) { return (a && a.value !== undefined) ? a.value : a; }
+        function attrToString(a) {
+            let v = attrRaw(a);
+            if (v == null) return "";
+            if (Array.isArray(v)) v = v[0];
+            if (v instanceof Uint8Array) return new TextDecoder("latin1").decode(v).replace(/\0+$/, "").trim();
+            return String(v).replace(/\0+$/, "").trim();
+        }
+        function attrToArray(a) {
+            const v = attrRaw(a);
+            if (v == null) return [];
+            if (ArrayBuffer.isView(v)) return v;      // typed array
+            if (Array.isArray(v)) return v;
+            return [v];
+        }
+
+        // Two-column text, RRUFF-aware. RRUFF files carry '##' metadata lines
+        // such as ##NAMES=Quartz and ##RRUFFID=R040031.
+        function parseTwoColumn(text, filename) {
+            const lines = text.split(/\r?\n/);
+            let sampleId = filename.split('.').slice(0, -1).join('.') || filename;
+            let rruffName = null, rruffId = null;
+            const angles = []; const intensities = [];
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim(); if (!line) continue;
+                if (line.startsWith('#')) {
+                    const m = line.match(/^#+\s*([A-Za-z ]+)\s*=\s*(.*)$/);
+                    if (m) {
+                        const key = m[1].trim().toUpperCase(); const val = m[2].trim();
+                        if (key === 'NAMES' && val) rruffName = val;
+                        else if (key === 'RRUFFID' && val) rruffId = val;
+                    }
+                    continue;
+                }
+                let parts;
+                if (line.includes(',')) parts = line.split(',');
+                else if (line.includes('\t')) parts = line.split('\t');
+                else if (line.includes(';')) parts = line.split(';');
+                else parts = line.split(/\s+/);
+                if (parts.length < 2) continue;
+                const xv = parseFloat(parts[0]); const yv = parseFloat(parts[1]);
+                if (!isNaN(xv) && !isNaN(yv)) { angles.push(xv); intensities.push(yv); }
+            }
+            if (angles.length === 0) throw new Error("Could not parse two numeric columns (Wavenumber, Intensity).");
+            const label = rruffName ? (`RRUFF: ${rruffName}` + (rruffId ? ` (${rruffId})` : "")) : sampleId;
+            return { angles, intensities, label };
+        }
+
+        // ---- RRUFF reference database (offline: local folder or .h5 library) ----
+        // Either point at a downloaded RRUFF folder (.txt files, read on demand),
+        // or open a consolidated .h5 library built by build_rruff_library.py
+        // (loaded into memory with precomputed peaks for instant matching).
+        let rruffHits = [];          // current search results (records)
+        let rruffLocalFiles = [];    // indexed folder ({name,id,file})
+        let rruffLibrary = [];       // in-memory .h5 library ({name,id,peaks,x,y})
+        let rruffMatchRecords = [];  // records backing the current match modal
+
+        function loadRruffFolder(event) {
+            const files = Array.from(event.target.files || []).filter(f => f.name.toLowerCase().endsWith('.txt'));
+            rruffLocalFiles = files.map(f => {
+                const parts = f.name.split('__');
+                const name = parts[0] || f.name;
+                const id = (parts[1] && /^R\d+/.test(parts[1])) ? parts[1] : '';
+                return { name, id, file: f };
+            });
+            rruffLibrary = [];  // folder takes precedence
+            const statusEl = document.getElementById('rruff-status');
+            statusEl.innerText = rruffLocalFiles.length
+                ? `Local RRUFF folder: ${rruffLocalFiles.length} spectra. Search or Match by peaks.`
+                : "No .txt spectra found in that folder.";
+            updateRruffPanelState();
+            event.target.value = '';
+        }
+
+        // Parse .h5 library bytes into the in-memory rruffLibrary (shared by
+        // manual open, host auto-load, and IndexedDB restore).
+        // Reflect load state in the RRUFF panel: swap the intro for a "Library
+        // loaded" note and move search/match above the load controls.
+        function updateRruffPanelState() {
+            const panel = document.getElementById('rruff-panel');
+            if (!panel) return;
+            const loaded = (rruffLibrary && rruffLibrary.length) || (rruffLocalFiles && rruffLocalFiles.length);
+            panel.classList.toggle('lib-loaded', !!loaded);
+            const note = document.getElementById('rruff-loaded-note');
+            if (note && loaded) {
+                note.innerText = rruffLibrary.length
+                    ? `✅ Library loaded — ${rruffLibrary.length} spectra`
+                    : `✅ Folder loaded — ${rruffLocalFiles.length} spectra`;
+            }
+        }
+
+        function showInitBanner(msg) {
+            const b = document.getElementById('init-banner');
+            if (b) { b.innerText = msg; b.style.display = 'block'; }
+        }
+        function hideInitBanner() {
+            const b = document.getElementById('init-banner');
+            if (b) b.style.display = 'none';
+        }
+
+        async function ingestLibraryBytes(arrayBuffer, sourceLabel) {
+            showInitBanner('⏳ Initializing RRUFF library…');
+            await new Promise(r => setTimeout(r, 0));  // let the banner paint before the heavy work
+            try {
+                const lib = await window.loadH5Wasm();
+                const h5 = lib.h5, FS = lib.FS;
+                const fsName = `rrufflib_${Date.now()}.h5`;
+                FS.writeFile(fsName, new Uint8Array(arrayBuffer));
+                let f, out = [];
+                try {
+                    f = new h5.File(fsName, "r");
+                    const sp = f.get("spectra");
+                    if (!sp) throw new Error("Not a RRUFF library (no 'spectra' group).");
+                    const names = sp.keys();
+                    for (let idx = 0; idx < names.length; idx++) {
+                        const gname = names[idx];
+                        const g = f.get("spectra/" + gname);
+                        if (g && g.attrs) {
+                            const name = attrToString(g.attrs["name"]) || gname;
+                            const id = attrToString(g.attrs["rruff_id"]);
+                            const peaks = Array.from(attrToArray(g.attrs["peaks"]));
+                            const xds = f.get("spectra/" + gname + "/x");
+                            const yds = f.get("spectra/" + gname + "/y");
+                            out.push({ name, id, peaks, x: xds ? Array.from(xds.value) : [], y: yds ? Array.from(yds.value) : [] });
+                        }
+                        // Periodically yield so the banner repaints and the tab stays responsive.
+                        if (idx % 300 === 0) {
+                            showInitBanner(`⏳ Initializing RRUFF library… (${idx}/${names.length})`);
+                            await new Promise(r => setTimeout(r, 0));
+                        }
+                    }
+                } finally {
+                    try { if (f) f.close(); } catch (e) {}
+                    try { FS.unlink(fsName); } catch (e) {}
+                }
+                rruffLibrary = out;
+                rruffLocalFiles = [];  // library takes precedence
+                document.getElementById('rruff-status').innerText =
+                    `RRUFF library${sourceLabel ? ' (' + sourceLabel + ')' : ''}: ${out.length} spectra (precomputed peaks). Search or Match.`;
+                updateRruffPanelState();
+                return out.length;
+            } finally {
+                hideInitBanner();
+            }
+        }
+
+        async function loadRruffLibrary(event) {
+            const file = event.target.files && event.target.files[0];
+            event.target.value = '';
+            if (!file) return;
+            const statusEl = document.getElementById('rruff-status');
+            statusEl.innerText = "Loading RRUFF .h5 library ...";
+            try {
+                const buf = await file.arrayBuffer();
+                await ingestLibraryBytes(buf, 'opened');
+                try { await idbSaveLibrary(buf); } catch (e) { /* persistence optional */ }
+            } catch (err) {
+                statusEl.innerText = "Could not open library: " + err.message;
+            }
+        }
+
+        // ---- Persistence (IndexedDB) + host-provided library ----
+        // The page can ship a library next to it: set HOST_LIBRARY_URL or pass
+        // ?lib=<url>. A manually opened library is cached and auto-restored.
+        const HOST_LIBRARY_URL = "rruff_ir_library.h5";
+        const IDB_NAME = "ftirPlotter", IDB_STORE = "rruff", IDB_KEY = "library_h5";
+
+        function idbOpen() {
+            return new Promise((res, rej) => {
+                const r = indexedDB.open(IDB_NAME, 1);
+                r.onupgradeneeded = () => r.result.createObjectStore(IDB_STORE);
+                r.onsuccess = () => res(r.result);
+                r.onerror = () => rej(r.error);
+            });
+        }
+        async function idbSaveLibrary(buf) {
+            const db = await idbOpen();
+            return new Promise((res, rej) => {
+                const tx = db.transaction(IDB_STORE, "readwrite");
+                tx.objectStore(IDB_STORE).put(buf, IDB_KEY);
+                tx.oncomplete = () => { db.close(); res(); };
+                tx.onerror = () => rej(tx.error);
+            });
+        }
+        async function idbLoadLibrary() {
+            const db = await idbOpen();
+            return new Promise((res, rej) => {
+                const tx = db.transaction(IDB_STORE, "readonly");
+                const g = tx.objectStore(IDB_STORE).get(IDB_KEY);
+                g.onsuccess = () => { db.close(); res(g.result || null); };
+                g.onerror = () => rej(g.error);
+            });
+        }
+        async function idbClear() {
+            const db = await idbOpen();
+            return new Promise((res, rej) => {
+                const tx = db.transaction(IDB_STORE, "readwrite");
+                tx.objectStore(IDB_STORE).delete(IDB_KEY);
+                tx.oncomplete = () => { db.close(); res(); };
+                tx.onerror = () => rej(tx.error);
+            });
+        }
+
+        async function forgetSavedLibrary() {
+            try { await idbClear(); } catch (e) { /* ignore */ }
+            rruffLibrary = [];
+            updateRruffPanelState();
+            document.getElementById('rruff-status').innerText = "Saved library cleared. Load a folder (📂) or an .h5 library (📚).";
+        }
+
+        // Fetch an ArrayBuffer with a timeout and (when possible) streamed
+        // download progress. Returns {ok, buffer} or {ok:false}.
+        async function fetchArrayBufferWithProgress(url, onProgress, timeoutMs) {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+            try {
+                const resp = await fetch(url, { signal: ctrl.signal });
+                if (!resp.ok) return { ok: false };
+                const len = +(resp.headers.get('content-length') || 0);
+                if (resp.body && resp.body.getReader && len > 0) {
+                    const reader = resp.body.getReader();
+                    const chunks = []; let received = 0;
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        chunks.push(value); received += value.length;
+                        if (onProgress) onProgress(received, len);
+                    }
+                    const out = new Uint8Array(received);
+                    let off = 0;
+                    for (const c of chunks) { out.set(c, off); off += c.length; }
+                    return { ok: true, buffer: out.buffer };
+                }
+                return { ok: true, buffer: await resp.arrayBuffer() };
+            } finally {
+                clearTimeout(timer);
+            }
+        }
+
+        // On startup: prefer a host-provided library, else restore the saved one.
+        async function tryAutoLoadLibrary() {
+            const statusEl = document.getElementById('rruff-status');
+            const params = new URLSearchParams(location.search);
+            const url = params.get('lib') || HOST_LIBRARY_URL;
+            showInitBanner('⏳ Loading RRUFF library from server…');
+            if (statusEl) statusEl.innerText = "Checking for a library on the server…";
+            try {
+                // Normal caching (no 'no-store') so repeat visits are fast.
+                const res = await fetchArrayBufferWithProgress(url, function (recv, total) {
+                    const mb = (recv / 1e6).toFixed(1), tot = (total / 1e6).toFixed(1);
+                    showInitBanner(`⏳ Downloading RRUFF library… ${Math.round(recv / total * 100)}% (${mb}/${tot} MB)`);
+                }, 60000);
+                if (res.ok) {
+                    const sig = new Uint8Array(res.buffer.slice(0, 4));  // HDF5 magic: 0x89 'H' 'D' 'F'
+                    if (sig[0] === 0x89 && sig[1] === 0x48 && sig[2] === 0x44 && sig[3] === 0x46) {
+                        await ingestLibraryBytes(res.buffer, 'from server');
+                        return;
+                    }
+                    console.warn(`'${url}' was served but is not an HDF5 file; ignoring.`);
+                }
+            } catch (e) { /* not hosted / blocked / timed out — fall through */ }
+            // No server library; try a previously saved one.
+            try {
+                const saved = await idbLoadLibrary();
+                if (saved) { await ingestLibraryBytes(saved, 'restored'); return; }
+            } catch (e) { /* no saved library */ }
+            hideInitBanner();
+            if (statusEl) statusEl.innerText =
+                "No server library found. Load a library below, or place rruff_ir_library.h5 next to this page.";
+        }
+
+        function rruffSearch() {
+            const q = document.getElementById('rruff-query').value.trim();
+            const statusEl = document.getElementById('rruff-status');
+            const resultsEl = document.getElementById('rruff-results');
+            resultsEl.innerHTML = ""; rruffHits = [];
+            let pool = null;
+            if (rruffLibrary.length) pool = rruffLibrary;
+            else if (rruffLocalFiles.length) pool = rruffLocalFiles;
+            if (!pool) {
+                statusEl.innerText = "No references loaded. Use 📂 (folder of .txt) or 📚 (.h5 library) first.";
+                return;
+            }
+            const ql = q.toLowerCase();
+            const hits = pool.filter(e =>
+                !ql || (`${e.name} ${e.id} ${e.file ? e.file.name : ''}`).toLowerCase().includes(ql)).slice(0, 300);
+            if (!hits.length) { statusEl.innerText = "No matches."; return; }
+            rruffHits = hits;
+            hits.forEach((h, i) => {
+                const opt = document.createElement('option');
+                opt.value = String(i);
+                opt.innerText = `${h.name}${h.id ? ' · ' + h.id : ''}`;
+                resultsEl.appendChild(opt);
+            });
+            statusEl.innerText = `${hits.length} match(es)${hits.length === 300 ? ' (first 300)' : ''}. Select and overlay.`;
+        }
+
+        // Link to the RRUFF page for a sample (by ID) or mineral (by name).
+        function rruffUrl(name, id) {
+            if (id && /^R\d+/.test(id)) return 'https://rruff.info/' + id;
+            if (name) return 'https://rruff.info/' + encodeURIComponent(String(name).toLowerCase());
+            return null;
+        }
+
+        // Turn a search/match record into a parsed spectrum ({angles,intensities,label}).
+        async function recordToParsed(rec) {
+            let parsed;
+            if (rec.x && rec.y && rec.x.length) {
+                parsed = { angles: rec.x.slice(), intensities: rec.y.slice(),
+                           label: `RRUFF: ${rec.name}${rec.id ? ' (' + rec.id + ')' : ''}` };
+            } else {
+                parsed = parseTwoColumn(await rec.file.text(), rec.name);
+                if (!parsed.label || !parsed.label.startsWith("RRUFF"))
+                    parsed.label = `RRUFF: ${rec.name}${rec.id ? ' (' + rec.id + ')' : ''}`;
+            }
+            parsed.rruffName = rec.name;
+            parsed.rruffId = rec.id;
+            return parsed;
+        }
+
+        async function rruffOverlaySelected() {
+            const resultsEl = document.getElementById('rruff-results');
+            const statusEl = document.getElementById('rruff-status');
+            const val = resultsEl.value;
+            if (val === '' || !rruffHits[+val]) { statusEl.innerText = "Select a search result first."; return; }
+            const hit = rruffHits[+val];
+            try {
+                const parsed = await recordToParsed(hit);
+                saveToHistory();
+                scaleRefToData(parsed);
+                persistentDatasets[`__ref_${hit.name}_${hit.id}`] = parsed;
+                refreshCheckboxTargetsPanel(); updateChartCanvas();
+                statusEl.innerText = `Overlaid ${hit.name}${hit.id ? ' (' + hit.id + ')' : ''}.`;
+            } catch (err) {
+                statusEl.innerText = "Could not read that reference: " + err.message;
+            }
+        }
+
+        // Detect prominent band positions in a reference spectrum (mirrors the
+        // Python scipy.find_peaks(prominence, distance) behaviour, scale-free).
+        function detectReferencePeaks(x, y, maxPeaks = 40, minProm = 0.04) {
+            const n = y.length;
+            if (n < 5) return [];
+            let ymin = Infinity, ymax = -Infinity;
+            for (const v of y) { if (v < ymin) ymin = v; if (v > ymax) ymax = v; }
+            const rng = ymax - ymin;
+            if (rng <= 0) return [];
+            const yn = y.map(v => (v - ymin) / rng);
+            const cand = [];
+            for (let i = 1; i < n - 1; i++) { if (yn[i] > yn[i - 1] && yn[i] >= yn[i + 1]) cand.push(i); }
+            const peaks = [];
+            for (const i of cand) {
+                const h = yn[i];
+                let j = i - 1, leftMin = h;
+                while (j >= 0 && yn[j] < h) { if (yn[j] < leftMin) leftMin = yn[j]; j--; }
+                let k = i + 1, rightMin = h;
+                while (k < n && yn[k] < h) { if (yn[k] < rightMin) rightMin = yn[k]; k++; }
+                const prom = h - Math.max(leftMin, rightMin);
+                if (prom >= minProm) peaks.push({ i, prom });
+            }
+            peaks.sort((a, b) => b.prom - a.prom);
+            const kept = [];
+            for (const pk of peaks) {
+                if (kept.every(q => Math.abs(q.i - pk.i) >= 3)) kept.push(pk);
+                if (kept.length >= maxPeaks) break;
+            }
+            return kept.map(pk => x[pk.i]).sort((a, b) => a - b);
+        }
+
+        function peakMatchScore(refPeaks, expPeaks, tol) {
+            if (!expPeaks.length || !refPeaks.length) return { score: 0, avg: tol, matched: 0 };
+            let matched = 0, cum = 0;
+            for (const ex of expPeaks) {
+                let d = Infinity;
+                for (const r of refPeaks) { const dd = Math.abs(r - ex); if (dd < d) d = dd; }
+                if (d <= tol) { matched++; cum += d; } else { cum += tol; }
+            }
+            return { score: matched / expPeaks.length * 100, avg: cum / expPeaks.length, matched };
+        }
+
+        async function rruffMatchByPeaks() {
+            const statusEl = document.getElementById('rruff-status');
+            if (!peakGuessesX.length) {
+                alert("Mark peaks first: turn on '🎯 Peak Selection', then right-click on the plot to mark the peaks to match.");
+                return;
+            }
+            let tol = parseFloat(document.getElementById('rruff-match-tol').value);
+            if (isNaN(tol)) tol = 12;
+            const q = document.getElementById('rruff-query').value.trim().toLowerCase();
+            const exp = peakGuessesX.slice();
+
+            // Fast path: .h5 library with precomputed peaks -> instant.
+            if (rruffLibrary.length) {
+                const scored = [];
+                rruffLibrary.forEach(e => {
+                    if (q && !(`${e.name} ${e.id}`).toLowerCase().includes(q)) return;
+                    const s = peakMatchScore(e.peaks, exp, tol);
+                    if (s.matched > 0) scored.push({ ...s, name: e.name, id: e.id, rec: e });
+                });
+                scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
+                statusEl.innerText = `Matched ${scored.length}/${rruffLibrary.length} references (tol ±${tol}).`;
+                showRruffMatchResults(scored.slice(0, 100), exp.length, tol);
+                return;
+            }
+
+            // Folder path: read + detect peaks for each .txt.
+            if (!rruffLocalFiles.length) { alert("Load a RRUFF folder (📂) or an .h5 library (📚) first."); return; }
+            let files = rruffLocalFiles;
+            if (q) files = files.filter(f => (`${f.name} ${f.id} ${f.file.name}`).toLowerCase().includes(q));
+            if (!files.length) { alert("No local references match the search filter."); return; }
+            const scored = [];
+            for (let i = 0; i < files.length; i++) {
+                try {
+                    const parsed = parseTwoColumn(await files[i].file.text(), files[i].name);
+                    const rp = detectReferencePeaks(parsed.angles, parsed.intensities);
+                    const s = peakMatchScore(rp, exp, tol);
+                    if (s.matched > 0) scored.push({ ...s, name: files[i].name, id: files[i].id,
+                                                     rec: { name: files[i].name, id: files[i].id, file: files[i].file } });
+                } catch (e) { /* skip unreadable */ }
+                if (i % 50 === 0) { statusEl.innerText = `Matching ${i}/${files.length} ...`; await new Promise(r => setTimeout(r)); }
+            }
+            scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
+            statusEl.innerText = `Matched ${scored.length}/${files.length} references (tol ±${tol}).`;
+            showRruffMatchResults(scored.slice(0, 100), exp.length, tol);
+        }
+
+        function showRruffMatchResults(scored, nExp, tol) {
+            const listEl = document.getElementById('rruff-match-list');
+            listEl.innerHTML = "";
+            if (!scored.length) {
+                alert("No RRUFF reference had bands near your marked peaks. Try a larger tolerance or different peaks.");
+                return;
+            }
+            rruffMatchRecords = scored;
+            document.getElementById('rruff-match-subtitle').innerText =
+                `Ranked by alignment of RRUFF bands with your ${nExp} marked peak(s) (±${tol} cm⁻¹). Tick to overlay; ↗ opens the RRUFF page.`;
+            scored.forEach((s, i) => {
+                const row = document.createElement('div');
+                row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px'; row.style.padding = '2px 0';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox'; cb.className = 'rruff-match-cb'; cb.value = String(i); cb.id = `rmatch-${i}`;
+                const lbl = document.createElement('label');
+                lbl.htmlFor = cb.id; lbl.style.flex = '1'; lbl.style.cursor = 'pointer';
+                lbl.style.fontFamily = "'Consolas', monospace"; lbl.style.fontSize = '0.82rem';
+                const scoreStr = String(Math.round(s.score)).padStart(3, ' ');
+                lbl.innerText = `${scoreStr}%  ${s.matched}/${nExp}  ${s.name}${s.id ? ' · ' + s.id : ''}`;
+                row.appendChild(cb); row.appendChild(lbl);
+                const url = rruffUrl(s.name, s.id);
+                if (url) {
+                    const a = document.createElement('a');
+                    a.href = url; a.target = '_blank'; a.rel = 'noopener';
+                    a.innerText = '↗'; a.title = 'Open RRUFF page';
+                    a.style.textDecoration = 'none'; a.style.fontSize = '1rem'; a.style.padding = '0 4px';
+                    row.appendChild(a);
+                }
+                listEl.appendChild(row);
+            });
+            document.getElementById('rruff-match-modal').style.display = 'flex';
+        }
+
+        function closeRruffMatchModal() { document.getElementById('rruff-match-modal').style.display = 'none'; }
+
+        async function rruffOverlayMatches() {
+            const chosen = Array.from(document.querySelectorAll('#rruff-match-list input.rruff-match-cb:checked')).map(cb => +cb.value);
+            if (!chosen.length) { alert("Tick one or more matches to overlay."); return; }
+            closeRruffMatchModal();
+            saveToHistory();
+            let added = 0;
+            for (const idx of chosen) {
+                const rec = rruffMatchRecords[idx] && rruffMatchRecords[idx].rec;
+                if (!rec) continue;
+                try {
+                    const parsed = await recordToParsed(rec);
+                    scaleRefToData(parsed);
+                    persistentDatasets[`__ref_${rec.name}_${rec.id}_match`] = parsed;
+                    added++;
+                } catch (e) { /* skip */ }
+            }
+            if (added) {
+                refreshCheckboxTargetsPanel(); updateChartCanvas();
+                document.getElementById('rruff-status').innerText = `Overlaid ${added} matched reference(s).`;
+            }
+        }
+
+        function scaleRefToData(ref) {
+            const dataKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_") && !k.startsWith("__ref_"));
+            if (!dataKeys.length) return;
+            let dataMax = -Infinity;
+            dataKeys.forEach(k => { persistentDatasets[k].intensities.forEach(v => { if (v > dataMax) dataMax = v; }); });
+            let refMax = -Infinity; ref.intensities.forEach(v => { if (v > refMax) refMax = v; });
+            if (refMax > 0 && dataMax > 0 && isFinite(dataMax)) {
+                ref.intensities = ref.intensities.map(v => (v / refMax) * dataMax);
+            }
+        }
+
+        function nelderMeadOptimization(fn, x0, options) {
+            options = options || {};
+            const maxIter = options.maxIter || 2000;
+            const tol = options.tol || 1e-8;
+            const n = x0.length;
+            if (n === 0) return x0.slice();
+
+            const alpha = 1.0, gamma = 2.0, rho = 0.5, sigma = 0.5;
+
+            let simplex = [];
+            simplex.push({ x: x0.slice(), f: fn(x0) });
+            for (let i = 0; i < n; i++) {
+                const point = x0.slice();
+                const step = (point[i] !== 0) ? 0.05 * point[i] : 0.00025;
+                point[i] += step;
+                simplex.push({ x: point, f: fn(point) });
+            }
+
+            for (let iter = 0; iter < maxIter; iter++) {
+                simplex.sort((a, b) => a.f - b.f);
+                const fBest = simplex[0].f;
+                const fWorst = simplex[n].f;
+                if (Math.abs(fWorst - fBest) < tol) break;
+
+                const centroid = new Array(n).fill(0);
+                for (let i = 0; i < n; i++) {
+                    for (let j = 0; j < n; j++) centroid[j] += simplex[i].x[j];
+                }
+                for (let j = 0; j < n; j++) centroid[j] /= n;
+
+                const worst = simplex[n];
+                const xr = new Array(n);
+                for (let j = 0; j < n; j++) xr[j] = centroid[j] + alpha * (centroid[j] - worst.x[j]);
+                const fr = fn(xr);
+
+                if (fr < simplex[0].f) {
+                    const xe = new Array(n);
+                    for (let j = 0; j < n; j++) xe[j] = centroid[j] + gamma * (xr[j] - centroid[j]);
+                    const fe = fn(xe);
+                    simplex[n] = (fe < fr) ? { x: xe, f: fe } : { x: xr, f: fr };
+                } else if (fr < simplex[n - 1].f) {
+                    simplex[n] = { x: xr, f: fr };
+                } else {
+                    const xc = new Array(n);
+                    for (let j = 0; j < n; j++) xc[j] = centroid[j] + rho * (worst.x[j] - centroid[j]);
+                    const fc = fn(xc);
+                    if (fc < worst.f) {
+                        simplex[n] = { x: xc, f: fc };
+                    } else {
+                        const best = simplex[0].x;
+                        for (let i = 1; i <= n; i++) {
+                            const xs = new Array(n);
+                            for (let j = 0; j < n; j++) xs[j] = best[j] + sigma * (simplex[i].x[j] - best[j]);
+                            simplex[i] = { x: xs, f: fn(xs) };
+                        }
+                    }
+                }
+            }
+
+            simplex.sort((a, b) => a.f - b.f);
+            return simplex[0].x;
+        }
+
+        function snipBackground(y, iterations = 40) {
+            let bg = [...y]; let n = bg.length;
+            let maxIter = Math.min(iterations, Math.floor(n / 2) - 1);
+            if (maxIter < 1) return new Array(n).fill(0);
+            for (let p = 1; p <= maxIter; p++) {
+                let temp = [...bg];
+                for (let i = p; i < n - p; i++) {
+                    let val = (temp[i - p] + temp[i + p]) / 2.0; if (val < bg[i]) bg[i] = val;
+                }
+            }
+            return bg;
+        }
+
+        function updateChartCanvas() {
+            const datasetKeys = Object.keys(persistentDatasets); const dataKeysWithoutFits = datasetKeys.filter(k => !k.startsWith("__fit_"));
+            document.getElementById('status-display').innerHTML = `Active spectra loaded: <b>${dataKeysWithoutFits.length}</b>`;
+            if (datasetKeys.length === 0) { renderPlaceholderCanvas(); return; }
+            const tooltipEnabled = document.getElementById('toggle-tooltip').checked; const traces = [];
+            traceIndexByKey = {};
+            datasetKeys.forEach(key => {
+                const data = persistentDatasets[key]; const isFitCurve = key.startsWith("__fit_");
+                // Honor the layer checkbox: unchecked raw spectra are hidden.
+                if (!isFitCurve && !key.startsWith("__ref_")) {
+                    const cbEl = document.getElementById('fit-check-' + key);
+                    if (cbEl && !cbEl.checked) return;
+                }
+                let lineConfig = { width: 1.5 };
+                if (key.startsWith("__fit_composite")) lineConfig = { width: 2.0, dash: 'solid' };
+                else if (isFitCurve) lineConfig = { width: 1.2, dash: 'dot' };
+                traceIndexByKey[key] = traces.length;
+                traces.push({
+                    x: data.angles, y: data.intensities, type: 'scatter', mode: 'lines', name: data.label, line: lineConfig,
+                    hoverinfo: tooltipEnabled ? 'all' : 'none', hovertemplate: tooltipEnabled ? '%{y:.4f} abs.<extra></extra>' : null
+                });
+            });
+            const verticalShapes = peakGuessesX.map(x_g => ({
+                type: 'line', xref: 'x', yref: 'paper', x0: x_g, y0: 0, x1: x_g, y1: 1, line: { color: '#d63384', width: 1.5, dash: 'dashdot' }
+            }));
+            const layout = {
+                title: { text: 'FTIR Spectra', font: { size: 15, family: 'Arial, sans-serif', weight: 'bold' } },
+                xaxis: {
+                    title: 'Wavenumber (cm⁻¹)', autorange: 'reversed', showgrid: true, gridcolor: '#e9ecef', ticks: 'outside', showspikes: true, spikemode: 'across', spikethickness: 1.0,
+                    spikedash: tooltipEnabled ? 'solid' : 'dash', spikecolor: tooltipEnabled ? '#495057' : '#dc3545'
+                },
+                yaxis: { title: 'Absorbance', showgrid: true, gridcolor: '#e9ecef', ticks: 'outside' },
+                hovermode: tooltipEnabled ? 'x unified' : 'x', template: 'plotly_white', legend: { orientation: 'h', yanchor: 'bottom', y: 1.02, xanchor: 'right', x: 1 },
+                margin: { l: 60, r: 30, t: 80, b: 50 }, shapes: verticalShapes
+            };
+            Plotly.newPlot('chart-container', traces, layout, { responsive: true, displaylogo: false });
+
+            const chartDiv = document.getElementById('chart-container');
+            chartDiv.on('plotly_hover', function(data) {
+                if (data && data.points && data.points.length > 0) {
+                    currentMouseHoverX = data.points[0].x; document.getElementById('cursor-bar').innerHTML = `Cursor Position: Wavenumber = <b>${currentMouseHoverX.toFixed(2)} cm⁻¹</b>`;
+                }
+            });
+            chartDiv.on('plotly_unhover', function() { currentMouseHoverX = null; document.getElementById('cursor-bar').innerHTML = `Cursor Position: Wavenumber = --`; });
+            chartDiv.on('plotly_click', function(plotlyData) {
+                if (normalizationModeActive && plotlyData && plotlyData.points && plotlyData.points.length > 0) {
+                    const xClick = plotlyData.points[0].x;
+                    let windowSize = parseFloat(document.getElementById('norm-span-input').value);
+                    if (isNaN(windowSize) || windowSize <= 0) { windowSize = 10; document.getElementById('norm-span-input').value = "10"; }
+
+                    const datasetKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_"));
+                    let willNormalize = false;
+                    datasetKeys.forEach(key => {
+                        const dataset = persistentDatasets[key]; let globalMax = -Infinity; let localPeakMax = -Infinity;
+                        for (let i = 0; i < dataset.angles.length; i++) {
+                            if (dataset.intensities[i] > globalMax) globalMax = dataset.intensities[i];
+                            if (dataset.angles[i] >= xClick - windowSize && dataset.angles[i] <= xClick + windowSize) {
+                                if (dataset.intensities[i] > localPeakMax) localPeakMax = dataset.intensities[i];
+                            }
+                        }
+                        if (localPeakMax > 0 && localPeakMax !== -Infinity && localPeakMax >= (0.05 * globalMax)) willNormalize = true;
+                    });
+                    if (willNormalize) saveToHistory();
+
+                    let normalizedAny = false;
+                    datasetKeys.forEach(key => {
+                        const dataset = persistentDatasets[key]; let globalMax = -Infinity; let localPeakMax = -Infinity;
+                        for (let i = 0; i < dataset.angles.length; i++) {
+                            if (dataset.intensities[i] > globalMax) globalMax = dataset.intensities[i];
+                            if (dataset.angles[i] >= xClick - windowSize && dataset.angles[i] <= xClick + windowSize) {
+                                if (dataset.intensities[i] > localPeakMax) localPeakMax = dataset.intensities[i];
+                            }
+                        }
+                        if (localPeakMax > 0 && localPeakMax !== -Infinity && localPeakMax >= (0.05 * globalMax)) {
+                            for (let i = 0; i < dataset.intensities.length; i++) dataset.intensities[i] = dataset.intensities[i] / localPeakMax;
+                            normalizedAny = true;
+                        }
+                    });
+                    if (normalizedAny) { clearFittedModelsCache(); updateChartCanvas(); }
+                    normalizationModeActive = false; const btn = document.getElementById('btn-normalize-toggle');
+                    btn.innerText = "⚖️ Normalize to Peak"; btn.classList.remove('active');
+                }
+            });
+        }
+
+        function renderPlaceholderCanvas() {
+            const layout = {
+                xaxis: { title: 'Wavenumber (cm⁻¹)', range: [4000, 400], gridcolor: '#f1f3f5' }, yaxis: { title: 'Absorbance', range: [0, 1], gridcolor: '#f1f3f5' },
+                template: 'plotly_white', margin: { l: 60, r: 30, t: 40, b: 50 },
+                annotations: [{ text: "No spectra loaded. Use the control panel to browse files.", xref: "paper", yref: "paper", x: 0.5, y: 0.5, showarrow: false, font: { size: 14, color: "#6c757d", italic: true } }]
+            };
+            Plotly.newPlot('chart-container', [], layout, { responsive: true, displaylogo: false });
+        }
+
+        function cropToView() {
+            const datasetKeys = Object.keys(persistentDatasets); if (datasetKeys.length === 0) return;
+            const chartDiv = document.getElementById('chart-container'); let range = chartDiv.layout.xaxis.range;
+            if (!range && chartDiv._fullLayout && chartDiv._fullLayout.xaxis) range = chartDiv._fullLayout.xaxis.range; if (!range || range.length < 2) return;
+            const xmin = Math.min(range[0], range[1]); const xmax = Math.max(range[0], range[1]);  // axis is reversed for FTIR
+
+            saveToHistory(); clearFittedModelsCache();
+            datasetKeys.forEach(key => {
+                if (key.startsWith("__fit_")) { delete persistentDatasets[key]; return; }
+                const dataset = persistentDatasets[key]; const newAngles = []; const newIntensities = [];
+                for (let i = 0; i < dataset.angles.length; i++) {
+                    const currentAngle = dataset.angles[i]; if (currentAngle >= xmin && currentAngle <= xmax) { newAngles.push(currentAngle); newIntensities.push(dataset.intensities[i]); }
+                }
+                dataset.angles = newAngles; dataset.intensities = newIntensities;
+            });
+            refreshCheckboxTargetsPanel(); updateChartCanvas(); Plotly.relayout('chart-container', { 'xaxis.autorange': true, 'yaxis.autorange': true });
+        }
+
+        function handleTooltipToggle() {
+            const tooltipEnabled = document.getElementById('toggle-tooltip').checked;
+            if (Object.keys(persistentDatasets).length > 0) {
+                Plotly.relayout('chart-container', { hovermode: tooltipEnabled ? 'x unified' : 'x', 'xaxis.spikedash': tooltipEnabled ? 'solid' : 'dash', 'xaxis.spikecolor': tooltipEnabled ? '#495057' : '#dc3545' });
+                Plotly.restyle('chart-container', { hoverinfo: tooltipEnabled ? 'all' : 'none', hovertemplate: tooltipEnabled ? '%{y:.4f} abs.<extra></extra>' : null });
+            }
+        }
+
+        function exportPlottedToCSV() {
+            const datasetKeys = Object.keys(persistentDatasets); if (datasetKeys.length === 0) return;
+            datasetKeys.forEach(key => {
+                const dataset = persistentDatasets[key]; if (dataset.angles.length === 0) return;
+                let csvString = "Wavenumber (cm-1),Absorbance\n"; for (let i = 0; i < dataset.angles.length; i++) csvString += `${Number(dataset.angles[i]).toFixed(6)},${Number(dataset.intensities[i]).toFixed(4)}\n`;
+                const csvBlob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' }); const virtualUrl = URL.createObjectURL(csvBlob);
+                const downloadAnchor = document.createElement("a");
+                const safeLabel = (dataset.label || key).replace(/[^A-Za-z0-9._-]+/g, "_");
+                const cleanBaseName = key.startsWith("__fit_") ? `fit_${safeLabel}` : `raman_${safeLabel}`;
+                downloadAnchor.setAttribute("href", virtualUrl); downloadAnchor.setAttribute("download", `${cleanBaseName}.csv`);
+                downloadAnchor.style.visibility = 'hidden'; document.body.appendChild(downloadAnchor); downloadAnchor.click(); document.body.removeChild(downloadAnchor); URL.revokeObjectURL(virtualUrl);
+            });
+        }
+
+        function clearFittedModelsCache() {
+            peakGuessesX = []; Object.keys(persistentDatasets).forEach(k => { if(k.startsWith("__fit_")) delete persistentDatasets[k]; });
+            document.querySelector("#results-matrix-sheet tbody").innerHTML = ""; document.getElementById('results-dashboard').style.display = "none";
+        }
+
+        function clearCanvas() {
+            if (Object.keys(persistentDatasets).length > 0) saveToHistory();
+            persistentDatasets = {}; clearFittedModelsCache(); fittingModeActive = false; normalizationModeActive = false;
+            adjustMode = null; adjustArmed = false;
+            document.getElementById('btn-adjust-offset').classList.remove('adjust-on'); document.getElementById('btn-adjust-scale').classList.remove('adjust-on');
+            document.getElementById('btn-fit-toggle').innerText = "🎯 Peak Selection: OFF"; document.getElementById('btn-fit-toggle').classList.remove('active');
+            document.getElementById('btn-normalize-toggle').innerText = "⚖️ Normalize to Peak"; document.getElementById('btn-normalize-toggle').classList.remove('active');
+            document.getElementById('btn-run-fit').style.display = "none"; document.getElementById('cursor-bar').innerHTML = `Cursor Position: Wavenumber = --`;
+            refreshCheckboxTargetsPanel(); updateChartCanvas();
+        }
+    </script>
+</body>
+</html>
