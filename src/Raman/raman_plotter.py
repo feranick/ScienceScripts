@@ -27,7 +27,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "raman-v2026.07.23.1"
+VERSION_TAG = "raman-v2026.07.24.1"
 
 # RRUFF reference database (open Raman spectra of minerals).
 # Data are distributed as per-quality zip archives of two-column .txt files.

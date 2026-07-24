@@ -135,8 +135,9 @@
         <h2>🔬 Raman Spectra Analyzer</h2>
         <p class="info-text">Load spectra (HORIBA LabSpec .h5 or two-column text), isolate regions of interest, and fit bands.</p>
 
-        <label class="btn-upload" for="raman-files">📁 Click to Select File(s)</label>
-        <input type="file" id="raman-files" accept=".h5,.hdf5,.xml,.txt,.csv,.dat,.asc" multiple onchange="handleFileSelections(event)">
+        <button type="button" class="btn-upload" onclick="pickFiles()">📁 Click to Select File(s)</button>
+        <input type="file" id="raman-files" multiple onchange="handleFileSelections(event)">
+        <div style="font-size: 0.72rem; color: #6c757d; margin: -4px 0 2px;">Supported: .h5, .hdf5, .xml, .txt, .csv, .dat, .asc &nbsp;·&nbsp; (or <b>All Files</b>).</div>
 
         <hr style="border: 0; border-top: 1px solid #e9ecef; margin: 3px 0;">
 
@@ -293,7 +294,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "raman-v2026.07.23.1";
+        const VERSION_TAG = "raman-v2026.07.24.1";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -692,6 +693,31 @@
                 persistentDatasets[`__fit_composite_${key}`] = { angles: rawX, intensities: yFitTotal, label: `${labelBase} Total Fit` };
             });
             document.getElementById('results-dashboard').style.display = "block"; refreshCheckboxTargetsPanel(); updateChartCanvas();
+        }
+
+        // Named filter groups mirroring the desktop (tkinter) dialog. Used by the
+        // File System Access API when available (Chrome/Edge); "All Files" is added.
+        const FILE_PICKER_TYPES = [
+            { description: "Raman Datasets (.h5 .xml .txt .csv .dat .asc)", accept: { "application/octet-stream": [".h5", ".hdf5", ".xml", ".txt", ".csv", ".dat", ".asc"] } },
+            { description: "HORIBA LabSpec HDF5 (.h5, .hdf5)", accept: { "application/octet-stream": [".h5", ".hdf5"] } },
+            { description: "HORIBA LabSpec XML (.xml)", accept: { "application/xml": [".xml"] } },
+            { description: "Text / CSV / RRUFF (.txt .csv .dat .asc)", accept: { "text/plain": [".txt", ".csv", ".dat", ".asc"] } }
+        ];
+
+        async function pickFiles() {
+            if (window.showOpenFilePicker) {
+                try {
+                    const handles = await window.showOpenFilePicker({ multiple: true, excludeAcceptAllOption: false, types: FILE_PICKER_TYPES });
+                    const files = [];
+                    for (const h of handles) files.push(await h.getFile());
+                    if (files.length) handleFileSelections({ target: { files: files, value: '' } });
+                    return;
+                } catch (e) {
+                    if (e && e.name === 'AbortError') return;  // user cancelled
+                    // any other error (e.g. unsupported context) -> classic input
+                }
+            }
+            document.getElementById('raman-files').click();
         }
 
         function handleFileSelections(event) {
