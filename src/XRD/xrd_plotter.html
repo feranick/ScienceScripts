@@ -290,7 +290,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "v2026.07.25.3";
+        const VERSION_TAG = "v2026.07.25.4";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -1396,7 +1396,32 @@
 
         // Parse .h5 bytes -> entries[]. Reads intensities too; x/y are empty for
         // peaks-only libraries (the curve is rebuilt on demand by codEntryXY).
+        // A browser tab has a few GB, and h5wasm is wasm32 so its whole address
+        // space caps at 4 GB. Loading a curve library costs three copies: the
+        // ArrayBuffer, the Emscripten MEMFS copy, and — by far the largest — the
+        // JS arrays built per entry. Storing x/y as JS Arrays costs 8 bytes per
+        // element, so a 2.1 GB library needs ~4 GB for those alone and the
+        // renderer is killed mid-loop (Chrome "Aw, Snap!", error code 5, no
+        // console output because the process is gone).
+        //
+        // So: refuse what cannot fit, and above a modest size keep only the
+        // reflections and let codEntryXY rebuild the profile on demand.
+        const COD_MAX_LIBRARY_BYTES   = 1.2e9;   // beyond this, wasm32 cannot hold it
+        const COD_CURVES_MAX_BYTES    = 1.5e8;   // beyond this, drop stored curves
+        const COD_IDB_MAX_BYTES       = 3.0e8;   // beyond this, do not persist
+
         async function codIngestBytes(arrayBuffer) {
+            const bytes = arrayBuffer.byteLength;
+            const mb = (bytes / 1e6).toFixed(0);
+            if (bytes > COD_MAX_LIBRARY_BYTES) {
+                throw new Error(
+                    `library is ${mb} MB — too large for a browser tab. Rebuild it ` +
+                    `peaks-only:\n\n  python build_cod_powder_library.py … ` +
+                    `--peaks-only --max-peaks 60\n\nThat is ~50x smaller and overlays ` +
+                    `are rebuilt from the reflections. The full curve library still ` +
+                    `works in the desktop app.`);
+            }
+            const keepCurves = bytes <= COD_CURVES_MAX_BYTES;
             showInitBanner('⏳ Initializing COD library…', 0);
             await new Promise(r => setTimeout(r, 0));
             try {
@@ -1404,6 +1429,7 @@
                 const h5 = lib.h5, FS = lib.FS;
                 const fsName = `codlib_${Date.now()}.h5`;
                 FS.writeFile(fsName, new Uint8Array(arrayBuffer));
+                arrayBuffer = null;          // let the 1st copy go before we allocate more
                 let f, out = [];
                 try {
                     f = new h5.File(fsName, "r");
@@ -1419,21 +1445,34 @@
                         const pkds = f.get("spectra/" + names[idx] + "/peaks");          // dataset (new) …
                         const inds = f.get("spectra/" + names[idx] + "/intensities");
                         const codId = attrToString(g.attrs["cod_id"]) || names[idx];
+                        // Float32Array rather than Array: a quarter of the memory
+                        // and no boxing. codEntryXY and peakMatchScore both index
+                        // numerically, so a typed array is a drop-in here.
+                        const f32 = v => (v == null ? new Float32Array(0)
+                                                    : (v instanceof Float32Array ? v : Float32Array.from(v)));
                         out.push({
                             name: attrToString(g.attrs["name"]) || names[idx],
                             id: codId,
                             formula: attrToString(g.attrs["formula"]),
                             url: attrToString(g.attrs["url"]) || codUrl(codId),
-                            peaks: pkds ? Array.from(pkds.value) : Array.from(attrToArray(g.attrs["peaks"])),        // … or attr (older)
-                            intensities: inds ? Array.from(inds.value) : Array.from(attrToArray(g.attrs["intensities"])),
-                            x: xds ? Array.from(xds.value) : [],
-                            y: yds ? Array.from(yds.value) : []
+                            peaks: f32(pkds ? pkds.value : attrToArray(g.attrs["peaks"])),
+                            intensities: f32(inds ? inds.value : attrToArray(g.attrs["intensities"])),
+                            // Stored curves are dropped for large libraries; the
+                            // profile is rebuilt from peaks+intensities on overlay.
+                            x: (keepCurves && xds) ? f32(xds.value) : new Float32Array(0),
+                            y: (keepCurves && yds) ? f32(yds.value) : new Float32Array(0)
                         });
                         if (idx % codStep === 0) { showInitBanner(`⏳ Initializing COD library… (${idx}/${names.length})`, idx / names.length); await new Promise(r => setTimeout(r, 0)); }
                     }
                 } finally {
                     try { if (f) f.close(); } catch (e) {}
                     try { FS.unlink(fsName); } catch (e) {}
+                }
+                if (!keepCurves) {
+                    const el = document.getElementById('db-status');
+                    if (el) el.innerText =
+                        `Loaded ${out.length.toLocaleString()} patterns (${mb} MB). ` +
+                        `Curves are rebuilt from reflections on overlay to save memory.`;
                 }
                 return out;
             } finally { hideInitBanner(); }
@@ -1476,8 +1515,14 @@
                     const existing = codLibraries.findIndex(l => l.name === file.name);
                     if (existing >= 0) codLibraries.splice(existing, 1);
                     codLibraries.push({ name: file.name, key, entries, active: true });
-                    try { await idbSaveKey(key, buf); } catch (e) {}
-                } catch (err) { statusEl.innerText = "Could not open " + file.name + ": " + err.message; }
+                    if (buf.byteLength <= COD_IDB_MAX_BYTES) {
+                        try { await idbSaveKey(key, buf); } catch (e) {}
+                    }   // a multi-hundred-MB blob would blow the quota and cost another copy
+                } catch (err) {
+                    statusEl.innerText = "Could not open " + file.name + ": " + err.message;
+                    // a size refusal deserves the full explanation, not a one-liner
+                    if (/too large for a browser tab/.test(err.message)) alert(err.message);
+                }
             }
             await codSaveIndex();
             refreshCodLibsPanel(); updateCodPanelState();
@@ -1621,7 +1666,9 @@
                 const entries = await codIngestBytes(res.buffer);
                 const key = "rod_lib_server_" + o.name;
                 codLibraries.push({ name: o.name, key, entries, active: true });
-                try { await idbSaveKey(key, res.buffer); } catch (e) {}
+                if (res.buffer.byteLength <= COD_IDB_MAX_BYTES) {
+                        try { await idbSaveKey(key, res.buffer); } catch (e) {}
+                    }
                 await codSaveIndex();
                 o.loaded = true;
                 refreshCodLibsPanel(); updateCodPanelState();
