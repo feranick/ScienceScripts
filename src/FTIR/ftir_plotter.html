@@ -213,83 +213,46 @@
 
         <div class="status-badge" id="status-display">Active spectra loaded: 0</div>
 
-        <div class="rruff-panel" id="rruff-panel" style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 6px;">
-            <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">💎 RRUFF (infrared)</label>
-            <p class="info-text" id="rruff-intro" style="margin: 0;">Open a RRUFF infrared .h5 library or a local folder to search, overlay, and match — fully offline.</p>
-            <div id="rruff-loaded-note">✅ Library loaded</div>
-            <div id="rruff-offer" style="display:none; align-items:center; gap:6px; border:1px dashed #badbcc; border-radius:6px; padding:6px; background:#f6fbf8;"></div>
+        <div class="rruff-panel" id="db-panel" style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 7px;">
+            <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">🔬 Reference Databases</label>
 
-            <div id="rruff-search-group" style="display: flex; flex-direction: column; gap: 6px;">
-                <div style="display: flex; gap: 4px; align-items: center;">
-                    <input type="text" id="rruff-query" placeholder="mineral or RRUFF ID (e.g. Quartz)" style="flex-grow: 1; padding: 8px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.82rem;">
-                    <button class="btn-crop" style="width: auto; padding: 8px 10px;" onclick="rruffSearch()">🔍</button>
-                </div>
-                <select id="rruff-results" size="4" style="width: 100%; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.8rem; padding: 4px;"></select>
-                <button class="btn-ref-sub" onclick="rruffOverlaySelected()">➕ Overlay Selected Reference</button>
-            </div>
-
-            <div id="rruff-match-group" style="display: flex; flex-direction: column; gap: 6px;">
-                <div style="display: flex; align-items: center; gap: 4px; font-size: 0.8rem; color: #495057;">
-                    <span>Match tol. ±</span>
-                    <input type="number" id="rruff-match-tol" value="8" step="1" min="1" style="width: 52px; padding: 6px; border: 1px solid #ced4da; border-radius: 6px;">
-                    <span>cm⁻¹</span>
-                </div>
-                <button class="btn-fit-toggle" style="background-color:#6f42c1;" onclick="rruffMatchByPeaks()">🎯 Match by Selected Peaks</button>
-            </div>
-
-            <div id="rruff-load-group" style="display: flex; flex-direction: column; gap: 6px;">
-                <label class="btn-crop" for="rruff-folder" style="text-align: center; cursor: pointer;">📂 Load Local RRUFF Folder</label>
-                <input type="file" id="rruff-folder" webkitdirectory directory multiple style="display:none;" onchange="loadRruffFolder(event)">
-                <label class="btn-crop" for="rruff-h5" style="text-align: center; cursor: pointer;">📚 Open RRUFF .h5 Library</label>
-                <input type="file" id="rruff-h5" accept=".h5,.hdf5" style="display:none;" onchange="loadRruffLibrary(event)">
-                <button class="btn-crop" style="font-size: 0.72rem; padding: 5px;" onclick="forgetSavedLibrary()">🗑 Forget saved library</button>
-            </div>
-
-            <div id="rruff-status" style="font-size: 0.78rem; color: #6c757d;">Load a library below. To match: turn on Peak Selection, right-click to mark peaks, then Match.</div>
-        </div>
-
-        <div class="rruff-panel" id="lib-panel" style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 6px;">
-            <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">&#128300; Reference Libraries (Open Specy)</label>
-            <p class="info-text" id="lib-intro" style="margin: 0;">Open one or more .h5 libraries built by <code>build_openspecy_library.py --only ftir</code> (polymers &amp; organics, CC-BY) to search, overlay, and match &mdash; fully offline.</p>
-            <div id="lib-loaded-note">&#9989; Library loaded</div>
-            <div id="lib-libs" style="display:flex; flex-direction:column; gap:2px;"></div>
-            <div id="lib-offers" style="display:none; flex-direction:column; gap:3px; border:1px dashed #b6d4fe; border-radius:6px; padding:6px; background:#f8fbff;"></div>
-
-            <div id="lib-match-group" style="display: flex; flex-direction: column; gap: 6px;">
-                <div style="display: flex; align-items: center; gap: 6px;">
-                    <label style="font-size: 0.8rem; color: #495057;">Match tol (cm&#8315;&#185;):</label>
-                    <input type="number" id="lib-match-tol" value="12" step="1" min="1" style="width: 56px; padding: 6px; border: 1px solid #ced4da; border-radius: 6px;">
-                </div>
-                <button class="btn-fit-toggle" style="background-color:#0d6efd;" onclick="libMatchByPeaks()">&#127919; Match by Selected Peaks (Libraries)</button>
-            </div>
-
-            <div id="lib-search-group" style="display: flex; flex-direction: column; gap: 6px;">
-                <div style="display: flex; gap: 6px;">
-                    <input type="text" id="lib-query" placeholder="name or collection (e.g. polyethylene, SLoPP)" style="flex-grow: 1; padding: 8px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.82rem;">
-                    <button class="btn-crop" style="width: auto; padding: 8px 10px;" onclick="libSearch()">&#128269;</button>
-                </div>
-                <select id="lib-results" size="4" style="width: 100%; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.8rem; padding: 4px;"></select>
-                <button class="btn-ref-sub" onclick="libOverlaySelected()">&#10133; Overlay Selected Reference</button>
-            </div>
-
-            <div id="lib-load-group" style="display: flex; flex-direction: column; gap: 6px;">
-                <label class="btn-crop" for="lib-h5" style="text-align: center; cursor: pointer;">&#128218; Add .h5 Library</label>
-                <input type="file" id="lib-h5" accept=".h5,.hdf5" multiple style="display:none;" onchange="addSpecLibrary(event)">
-            </div>
-
-            <div id="lib-status" style="font-size: 0.78rem; color: #6c757d;">Open an .h5 library. To match: turn on Peak Selection, right-click to mark bands, then Match.</div>
-        </div>
-
-        <div class="rruff-panel" id="sdbs-panel" style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 6px;">
-            <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">&#128279; SDBS (organic compounds)</label>
-            <p class="info-text" style="margin: 0;">Opens SDBS in a new tab. Download an FT-IR spectrum there, then load the .jdx with &#128193; Load Spectra. SDBS does not permit automated downloads.</p>
             <div style="display: flex; gap: 6px;">
-                <input type="text" id="sdbs-query" placeholder="compound name, formula or CAS" style="flex-grow: 1; padding: 8px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.82rem;">
-                <button class="btn-crop" style="width: auto; padding: 8px 10px;" onclick="sdbsLookup()">&#128279;</button>
+                <input type="text" id="db-query" placeholder="name, formula or collection" style="flex-grow: 1; padding: 8px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.82rem;">
+                <button class="btn-crop" style="width: auto; padding: 8px 10px;" onclick="dbSearch()">🔍</button>
             </div>
-            <div id="sdbs-status" style="font-size: 0.78rem; color: #6c757d;"></div>
-        </div>
 
+            <div id="db-sources" style="display: flex; flex-direction: column; gap: 2px;"></div>
+            <div id="db-offers" style="display: none; flex-direction: column; gap: 3px; border: 1px dashed #b6d4fe; border-radius: 6px; padding: 6px; background: #f8fbff;"></div>
+
+            <div id="db-results" style="display: none; flex-direction: column; max-height: 168px; overflow-y: auto; border: 1px solid #ced4da; border-radius: 6px;"></div>
+
+            <div style="display: flex; gap: 6px; align-items: center;">
+                <button class="btn-ref-sub" style="flex: 1; padding: 8px;" onclick="dbOverlaySelected()">➕ Overlay</button>
+                <button class="btn-fit-toggle" style="flex: 1; padding: 8px; background-color:#0d6efd;" onclick="dbMatchByPeaks()">🎯 Match</button>
+                <input type="number" id="db-match-tol" value="12" step="1" min="1" title="Match tolerance (cm⁻¹)" style="width: 48px; padding: 7px 4px; border: 1px solid #ced4da; border-radius: 6px; text-align: center;">
+            </div>
+
+            <div id="db-status" style="font-size: 0.78rem; color: #6c757d;">Add a library below, then search. To match: turn on Peak Selection, right-click to mark bands, then Match.</div>
+
+            <div style="border-top: 1px solid #e9ecef; padding-top: 6px; display: flex; align-items: center; gap: 6px;">
+                <span style="flex: 1; font-size: 0.78rem; color: #6c757d;">Manage sources</span>
+                <button class="btn-crop" id="db-manage-toggle" style="width: auto; padding: 3px 9px; font-size: 0.75rem;" onclick="dbToggleManage()">▾</button>
+            </div>
+
+            <div id="db-manage" style="display: none; flex-direction: column; gap: 6px;">
+                <label class="btn-crop" for="db-h5" style="text-align: center; cursor: pointer; font-size: 0.8rem;">📚 Add .h5 librar(ies)</label>
+                <input type="file" id="db-h5" accept=".h5,.hdf5" multiple style="display:none;" onchange="addDbLibrary(event)">
+                <label class="btn-crop" for="rruff-folder" style="text-align: center; cursor: pointer; font-size: 0.8rem;">📂 Load local RRUFF folder</label>
+                <input type="file" id="rruff-folder" webkitdirectory directory multiple style="display:none;" onchange="loadRruffFolder(event)">
+                <button class="btn-crop" style="font-size: 0.75rem; padding: 5px;" onclick="forgetSavedLibrary()">🗑 Forget saved RRUFF library</button>
+                <div style="border-top: 1px dashed #e9ecef; padding-top: 6px;">
+                    <div style="font-size: 0.78rem; color: #495057; font-weight: bold; margin-bottom: 4px;">🔗 SDBS (organic compounds)</div>
+                    <p class="info-text" style="margin: 0 0 4px;">Opens SDBS in a new tab; download an FT-IR spectrum there and load the .jdx. SDBS does not permit automated downloads.</p>
+                    <button class="btn-crop" style="font-size: 0.78rem; padding: 6px;" onclick="sdbsLookup()">🔗 Look up in SDBS</button>
+                    <div id="sdbs-status" style="font-size: 0.75rem; color: #6c757d; margin-top: 4px;"></div>
+                </div>
+            </div>
+        </div>
         <div class="checkbox-container" style="flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 5px; width: 100%;">
             <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">📋 Plotted Spectra Layers:</label>
             <div id="fit-targets-panel" style="width: 100%; max-height: 140px; overflow-y: auto; border: 1px solid #ced4da; border-radius: 6px; background-color: #fff; padding: 8px; box-sizing: border-box;">
@@ -318,17 +281,6 @@
         </div>
     </div>
 
-    <div id="rruff-match-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
-        <div style="background: white; padding: 22px; border-radius: 8px; width: 560px; max-height: 82vh; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
-            <h3 style="margin: 0; color: #6f42c1; font-size: 1.1rem;">🎯 RRUFF Search &amp; Match</h3>
-            <p class="info-text" id="rruff-match-subtitle" style="margin: 0;"></p>
-            <div id="rruff-match-list" style="width: 100%; max-height: 320px; overflow-y: auto; padding: 6px; border: 1px solid #ced4da; border-radius: 6px; box-sizing: border-box;"></div>
-            <div style="display: flex; justify-content: flex-end; gap: 8px;">
-                <button class="btn-crop" style="width: auto; padding: 8px 14px; margin: 0;" onclick="closeRruffMatchModal()">Close</button>
-                <button class="btn-ref-sub" style="width: auto; padding: 8px 14px; margin: 0;" onclick="rruffOverlayMatches()">➕ Overlay Selected Match(es)</button>
-            </div>
-        </div>
-    </div>
 
     <div id="lib-match-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
         <div style="background: white; padding: 22px; border-radius: 8px; width: 620px; max-height: 82vh; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
@@ -337,7 +289,7 @@
             <div id="lib-match-list" style="width: 100%; max-height: 320px; overflow-y: auto; padding: 6px; border: 1px solid #ced4da; border-radius: 6px; box-sizing: border-box;"></div>
             <div style="display: flex; justify-content: flex-end; gap: 8px;">
                 <button class="btn-crop" style="width: auto; padding: 8px 14px; margin: 0;" onclick="closeLibMatchModal()">Close</button>
-                <button class="btn-ref-sub" style="width: auto; padding: 8px 14px; margin: 0;" onclick="libOverlayMatches()">&#10133; Overlay Selected Match(es)</button>
+                <button class="btn-ref-sub" style="width: auto; padding: 8px 14px; margin: 0;" onclick="dbOverlayMatches()">&#10133; Overlay Selected Match(es)</button>
             </div>
         </div>
     </div>
@@ -382,8 +334,7 @@
             // Auto-load the library independently of the chart/Plotly readiness,
             // so a server-hosted rruff_ir_library.h5 loads even if the Plotly
             // CDN is slow or blocked.
-            tryAutoLoadLibrary().catch(function () {})
-                .then(function () { return tryAutoLoadSpecLibraries().catch(function () {}); });
+            dbInit().catch(function () {});
 
             const startChart = function () {
                 renderPlaceholderCanvas();
@@ -925,11 +876,12 @@
                 return { name, id, file: f };
             });
             rruffLibrary = [];  // folder takes precedence
-            const statusEl = document.getElementById('rruff-status');
+            const statusEl = document.getElementById('db-status');
             statusEl.innerText = rruffLocalFiles.length
                 ? `Local RRUFF folder: ${rruffLocalFiles.length} spectra. Search or Match by peaks.`
                 : "No .txt spectra found in that folder.";
             updateRruffPanelState();
+            if (typeof dbRefresh === 'function') dbRefresh();
             event.target.value = '';
         }
 
@@ -996,9 +948,10 @@
                 }
                 rruffLibrary = out;
                 rruffLocalFiles = [];  // library takes precedence
-                document.getElementById('rruff-status').innerText =
+                document.getElementById('db-status').innerText =
                     `RRUFF library${sourceLabel ? ' (' + sourceLabel + ')' : ''}: ${out.length} spectra (precomputed peaks). Search or Match.`;
                 updateRruffPanelState();
+                if (typeof dbRefresh === 'function') dbRefresh();
                 return out.length;
             } finally {
                 hideInitBanner();
@@ -1009,7 +962,7 @@
             const file = event.target.files && event.target.files[0];
             event.target.value = '';
             if (!file) return;
-            const statusEl = document.getElementById('rruff-status');
+            const statusEl = document.getElementById('db-status');
             statusEl.innerText = "Loading RRUFF .h5 library ...";
             try {
                 const buf = await file.arrayBuffer();
@@ -1066,7 +1019,7 @@
             try { await idbClear(); } catch (e) { /* ignore */ }
             rruffLibrary = [];
             updateRruffPanelState();
-            document.getElementById('rruff-status').innerText = "Saved library cleared. Load a folder (📂) or an .h5 library (📚).";
+            document.getElementById('db-status').innerText = "Saved library cleared. Load a folder (📂) or an .h5 library (📚).";
         }
 
         // Fetch an ArrayBuffer with a timeout and (when possible) streamed
@@ -1107,11 +1060,19 @@
         let rruffServerOffer = null;
 
         function renderRruffOffer() {
-            const host = document.getElementById('rruff-offer'); if (!host) return;
-            host.innerHTML = "";
-            if (!rruffServerOffer || rruffServerOffer.loaded) { host.style.display = 'none'; return; }
+            // Shares the unified panel's offer box with library offers, so
+            // append rather than clobber.
+            const host = document.getElementById('db-offers'); if (!host) return;
+            Array.from(host.querySelectorAll('[data-rruff-offer]')).forEach(n => n.remove());
+            if (!rruffServerOffer || rruffServerOffer.loaded) {
+                if (!host.children.length) host.style.display = 'none';
+                return;
+            }
             host.style.display = 'flex';
             const o = rruffServerOffer;
+            const wrap = document.createElement('div');
+            wrap.setAttribute('data-rruff-offer', '1');
+            wrap.style.display = 'flex'; wrap.style.alignItems = 'center'; wrap.style.gap = '6px';
             const lbl = document.createElement('span');
             lbl.style.flex = '1'; lbl.style.fontSize = '0.78rem'; lbl.style.overflow = 'hidden';
             lbl.style.textOverflow = 'ellipsis'; lbl.style.whiteSpace = 'nowrap';
@@ -1123,13 +1084,13 @@
             btn.innerText = o.busy ? '\u2026' : 'Load';
             btn.disabled = !!o.busy;
             btn.onclick = loadRruffServerLibrary;
-            host.appendChild(lbl); host.appendChild(btn);
+            wrap.appendChild(lbl); wrap.appendChild(btn); host.appendChild(wrap);
         }
 
         async function loadRruffServerLibrary() {
             const o = rruffServerOffer;
             if (!o || o.loaded || o.busy) return;
-            const statusEl = document.getElementById('rruff-status');
+            const statusEl = document.getElementById('db-status');
             o.busy = true; renderRruffOffer();
             showInitBanner('\u23F3 Downloading RRUFF library\u2026');
             try {
@@ -1142,6 +1103,7 @@
                 await ingestLibraryBytes(res.buffer, 'from server');
                 try { await idbSaveLibrary(res.buffer); } catch (e) { /* persistence optional */ }
                 o.loaded = true;
+                if (typeof dbRefresh === 'function') dbRefresh();
             } catch (err) {
                 if (statusEl) statusEl.innerText = `Could not load ${o.name}: ${err.message}`;
             } finally {
@@ -1151,7 +1113,7 @@
         }
 
         async function tryAutoLoadLibrary() {
-            const statusEl = document.getElementById('rruff-status');
+            const statusEl = document.getElementById('db-status');
             // 1) Restore a library you opened before.
             try {
                 const saved = await idbLoadLibrary();
@@ -1256,7 +1218,7 @@
         }
         async function addSpecLibrary(event) {
             const files = Array.from(event.target.files || []); event.target.value = '';
-            const statusEl = document.getElementById('lib-status');
+            const statusEl = document.getElementById('db-status');
             for (const file of files) {
                 statusEl.innerText = `Loading ${file.name} …`;
                 try {
@@ -1303,7 +1265,7 @@
             panel.classList.toggle('lib-loaded', loaded);
             const note = document.getElementById('lib-loaded-note');
             if (note && loaded) note.innerText = `✅ ${active.length}/${specLibraries.length} librar(ies) active — ${total} spectra`;
-            const statusEl = document.getElementById('lib-status');
+            const statusEl = document.getElementById('db-status');
             if (statusEl && loaded) statusEl.innerText = `${active.length}/${specLibraries.length} active · ${total} spectra. Search or Match.`;
         }
 
@@ -1315,26 +1277,6 @@
             return `${src}: ${rec.name}` + (rec.id ? ` (${rec.id})` : '');
         }
 
-        function libSearch() {
-            const q = document.getElementById('lib-query').value.trim();
-            const statusEl = document.getElementById('lib-status');
-            const resultsEl = document.getElementById('lib-results');
-            resultsEl.innerHTML = ""; libHits = [];
-            const pool = libActiveEntries();
-            if (!pool.length) { statusEl.innerText = "No active library. Add one (📚) or tick a library above."; return; }
-            const ql = q.toLowerCase();
-            const hits = pool.filter(e => !ql || libHaystack(e).includes(ql)).slice(0, 300);
-            if (!hits.length) { statusEl.innerText = "No matches."; return; }
-            libHits = hits;
-            hits.forEach((h, i) => {
-                const opt = document.createElement('option');
-                opt.value = String(i);
-                const extra = h.collection || h.formula || '';
-                opt.innerText = `${h.name} · ${h.id}${extra ? ' · ' + extra : ''}`;
-                resultsEl.appendChild(opt);
-            });
-            statusEl.innerText = `${hits.length} match(es)${hits.length === 300 ? ' (first 300)' : ''}. Select and overlay.`;
-        }
 
         function libRecordToParsed(rec) {
             return {
@@ -1345,84 +1287,11 @@
             };
         }
 
-        function libOverlaySelected() {
-            const resultsEl = document.getElementById('lib-results');
-            const statusEl = document.getElementById('lib-status');
-            const val = resultsEl.value;
-            if (val === '' || !libHits[+val]) { statusEl.innerText = "Select a search result first."; return; }
-            const hit = libHits[+val];
-            if (!hit.x || !hit.x.length) { statusEl.innerText = "That entry has no spectrum data."; return; }
-            const parsed = libRecordToParsed(hit);
-            saveToHistory(); scaleRefToData(parsed);
-            persistentDatasets[`__ref_lib_${hit.id}`] = parsed;
-            refreshCheckboxTargetsPanel(); updateChartCanvas();
-            statusEl.innerText = `Overlaid ${hit.name} (${hit.id}).`;
-        }
 
-        function libMatchByPeaks() {
-            const statusEl = document.getElementById('lib-status');
-            if (!peakGuessesX.length) {
-                alert("Mark bands first: turn on '🎯 Peak Selection', then right-click on the plot to mark them.");
-                return;
-            }
-            const pool = libActiveEntries();
-            if (!pool.length) { alert("Add or activate an .h5 library first."); return; }
-            let tol = parseFloat(document.getElementById('lib-match-tol').value); if (isNaN(tol)) tol = 12;
-            const q = document.getElementById('lib-query').value.trim().toLowerCase();
-            const exp = peakGuessesX.slice();
-            const scored = [];
-            pool.forEach(e => {
-                if (q && !libHaystack(e).includes(q)) return;
-                if (!e.peaks || !e.peaks.length) return;
-                const s = peakMatchScore(e.peaks, exp, tol);
-                if (s.matched > 0) scored.push({ ...s, name: e.name, id: e.id,
-                    source: e.source, detail: e.collection || e.formula || '', rec: e });
-            });
-            scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
-            statusEl.innerText = `Matched ${scored.length}/${pool.length} references (tol ±${tol} cm⁻¹).`;
-            showLibMatchResults(scored.slice(0, 100), exp.length, tol);
-        }
 
-        function showLibMatchResults(scored, nExp, tol) {
-            const listEl = document.getElementById('lib-match-list'); listEl.innerHTML = "";
-            if (!scored.length) { alert("No library reference had bands near your marked peaks. Try a larger tolerance."); return; }
-            libMatchRecords = scored;
-            document.getElementById('lib-match-subtitle').innerText =
-                `Ranked by alignment with your ${nExp} marked band(s) (±${tol} cm⁻¹). Tick to overlay; ↗ opens the source page.`;
-            scored.forEach((s, i) => {
-                const row = document.createElement('div'); row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px'; row.style.padding = '2px 0';
-                const cb = document.createElement('input'); cb.type = 'checkbox'; cb.className = 'lib-match-cb'; cb.value = String(i); cb.id = `lmatch-${i}`;
-                const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.style.flex = '1'; lbl.style.cursor = 'pointer'; lbl.style.fontFamily = "'Consolas', monospace"; lbl.style.fontSize = '0.82rem';
-                lbl.innerText = `${String(Math.round(s.score)).padStart(3, ' ')}%  ${s.matched}/${nExp}  ${s.name} · ${s.id}${s.detail ? '  ' + s.detail : ''}`;
-                row.appendChild(cb); row.appendChild(lbl);
-                const url = s.rec && s.rec.url;
-                if (url) { const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener'; a.innerText = '↗'; a.title = 'Open source page'; a.style.textDecoration = 'none'; a.style.fontSize = '1rem'; a.style.padding = '0 4px'; row.appendChild(a); }
-                listEl.appendChild(row);
-            });
-            document.getElementById('lib-match-modal').style.display = 'flex';
-        }
 
         function closeLibMatchModal() { document.getElementById('lib-match-modal').style.display = 'none'; }
 
-        function libOverlayMatches() {
-            const chosen = Array.from(document.querySelectorAll('#lib-match-list input.lib-match-cb:checked')).map(cb => +cb.value);
-            if (!chosen.length) { alert("Tick one or more matches to overlay."); return; }
-            closeLibMatchModal(); saveToHistory(); let added = 0;
-            for (const idx of chosen) {
-                const rec = libMatchRecords[idx] && libMatchRecords[idx].rec; if (!rec) continue;
-                try {
-                    const parsed = libRecordToParsed(rec);
-                    if (!parsed.angles.length) continue;
-                    scaleRefToData(parsed);
-                    persistentDatasets[`__ref_lib_${rec.id}_match`] = parsed;
-                    added++;
-                } catch (e) {}
-            }
-            if (added) {
-                refreshCheckboxTargetsPanel(); updateChartCanvas();
-                document.getElementById('lib-status').innerText = `Overlaid ${added} matched reference(s).`;
-            }
-        }
 
         // Work out which .h5 libraries the server is offering, in order of how
         // explicit the instruction is. A browser cannot list a directory, so
@@ -1468,7 +1337,19 @@
             } catch (e) { /* no index / blocked */ }
             if (found.length) return found;
 
-            return [defaultName];                    // 4) convention
+            // 4) convention — probe the whole family, not just one name. With no
+            // manifest and no directory index, only `defaultName` used to be
+            // tried, so a second library next to it was never found.
+            const candidates = (typeof DB_CANDIDATE_LIBRARIES !== 'undefined')
+                ? [defaultName, ...DB_CANDIDATE_LIBRARIES] : [defaultName];
+            const seen = new Set(), hits = [];
+            for (const c of candidates) {
+                const key = c.toLowerCase();
+                if (seen.has(key)) continue;
+                seen.add(key);
+                if (await headSize(c) !== null) hits.push(c);
+            }
+            return hits.length ? hits : [defaultName];
         }
 
         // The single-library RRUFF panel owns its own file; discovering it here
@@ -1506,7 +1387,7 @@
         }
 
         function renderLibOffers() {
-            const host = document.getElementById('lib-offers'); if (!host) return;
+            const host = document.getElementById('db-offers'); if (!host) return;
             const pending = libServerOffers.filter(o => !o.loaded);
             host.innerHTML = "";
             if (!pending.length) { host.style.display = 'none'; return; }
@@ -1553,7 +1434,7 @@
         async function loadSpecServerLibrary(idx) {
             const o = libServerOffers[idx];
             if (!o || o.loaded || o.busy) return;
-            const statusEl = document.getElementById('lib-status');
+            const statusEl = document.getElementById('db-status');
             o.busy = true; renderLibOffers();
             try {
                 const res = await fetchArrayBufferWithProgress(o.url, function (recv, total) {
@@ -1568,6 +1449,7 @@
                 await libSaveIndex();
                 o.loaded = true;
                 refreshLibsPanel(); updateLibPanelState();
+                if (typeof dbRefresh === 'function') dbRefresh();
             } catch (err) {
                 if (statusEl) statusEl.innerText = `Could not load ${o.name}: ${err.message}`;
             } finally {
@@ -1612,7 +1494,7 @@
             }
             renderLibOffers();
             if (libServerOffers.length) {
-                const statusEl = document.getElementById('lib-status');
+                const statusEl = document.getElementById('db-status');
                 if (statusEl && !specLibraries.length) statusEl.innerText =
                     `${libServerOffers.length} librar(ies) available on the server — load one to search and match.`;
             }
@@ -1621,9 +1503,9 @@
         // ---- SDBS: link-out only. Their terms prohibit automated retrieval,
         // so this opens a tab and copies the query; nothing is fetched. ----
         function sdbsLookup() {
-            const el = document.getElementById('sdbs-query');
+            const el = document.getElementById('db-query');
             const statusEl = document.getElementById('sdbs-status');
-            const q = (el && el.value.trim()) || document.getElementById('lib-query').value.trim();
+            const q = (el && el.value.trim()) || document.getElementById('db-query').value.trim();
             window.open(SDBS_SEARCH_URL, '_blank', 'noopener');
             if (q && navigator.clipboard && navigator.clipboard.writeText) {
                 navigator.clipboard.writeText(q).then(
@@ -1634,31 +1516,287 @@
             }
         }
 
-        function rruffSearch() {
-            const q = document.getElementById('rruff-query').value.trim();
-            const statusEl = document.getElementById('rruff-status');
-            const resultsEl = document.getElementById('rruff-results');
-            resultsEl.innerHTML = ""; rruffHits = [];
-            let pool = null;
-            if (rruffLibrary.length) pool = rruffLibrary;
-            else if (rruffLocalFiles.length) pool = rruffLocalFiles;
-            if (!pool) {
-                statusEl.innerText = "No references loaded. Use 📂 (folder of .txt) or 📚 (.h5 library) first.";
+        // ============================================================
+        // Unified reference-database panel
+        //
+        // One search box over every enabled source. Sources are the RRUFF
+        // library or folder plus any number of baked .h5 libraries (ROD,
+        // Open Specy, COD — they share a schema and are told apart by their
+        // `source` attribute). Results merge into one list with a badge per
+        // row, and Match ranks across all enabled sources in a single pass.
+        //
+        // The per-source loaders below are unchanged; this is a front end
+        // over them, so nothing about parsing or scoring moved.
+        // ============================================================
+        let dbHits = [];              // merged search results
+        let dbSelected = -1;          // index into dbHits
+        const dbDisabled = new Set(); // source keys the user unticked
+
+        // Conventional filenames to probe when the server offers no manifest
+        // and no directory index. A HEAD request is cheap, so probing the whole
+        // family beats guessing one name — that is what previously hid
+        // openspecy_raman.h5 when only rod_raman_library.h5 was looked for.
+        const DB_CANDIDATE_LIBRARIES = [
+            "openspecy_ftir.h5", "openspecy_library.h5",
+            "ftir_library.h5",
+            "ir_library.h5", "openspecy_ir.h5"
+        ];
+
+        function dbSourceList() {
+            const out = [];
+            if (rruffLibrary && rruffLibrary.length)
+                out.push({ key: 'rruff-lib', label: 'RRUFF library', kind: 'rruff',
+                           count: rruffLibrary.length, entries: rruffLibrary });
+            if (rruffLocalFiles && rruffLocalFiles.length)
+                out.push({ key: 'rruff-folder', label: 'RRUFF folder', kind: 'folder',
+                           count: rruffLocalFiles.length, entries: rruffLocalFiles });
+            specLibraries.forEach((lib, i) => {
+                const src = (lib.entries[0] && lib.entries[0].source) || 'Library';
+                out.push({ key: 'lib-' + i, label: `${src} — ${lib.name}`, kind: 'lib',
+                           count: lib.entries.length, entries: lib.entries, libIndex: i });
+            });
+            return out;
+        }
+
+        const dbEnabledSources = () => dbSourceList().filter(s => !dbDisabled.has(s.key));
+
+        function dbBadge(kind, entry) {
+            if (kind === 'rruff' || kind === 'folder') return 'RRUFF';
+            const src = (entry && entry.source) || 'LIB';
+            return src === 'OpenSpecy' ? 'SPECY' : src.toUpperCase().slice(0, 6);
+        }
+
+        function renderDbSources() {
+            const host = document.getElementById('db-sources'); if (!host) return;
+            const list = dbSourceList();
+            host.innerHTML = "";
+            if (!list.length) {
+                host.innerHTML = '<div style="font-size:0.78rem; color:#6c757d; font-style:italic;">No sources loaded — add an .h5 library under Manage sources.</div>';
                 return;
             }
-            const ql = q.toLowerCase();
-            const hits = pool.filter(e =>
-                !ql || (`${e.name} ${e.id} ${e.file ? e.file.name : ''}`).toLowerCase().includes(ql)).slice(0, 300);
-            if (!hits.length) { statusEl.innerText = "No matches."; return; }
-            rruffHits = hits;
-            hits.forEach((h, i) => {
-                const opt = document.createElement('option');
-                opt.value = String(i);
-                opt.innerText = `${h.name}${h.id ? ' · ' + h.id : ''}`;
-                resultsEl.appendChild(opt);
+            list.forEach(s => {
+                const row = document.createElement('label');
+                row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px';
+                row.style.fontSize = '0.8rem'; row.style.cursor = 'pointer';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox'; cb.checked = !dbDisabled.has(s.key);
+                cb.style.width = '13px'; cb.style.height = '13px';
+                cb.onchange = () => {
+                    if (cb.checked) dbDisabled.delete(s.key); else dbDisabled.add(s.key);
+                    if (s.kind === 'lib' && specLibraries[s.libIndex]) {
+                        specLibraries[s.libIndex].active = cb.checked;
+                        libSaveIndex();
+                    }
+                    dbUpdateStatus();
+                };
+                const txt = document.createElement('span');
+                txt.style.flex = '1'; txt.style.overflow = 'hidden';
+                txt.style.textOverflow = 'ellipsis'; txt.style.whiteSpace = 'nowrap';
+                txt.title = s.label;
+                txt.innerHTML = `${s.label} <span style="color:#6c757d;">· ${s.count.toLocaleString()}</span>`;
+                row.appendChild(cb); row.appendChild(txt);
+                if (s.kind === 'lib') {
+                    const del = document.createElement('span');
+                    del.innerText = '❌'; del.title = 'Remove this library';
+                    del.style.cursor = 'pointer'; del.style.fontSize = '0.78rem';
+                    del.onclick = (e) => { e.preventDefault(); removeSpecLibrary(s.libIndex); dbRefresh(); };
+                    row.appendChild(del);
+                }
+                host.appendChild(row);
             });
-            statusEl.innerText = `${hits.length} match(es)${hits.length === 300 ? ' (first 300)' : ''}. Select and overlay.`;
         }
+
+        function dbUpdateStatus(msg) {
+            const el = document.getElementById('db-status'); if (!el) return;
+            if (msg) { el.innerText = msg; return; }
+            const on = dbEnabledSources();
+            const all = dbSourceList();
+            if (!all.length) { el.innerText = "Add a library below, then search."; return; }
+            const total = on.reduce((n, s) => n + s.count, 0);
+            el.innerText = `${on.length}/${all.length} source(s) enabled · ${total.toLocaleString()} spectra. Search, or mark peaks and Match.`;
+        }
+
+        function dbRefresh() { renderDbSources(); dbUpdateStatus(); }
+
+        function dbToggleManage() {
+            const box = document.getElementById('db-manage');
+            const btn = document.getElementById('db-manage-toggle');
+            const open = box.style.display === 'flex';
+            box.style.display = open ? 'none' : 'flex';
+            btn.innerText = open ? '▾' : '▴';
+        }
+
+        function dbHaystack(kind, e) {
+            if (kind === 'folder') return `${e.name} ${e.id} ${e.file ? e.file.name : ''}`.toLowerCase();
+            if (kind === 'rruff') return `${e.name} ${e.id}`.toLowerCase();
+            return libHaystack(e);
+        }
+
+        function dbSearch() {
+            const q = document.getElementById('db-query').value.trim().toLowerCase();
+            const resultsEl = document.getElementById('db-results');
+            dbHits = []; dbSelected = -1;
+            const sources = dbEnabledSources();
+            if (!sources.length) { dbUpdateStatus("No sources enabled. Tick one above, or add a library under Manage sources."); return; }
+            for (const s of sources) {
+                for (const e of s.entries) {
+                    if (q && !dbHaystack(s.kind, e).includes(q)) continue;
+                    dbHits.push({ kind: s.kind, srcLabel: s.label, rec: e });
+                    if (dbHits.length >= 400) break;
+                }
+                if (dbHits.length >= 400) break;
+            }
+            resultsEl.innerHTML = "";
+            if (!dbHits.length) {
+                resultsEl.style.display = 'none';
+                dbUpdateStatus(q ? `No matches for "${q}".` : "No entries.");
+                return;
+            }
+            resultsEl.style.display = 'flex';
+            dbHits.forEach((h, i) => {
+                const e = h.rec;
+                const row = document.createElement('div');
+                row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px';
+                row.style.padding = '4px 6px'; row.style.cursor = 'pointer';
+                row.style.borderBottom = '1px solid #f1f3f5'; row.style.fontSize = '0.78rem';
+                row.dataset.idx = String(i);
+                const badge = document.createElement('span');
+                badge.innerText = dbBadge(h.kind, e);
+                badge.style.fontSize = '0.66rem'; badge.style.padding = '1px 5px';
+                badge.style.borderRadius = '4px'; badge.style.background = '#cfe2ff';
+                badge.style.color = '#084298'; badge.style.flexShrink = '0';
+                const name = document.createElement('span');
+                name.style.flex = '1'; name.style.overflow = 'hidden';
+                name.style.textOverflow = 'ellipsis'; name.style.whiteSpace = 'nowrap';
+                const extra = e.formula || e.collection || '';
+                name.innerText = `${e.name}${e.id ? ' · ' + e.id : ''}${extra ? ' · ' + extra : ''}`;
+                name.title = `${h.srcLabel}: ${name.innerText}`;
+                row.appendChild(badge); row.appendChild(name);
+                row.onclick = () => dbSelect(i);
+                row.ondblclick = () => dbOverlaySelected();
+                resultsEl.appendChild(row);
+            });
+            dbSelect(0);
+            dbUpdateStatus(`${dbHits.length} match(es)${dbHits.length >= 400 ? ' (first 400)' : ''} across ${sources.length} source(s). Select and overlay.`);
+        }
+
+        function dbSelect(i) {
+            dbSelected = i;
+            const rows = document.getElementById('db-results').children;
+            for (let k = 0; k < rows.length; k++)
+                rows[k].style.background = (k === i) ? '#e7f1ff' : 'transparent';
+        }
+
+        async function dbOverlaySelected() {
+            if (dbSelected < 0 || !dbHits[dbSelected]) { dbUpdateStatus("Select a search result first."); return; }
+            const h = dbHits[dbSelected];
+            try {
+                const parsed = (h.kind === 'lib') ? libRecordToParsed(h.rec)
+                                                  : await recordToParsed(h.rec);
+                if (!parsed.angles || !parsed.angles.length) { dbUpdateStatus("That entry has no spectrum data."); return; }
+                saveToHistory(); scaleRefToData(parsed);
+                persistentDatasets[`__ref_${h.kind}_${h.rec.name}_${h.rec.id}`] = parsed;
+                refreshCheckboxTargetsPanel(); updateChartCanvas();
+                dbUpdateStatus(`Overlaid ${h.rec.name}${h.rec.id ? ' (' + h.rec.id + ')' : ''}.`);
+            } catch (err) {
+                dbUpdateStatus("Could not read that reference: " + err.message);
+            }
+        }
+
+        async function dbMatchByPeaks() {
+            if (!peakGuessesX.length) {
+                alert("Mark peaks first: turn on '🎯 Peak Selection', then right-click on the plot to mark the bands to match.");
+                return;
+            }
+            const sources = dbEnabledSources();
+            if (!sources.length) { alert("Enable or add at least one source first."); return; }
+            let tol = parseFloat(document.getElementById('db-match-tol').value); if (isNaN(tol)) tol = 12;
+            const q = document.getElementById('db-query').value.trim().toLowerCase();
+            const exp = peakGuessesX.slice();
+            const scored = [];
+            let scanned = 0;
+
+            for (const s of sources) {
+                for (const e of s.entries) {
+                    if (q && !dbHaystack(s.kind, e).includes(q)) continue;
+                    let peaks = e.peaks;
+                    if (s.kind === 'folder') {           // raw .txt — detect on the fly
+                        try {
+                            const parsed = parseTwoColumn(await e.file.text(), e.name);
+                            peaks = detectReferencePeaks(parsed.angles, parsed.intensities);
+                        } catch (err) { continue; }
+                    }
+                    if (!peaks || !peaks.length) continue;
+                    scanned++;
+                    const sc = peakMatchScore(peaks, exp, tol);
+                    if (sc.matched > 0) scored.push({ ...sc, name: e.name, id: e.id,
+                        source: dbBadge(s.kind, e), kind: s.kind, srcLabel: s.label,
+                        detail: e.formula || e.collection || '', rec: e });
+                }
+            }
+            scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
+            dbUpdateStatus(`Matched ${scored.length}/${scanned} references across ${sources.length} source(s) (tol ±${tol} cm⁻¹).`);
+            dbShowMatchResults(scored.slice(0, 100), exp.length, tol);
+        }
+
+        function dbShowMatchResults(scored, nExp, tol) {
+            const listEl = document.getElementById('lib-match-list'); listEl.innerHTML = "";
+            if (!scored.length) { alert("No reference had bands near your marked bands. Try a larger tolerance."); return; }
+            libMatchRecords = scored;
+            document.getElementById('lib-match-subtitle').innerText =
+                `Ranked across every enabled source by alignment with your ${nExp} marked peak(s) (±${tol} cm⁻¹). Tick to overlay; ↗ opens the source page.`;
+            scored.forEach((s, i) => {
+                const row = document.createElement('div');
+                row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px'; row.style.padding = '2px 0';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox'; cb.className = 'lib-match-cb'; cb.value = String(i); cb.id = `dmatch-${i}`;
+                const lbl = document.createElement('label');
+                lbl.htmlFor = cb.id; lbl.style.flex = '1'; lbl.style.cursor = 'pointer';
+                lbl.style.fontFamily = "'Consolas', monospace"; lbl.style.fontSize = '0.8rem';
+                lbl.innerText = `${String(Math.round(s.score)).padStart(3, ' ')}%  ${s.matched}/${nExp}  [${s.source}] ${s.name}${s.id ? ' · ' + s.id : ''}${s.detail ? '  ' + s.detail : ''}`;
+                row.appendChild(cb); row.appendChild(lbl);
+                const url = (s.rec && s.rec.url) || (s.kind !== 'lib' ? rruffUrl(s.name, s.id) : null);
+                if (url) { const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener'; a.innerText = '↗'; a.title = 'Open source page'; a.style.textDecoration = 'none'; a.style.fontSize = '1rem'; a.style.padding = '0 4px'; row.appendChild(a); }
+                listEl.appendChild(row);
+            });
+            document.getElementById('lib-match-modal').style.display = 'flex';
+        }
+
+        async function dbOverlayMatches() {
+            const chosen = Array.from(document.querySelectorAll('#lib-match-list input.lib-match-cb:checked')).map(cb => +cb.value);
+            if (!chosen.length) { alert("Tick one or more matches to overlay."); return; }
+            closeLibMatchModal(); saveToHistory(); let added = 0;
+            for (const idx of chosen) {
+                const s = libMatchRecords[idx]; if (!s || !s.rec) continue;
+                try {
+                    const parsed = (s.kind === 'lib') ? libRecordToParsed(s.rec)
+                                                      : await recordToParsed(s.rec);
+                    if (!parsed.angles || !parsed.angles.length) continue;
+                    scaleRefToData(parsed);
+                    persistentDatasets[`__ref_match_${s.name}_${s.id}`] = parsed;
+                    added++;
+                } catch (e) {}
+            }
+            if (added) {
+                refreshCheckboxTargetsPanel(); updateChartCanvas();
+                dbUpdateStatus(`Overlaid ${added} matched reference(s).`);
+            }
+        }
+
+        // Adding libraries goes through the existing multi-library manager, then
+        // refreshes the unified source list.
+        async function addDbLibrary(event) {
+            await addSpecLibrary(event);
+            dbRefresh();
+        }
+
+
+        async function dbInit() {
+            try { await tryAutoLoadLibrary(); } catch (e) {}
+            try { await tryAutoLoadSpecLibraries(); } catch (e) {}
+            dbRefresh();
+        }
+
 
         // Link to the RRUFF page for a sample (by ID) or mineral (by name).
         function rruffUrl(name, id) {
@@ -1683,23 +1821,6 @@
             return parsed;
         }
 
-        async function rruffOverlaySelected() {
-            const resultsEl = document.getElementById('rruff-results');
-            const statusEl = document.getElementById('rruff-status');
-            const val = resultsEl.value;
-            if (val === '' || !rruffHits[+val]) { statusEl.innerText = "Select a search result first."; return; }
-            const hit = rruffHits[+val];
-            try {
-                const parsed = await recordToParsed(hit);
-                saveToHistory();
-                scaleRefToData(parsed);
-                persistentDatasets[`__ref_${hit.name}_${hit.id}`] = parsed;
-                refreshCheckboxTargetsPanel(); updateChartCanvas();
-                statusEl.innerText = `Overlaid ${hit.name}${hit.id ? ' (' + hit.id + ')' : ''}.`;
-            } catch (err) {
-                statusEl.innerText = "Could not read that reference: " + err.message;
-            }
-        }
 
         // Detect prominent band positions in a reference spectrum (mirrors the
         // Python scipy.find_peaks(prominence, distance) behaviour, scale-free).
@@ -1743,109 +1864,9 @@
             return { score: matched / expPeaks.length * 100, avg: cum / expPeaks.length, matched };
         }
 
-        async function rruffMatchByPeaks() {
-            const statusEl = document.getElementById('rruff-status');
-            if (!peakGuessesX.length) {
-                alert("Mark peaks first: turn on '🎯 Peak Selection', then right-click on the plot to mark the peaks to match.");
-                return;
-            }
-            let tol = parseFloat(document.getElementById('rruff-match-tol').value);
-            if (isNaN(tol)) tol = 12;
-            const q = document.getElementById('rruff-query').value.trim().toLowerCase();
-            const exp = peakGuessesX.slice();
 
-            // Fast path: .h5 library with precomputed peaks -> instant.
-            if (rruffLibrary.length) {
-                const scored = [];
-                rruffLibrary.forEach(e => {
-                    if (q && !(`${e.name} ${e.id}`).toLowerCase().includes(q)) return;
-                    const s = peakMatchScore(e.peaks, exp, tol);
-                    if (s.matched > 0) scored.push({ ...s, name: e.name, id: e.id, rec: e });
-                });
-                scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
-                statusEl.innerText = `Matched ${scored.length}/${rruffLibrary.length} references (tol ±${tol}).`;
-                showRruffMatchResults(scored.slice(0, 100), exp.length, tol);
-                return;
-            }
 
-            // Folder path: read + detect peaks for each .txt.
-            if (!rruffLocalFiles.length) { alert("Load a RRUFF folder (📂) or an .h5 library (📚) first."); return; }
-            let files = rruffLocalFiles;
-            if (q) files = files.filter(f => (`${f.name} ${f.id} ${f.file.name}`).toLowerCase().includes(q));
-            if (!files.length) { alert("No local references match the search filter."); return; }
-            const scored = [];
-            for (let i = 0; i < files.length; i++) {
-                try {
-                    const parsed = parseTwoColumn(await files[i].file.text(), files[i].name);
-                    const rp = detectReferencePeaks(parsed.angles, parsed.intensities);
-                    const s = peakMatchScore(rp, exp, tol);
-                    if (s.matched > 0) scored.push({ ...s, name: files[i].name, id: files[i].id,
-                                                     rec: { name: files[i].name, id: files[i].id, file: files[i].file } });
-                } catch (e) { /* skip unreadable */ }
-                if (i % 50 === 0) { statusEl.innerText = `Matching ${i}/${files.length} ...`; await new Promise(r => setTimeout(r)); }
-            }
-            scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
-            statusEl.innerText = `Matched ${scored.length}/${files.length} references (tol ±${tol}).`;
-            showRruffMatchResults(scored.slice(0, 100), exp.length, tol);
-        }
 
-        function showRruffMatchResults(scored, nExp, tol) {
-            const listEl = document.getElementById('rruff-match-list');
-            listEl.innerHTML = "";
-            if (!scored.length) {
-                alert("No RRUFF reference had bands near your marked peaks. Try a larger tolerance or different peaks.");
-                return;
-            }
-            rruffMatchRecords = scored;
-            document.getElementById('rruff-match-subtitle').innerText =
-                `Ranked by alignment of RRUFF bands with your ${nExp} marked peak(s) (±${tol} cm⁻¹). Tick to overlay; ↗ opens the RRUFF page.`;
-            scored.forEach((s, i) => {
-                const row = document.createElement('div');
-                row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px'; row.style.padding = '2px 0';
-                const cb = document.createElement('input');
-                cb.type = 'checkbox'; cb.className = 'rruff-match-cb'; cb.value = String(i); cb.id = `rmatch-${i}`;
-                const lbl = document.createElement('label');
-                lbl.htmlFor = cb.id; lbl.style.flex = '1'; lbl.style.cursor = 'pointer';
-                lbl.style.fontFamily = "'Consolas', monospace"; lbl.style.fontSize = '0.82rem';
-                const scoreStr = String(Math.round(s.score)).padStart(3, ' ');
-                lbl.innerText = `${scoreStr}%  ${s.matched}/${nExp}  ${s.name}${s.id ? ' · ' + s.id : ''}`;
-                row.appendChild(cb); row.appendChild(lbl);
-                const url = rruffUrl(s.name, s.id);
-                if (url) {
-                    const a = document.createElement('a');
-                    a.href = url; a.target = '_blank'; a.rel = 'noopener';
-                    a.innerText = '↗'; a.title = 'Open RRUFF page';
-                    a.style.textDecoration = 'none'; a.style.fontSize = '1rem'; a.style.padding = '0 4px';
-                    row.appendChild(a);
-                }
-                listEl.appendChild(row);
-            });
-            document.getElementById('rruff-match-modal').style.display = 'flex';
-        }
-
-        function closeRruffMatchModal() { document.getElementById('rruff-match-modal').style.display = 'none'; }
-
-        async function rruffOverlayMatches() {
-            const chosen = Array.from(document.querySelectorAll('#rruff-match-list input.rruff-match-cb:checked')).map(cb => +cb.value);
-            if (!chosen.length) { alert("Tick one or more matches to overlay."); return; }
-            closeRruffMatchModal();
-            saveToHistory();
-            let added = 0;
-            for (const idx of chosen) {
-                const rec = rruffMatchRecords[idx] && rruffMatchRecords[idx].rec;
-                if (!rec) continue;
-                try {
-                    const parsed = await recordToParsed(rec);
-                    scaleRefToData(parsed);
-                    persistentDatasets[`__ref_${rec.name}_${rec.id}_match`] = parsed;
-                    added++;
-                } catch (e) { /* skip */ }
-            }
-            if (added) {
-                refreshCheckboxTargetsPanel(); updateChartCanvas();
-                document.getElementById('rruff-status').innerText = `Overlaid ${added} matched reference(s).`;
-            }
-        }
 
         function scaleRefToData(ref) {
             const dataKeys = Object.keys(persistentDatasets).filter(k => !k.startsWith("__fit_") && !k.startsWith("__ref_"));
