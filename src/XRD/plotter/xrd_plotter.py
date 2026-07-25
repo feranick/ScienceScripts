@@ -47,7 +47,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.07.24.6"
+VERSION_TAG = "v2026.07.25.1"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 # RRUFF powder reference library (patterns calculated for Cu radiation, i.e. the
