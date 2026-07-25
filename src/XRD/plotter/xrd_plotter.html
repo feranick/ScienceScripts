@@ -227,6 +227,7 @@
                 <button class="btn-crop" style="font-size: 0.75rem; padding: 5px;" onclick="forgetSavedLibrary()">🗑 Forget saved RRUFF library</button>
             </div>
         </div>
+        <div class="checkbox-container" style="flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 5px; width: 100%;">
             <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">📋 Plotted Canvas Layers:</label>
             <div id="fit-targets-panel" style="width: 100%; max-height: 140px; overflow-y: auto; border: 1px solid #ced4da; border-radius: 6px; background-color: #fff; padding: 8px; box-sizing: border-box;">
                 <div style="color: #888888; font-size: 0.85rem; font-style: italic;">No Scans Loaded</div>
@@ -289,7 +290,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "v2026.07.25.2";
+        const VERSION_TAG = "v2026.07.25.3";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
