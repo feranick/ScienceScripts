@@ -1,6 +1,7 @@
 import os
 import io
 import re
+import json
 import zipfile
 import sqlite3
 import urllib.request
@@ -46,7 +47,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.07.24.4"
+VERSION_TAG = "v2026.07.24.5"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 # RRUFF powder reference library (patterns calculated for Cu radiation, i.e. the
@@ -337,10 +338,15 @@ def load_cod_powder_h5_library(path):
         def dec(v):
             return v.decode('latin1') if isinstance(v, bytes) else str(v)
 
+        has_curve = False
         for gname in sp:
-            a = sp[gname].attrs
+            grp = sp[gname]
+            a = grp.attrs
             peaks = np.asarray(a['peaks'], dtype=float) if 'peaks' in a else np.array([])
+            inten = np.asarray(a['intensities'], dtype=float) if 'intensities' in a else np.array([])
             cod_id = dec(a.get('cod_id', gname))
+            if 'x' in grp and 'y' in grp:
+                has_curve = True
             entries.append({
                 'group': gname,
                 'name': dec(a.get('name', gname)),
@@ -349,6 +355,7 @@ def load_cod_powder_h5_library(path):
                 'formula': dec(a.get('formula', '')),
                 'sg': dec(a.get('sg', '')),
                 'peaks': peaks,
+                'intensities': inten,
             })
     if not entries:
         raise ValueError("Library contains no patterns.")
@@ -561,10 +568,11 @@ class XRDPlotterGUI:
         self.rruff_local_dir = None
         self.rruff_search_hits = []
         # COD (Crystallography Open Database) sources
-        self.cod_lib = None            # loaded baked .h5 library
+        self.cod_libs = []             # list of loaded .h5 libraries (multi, toggleable)
         self.cod_db3_path = None       # loaded Profex db3 search index
-        self.cod_source = None         # 'h5' or 'db3' (most recent source)
+        self.cod_source = None         # 'h5' (libraries) or 'db3' (online) — active mode
         self.cod_search_hits = []
+        self.cod_cfg_path = "cod_libraries.json"   # remembers libraries across launches
         self.guess_lines_artists = []
         self.fitted_curves_artists = []
         self.target_checkbox_vars = {} 
@@ -712,6 +720,9 @@ class XRDPlotterGUI:
         panel_cod = ttk.LabelFrame(sidebar_frame, text=" 🌐 COD (Crystallography Open DB) ", padding=(8, 6))
         panel_cod.pack(side="top", fill="x", pady=5)
         ttk.Button(panel_cod, text="🗂️ Open COD Source…", command=self.cod_open).pack(fill="x")
+        # Loaded libraries manager (activate/deactivate/remove); remembered across launches.
+        self.cod_libs_frame = ttk.Frame(panel_cod)
+        self.cod_libs_frame.pack(fill="x", pady=(4, 0))
         cod_search = ttk.Frame(panel_cod)
         cod_search.pack(fill="x", pady=(4, 2))
         self.ent_cod_query = ttk.Entry(cod_search)
@@ -815,6 +826,7 @@ class XRDPlotterGUI:
         self.canvas.mpl_connect('button_press_event', self.on_canvas_click)
 
         self.load_api_key_on_launch()
+        self._cod_load_config()   # re-load any remembered COD libraries
 
     def configure_axis_labels(self):
         self.ax.set_xlabel(r"2$\theta$ Angle (degrees)", fontsize=10, fontweight='bold')
@@ -1763,26 +1775,137 @@ class XRDPlotterGUI:
                    command=lambda: (pop.destroy(), self.cod_open_db3())).pack(fill="x", pady=(6, 0))
 
         f2 = ttk.Frame(pop, padding=10, relief="groove"); f2.pack(fill="x", padx=12, pady=6)
-        ttk.Label(f2, text="📚  Use a local baked .h5 library — fully offline",
+        ttk.Label(f2, text="📚  Use local baked .h5 libraries — fully offline (add as many as you like)",
                   font=("Helvetica", 9, "bold"), wraplength=410).pack(anchor="w")
-        ttk.Button(f2, text="Choose .h5 library…",
-                   command=lambda: (pop.destroy(), self.cod_open_library())).pack(fill="x", pady=(6, 0))
+        ttk.Button(f2, text="Add .h5 library…",
+                   command=lambda: (pop.destroy(), self.cod_add_library())).pack(fill="x", pady=(6, 0))
 
-    def cod_open_library(self):
-        """Load a baked COD powder .h5 (offline; overlays with real intensities)."""
-        path = filedialog.askopenfilename(
-            title="Open a COD powder .h5 library (from build_cod_powder_library.py)",
+    # ---- multi-library management (remembered across launches) ----
+    def cod_add_library(self):
+        """Add one or more baked COD .h5 libraries to the managed list."""
+        paths = filedialog.askopenfilenames(
+            title="Add COD powder .h5 librar(ies) (from build_cod_powder_library.py)",
             filetypes=[("COD powder library", ("*.h5", "*.hdf5")), ("All Files", "*.*")])
-        if not path:
+        added = 0
+        for path in paths:
+            if self._cod_load_library_path(path, active=True, persist=False):
+                added += 1
+        if added:
+            self._cod_save_config()
+            self._cod_refresh_libs_panel()
+            self._cod_update_lib_status()
+
+    def _cod_load_library_path(self, path, active=True, persist=False):
+        """Load an .h5 into the managed list. Returns True on success."""
+        if any(os.path.abspath(l['path']) == os.path.abspath(path) for l in self.cod_libs):
+            self.cod_status_var.set(f"Already loaded: {os.path.basename(path)}")
+            return False
+        try:
+            lib = load_cod_powder_h5_library(path)
+        except Exception as e:
+            messagebox.showerror("Library Error", f"Could not open COD library:\n{os.path.basename(path)}\n{e}")
+            return False
+        for e in lib['entries']:
+            e['lib_path'] = path
+        self.cod_libs.append({'name': os.path.basename(path), 'path': path,
+                              'entries': lib['entries'], 'active': bool(active),
+                              'var': tk.BooleanVar(value=bool(active))})
+        self.cod_source = 'h5'
+        if persist:
+            self._cod_save_config()
+            self._cod_refresh_libs_panel()
+            self._cod_update_lib_status()
+        return True
+
+    def _cod_remove_library(self, idx):
+        if 0 <= idx < len(self.cod_libs):
+            del self.cod_libs[idx]
+            self._cod_save_config()
+            self._cod_refresh_libs_panel()
+            self._cod_update_lib_status()
+
+    def _cod_toggle_library(self, idx):
+        if 0 <= idx < len(self.cod_libs):
+            self.cod_libs[idx]['active'] = bool(self.cod_libs[idx]['var'].get())
+            self.cod_source = 'h5'
+            self._cod_save_config()
+            self._cod_update_lib_status()
+
+    def _cod_update_lib_status(self):
+        active = [l for l in self.cod_libs if l['active']]
+        total = sum(len(l['entries']) for l in active)
+        if not self.cod_libs:
+            self.cod_status_var.set("COD: open a baked .h5 library, or load a Profex db3 for live search.")
+        else:
+            self.cod_status_var.set(
+                f"COD: {len(active)}/{len(self.cod_libs)} librar(ies) active · {total:,} patterns. Search / Overlay / Match.")
+
+    def _cod_refresh_libs_panel(self):
+        for child in self.cod_libs_frame.winfo_children():
+            child.destroy()
+        if not self.cod_libs:
+            return
+        for idx, lib in enumerate(self.cod_libs):
+            row = ttk.Frame(self.cod_libs_frame)
+            row.pack(fill="x", pady=1)
+            lib.setdefault('var', tk.BooleanVar(value=lib['active']))
+            lib['var'].set(lib['active'])
+            cb = ttk.Checkbutton(row, text=f"{lib['name']} ({len(lib['entries'])})",
+                                 variable=lib['var'], command=lambda i=idx: self._cod_toggle_library(i))
+            cb.pack(side="left", anchor="w")
+            ttk.Button(row, text="❌", width=2,
+                       command=lambda i=idx: self._cod_remove_library(i)).pack(side="right")
+
+    def _cod_save_config(self):
+        try:
+            with open(self.cod_cfg_path, "w", encoding="utf-8") as fh:
+                json.dump([{'path': l['path'], 'active': l['active']} for l in self.cod_libs], fh, indent=2)
+        except Exception:
+            pass
+
+    def _cod_load_config(self):
+        """On launch, re-load remembered libraries (skipping any now-missing files)."""
+        if not os.path.exists(self.cod_cfg_path):
             return
         try:
-            self.cod_lib = load_cod_powder_h5_library(path)
-        except Exception as e:
-            messagebox.showerror("Library Error", f"Could not open COD library:\n{e}")
+            with open(self.cod_cfg_path, "r", encoding="utf-8") as fh:
+                saved = json.load(fh)
+        except Exception:
             return
-        self.cod_source = 'h5'
-        self.cod_status_var.set(
-            f"COD .h5: {len(self.cod_lib['entries'])} pattern(s) loaded (offline). Search / Overlay / Match.")
+        for item in saved:
+            p = item.get('path')
+            if p and os.path.exists(p):
+                self._cod_load_library_path(p, active=item.get('active', True), persist=False)
+        self._cod_refresh_libs_panel()
+        self._cod_update_lib_status()
+
+    def _cod_entry_xy(self, entry):
+        """Return (x, y) broadened profile for a library entry: read the stored
+        curve if present (curve libraries), else rebuild it from the stored
+        peaks + intensities (peaks-only libraries)."""
+        path = entry.get('lib_path')
+        grp = entry.get('group')
+        if path and grp:
+            try:
+                with h5py.File(path, 'r') as f:
+                    g = f['spectra'][grp]
+                    if 'x' in g and 'y' in g:
+                        return np.array(g['x'][:], dtype=float), np.array(g['y'][:], dtype=float)
+            except Exception:
+                pass
+        peaks = np.asarray(entry.get('peaks', []), dtype=float)
+        inten = np.asarray(entry.get('intensities', []), dtype=float)
+        if peaks.size == 0:
+            return np.array([]), np.array([])
+        if inten.size != peaks.size:
+            inten = np.ones_like(peaks)
+        x = np.arange(SYNTH_MIN, SYNTH_MAX + SYNTH_STEP, SYNTH_STEP)
+        y = np.zeros_like(x)
+        for c, h in zip(peaks, inten):
+            y += h * np.exp(-((x - c) / SYNTH_SIGMA) ** 2)
+        if y.max() > 0:
+            y = y / y.max() * 100.0
+        return x, y
 
     def cod_open_db3(self):
         """Load a Profex COD SQLite index for live search + on-demand simulation."""
@@ -1804,25 +1927,34 @@ class XRDPlotterGUI:
         self.cod_status_var.set(f"COD db3: {n:,} entries. Search, then Overlay to fetch + simulate.{note}")
 
     def _cod_candidates(self, query=""):
-        """Return candidate hit dicts from the active COD source."""
-        if self.cod_source == 'h5' and self.cod_lib:
-            q = (query or "").strip().lower()
-            out = []
-            for e in self.cod_lib['entries']:
-                hay = f"{e['name']} {e['id']} {e.get('formula','')}".lower()
-                if not q or q in hay:
-                    rec = dict(e); rec['source'] = 'h5'
-                    out.append(rec)
-            return out
+        """Return candidate hit dicts from the active COD source: the union of
+        all *active* .h5 libraries, or the db3 index when in online mode."""
         if self.cod_source == 'db3' and self.cod_db3_path:
             return cod_db3_search(self.cod_db3_path, query, limit=500)
-        return []
+        q = (query or "").strip().lower()
+        out = []
+        for lib in self.cod_libs:
+            if not lib.get('active'):
+                continue
+            for e in lib['entries']:
+                hay = f"{e['name']} {e['id']} {e.get('formula','')}".lower()
+                if not q or q in hay:
+                    rec = dict(e)
+                    rec['source'] = 'h5'
+                    rec['lib_path'] = lib['path']
+                    rec['lib_name'] = lib['name']
+                    out.append(rec)
+        return out
+
+    def _cod_has_active_libs(self):
+        return any(l.get('active') for l in self.cod_libs)
 
     def cod_run_search(self):
         self.cod_results_list.delete(0, tk.END)
         self.cod_search_hits = []
-        if not self.cod_lib and not self.cod_db3_path:
-            messagebox.showinfo("No COD Source", "Open a COD .h5 library or load a Profex db3 first.")
+        if self.cod_source != 'db3' and not self._cod_has_active_libs():
+            messagebox.showinfo("No COD Source",
+                                "Add a COD .h5 library or load a Profex db3 first (🗂️ Open COD Source…).")
             return
         try:
             hits = self._cod_candidates(self.ent_cod_query.get())
@@ -1836,7 +1968,7 @@ class XRDPlotterGUI:
         for h in self.cod_search_hits:
             extra = h.get('formula') or h.get('sg') or ''
             self.cod_results_list.insert(tk.END, f"{h['name']} · {h['id']}" + (f" · {extra}" if extra else ""))
-        src = "db3 (live)" if self.cod_source == 'db3' else ".h5 (offline)"
+        src = "db3 (live)" if self.cod_source == 'db3' else "libraries (offline)"
         self.cod_status_var.set(f"COD {src}: {len(hits)} match(es)" + (" (first 500)." if len(hits) > 500 else "."))
 
     def _cod_open_selected_page(self, event=None):
@@ -1898,16 +2030,13 @@ class XRDPlotterGUI:
             return
         chosen = [self.cod_search_hits[i] for i in sel if i < len(self.cod_search_hits)]
 
-        # Offline .h5 entries -> read stored profile directly.
-        if self.cod_source == 'h5':
+        # Offline library entries -> curve from stored profile or rebuilt from peaks.
+        if self.cod_source != 'db3':
             self.save_to_history()
             added = 0
             for idx, hit in zip(sel, chosen):
                 try:
-                    with h5py.File(self.cod_lib['path'], 'r') as f:
-                        g = f['spectra'][hit['group']]
-                        x = np.array(g['x'][:], dtype=float)
-                        y = np.array(g['y'][:], dtype=float)
+                    x, y = self._cod_entry_xy(hit)
                     if len(x) == 0:
                         continue
                     self._cod_add_overlay(x, y, hit['name'], hit['id'], hit.get('url'), idx)
@@ -1916,7 +2045,7 @@ class XRDPlotterGUI:
                     continue
             if added:
                 self.replot_and_refresh_canvas()
-                self.cod_status_var.set(f"COD: overlaid {added} reference(s) from .h5.")
+                self.cod_status_var.set(f"COD: overlaid {added} reference(s).")
             return
 
         # Live db3 entries -> fetch CIF + simulate with pymatgen (in a worker thread).
@@ -1981,8 +2110,8 @@ class XRDPlotterGUI:
             tolerance = 0.2
         exp = list(self.peak_guesses)
 
-        # ---- Offline .h5 library: match all entries by their stored peaks ----
-        if self.cod_source == 'h5' and self.cod_lib:
+        # ---- Offline libraries: match all active-library entries by stored peaks ----
+        if self.cod_source != 'db3' and self._cod_has_active_libs():
             candidates = self._cod_candidates(self.ent_cod_query.get())
             if not candidates:
                 messagebox.showinfo("No Candidates", "No COD references to match (check the search filter).")
@@ -2092,11 +2221,8 @@ class XRDPlotterGUI:
                     if hit.get('x') is not None:          # online match carries the simulated pattern
                         x = np.asarray(hit['x'], dtype=float)
                         y = np.asarray(hit['y'], dtype=float)
-                    else:                                  # offline .h5 match: read stored profile
-                        with h5py.File(self.cod_lib['path'], 'r') as f:
-                            g = f['spectra'][hit['group']]
-                            x = np.array(g['x'][:], dtype=float)
-                            y = np.array(g['y'][:], dtype=float)
+                    else:                                  # offline library match: curve or peaks-only
+                        x, y = self._cod_entry_xy(hit)
                     if len(x) == 0:
                         continue
                     self._cod_add_overlay(x, y, hit['name'], hit['id'], hit.get('url'), f"m{n}")

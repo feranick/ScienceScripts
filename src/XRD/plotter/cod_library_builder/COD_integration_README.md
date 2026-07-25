@@ -43,23 +43,59 @@ python build_cod_powder_library.py --db3 cod-260101.db3 \
 python build_cod_powder_library.py --db3 cod-260101.db3 \
        --elements Ti,O --only-elements --out tio2.h5
 
-# Space group 152 silicates, capped at 50 entries
-python build_cod_powder_library.py --db3 cod-260101.db3 \
-       --elements Si,O --sg 152 --limit 50 --out sg152.h5
-
 # A specific set of COD ids (no db3 needed for selection)
 python build_cod_powder_library.py --ids 1011097,9008213 --out picks.h5
 ```
 
-Key options: `--name` / `--mineral` / `--formula-contains` / `--elements`
-(+ `--only-elements`) / `--sg` / `--ids` / `--ids-file` for selection;
-`--max-per-formula` and `--limit` to trim duplicates; `--wavelength` (default
-`CuKa`), `--two-theta MIN MAX`, `--step`, `--sigma` for the pattern; `--cache`
-keeps downloaded CIFs so re-builds are instant and offline.
+### Supplying CIFs: online vs. a local rsync mirror
 
-Output `.h5` schema (per phase): datasets `x`,`y` (broadened profile, 0–100)
-and attributes `name`, `cod_id`, `url`, `peaks` (reflection 2θ),
-`intensities`, `formula`, `sg`, `wavelength`.
+Small builds can fetch CIFs over HTTP on demand (the default; cached in
+`--cache`). For large builds (tens of thousands of entries) that is slow and
+impolite to the COD servers — mirror the archive once and build offline:
+
+```bash
+# one-time: mirror all COD CIFs (~a few GB) — then rebuild any library offline
+rsync -av --delete rsync://www.crystallography.net/cif/ ./cod-cif-mirror/cif/
+```
+
+Then pass `--mirror ./cod-cif-mirror` and parallelise with `--jobs N`.
+
+### The three general-purpose libraries
+
+With the mirror in place, these are the recommended defaults (adjust `--jobs`
+to your CPU):
+
+```bash
+# 1) Inorganic — no C/H (~62k). Full curves; browser-friendly.
+python build_cod_powder_library.py --db3 cod-260101.db3 --inorganic \
+       --mirror ./cod-cif-mirror --jobs 8 --out cod_inorganic.h5
+
+# 2) Minerals — entries with a mineral name (~16k). Full curves.
+python build_cod_powder_library.py --db3 cod-260101.db3 --minerals-only \
+       --mirror ./cod-cif-mirror --jobs 8 --out cod_minerals.h5
+
+# 3) Organic — C+H (~448k). PEAKS-ONLY + capped reflections (large set).
+python build_cod_powder_library.py --db3 cod-260101.db3 --organic \
+       --mirror ./cod-cif-mirror --jobs 8 --peaks-only --max-peaks 300 \
+       --out cod_organic.h5
+```
+
+(No mirror? Drop `--mirror` and use `--jobs 1` — it fetches over HTTP, fine for
+the minerals set, slow for the larger two.)
+
+Key options — selection: `--inorganic` / `--organic` / `--minerals-only`,
+`--elements` (+`--only-elements`), `--exclude-elements`, `--name` / `--mineral`
+/ `--formula-contains` / `--sg`, `--ids` / `--ids-file`, `--max-per-formula`,
+`--limit`. Pattern: `--wavelength` (default `CuKa`), `--two-theta MIN MAX`,
+`--step`, `--sigma`. Storage / speed: `--peaks-only` (no curve; ~5–10× smaller,
+rebuilt on load), `--max-peaks N` (keep N strongest reflections — recommended
+for organic/large-cell phases), `--jobs N` (parallel), `--mirror DIR`,
+`--cache DIR`.
+
+Output `.h5` schema (per phase): attributes `name`, `cod_id`, `url`, `peaks`
+(reflection 2θ), `intensities`, `formula`, `sg`, `wavelength`; plus datasets
+`x`,`y` (broadened profile 0–100) **unless** `--peaks-only`, in which case the
+apps rebuild the curve from `peaks`+`intensities` on load.
 
 ## 2. Python app (`xrd_plotter.py`)
 
@@ -70,21 +106,31 @@ how you want to work:
   *Overlay Selected* fetches that entry's CIF and simulates it on the fly, and
   *Match by Selected Peaks* fetches + simulates the current search hits and ranks
   them (needs `pymatgen` + network). No `.h5` required in this mode.
-- **📚 Local .h5 library** — pick a baked `.h5` and work fully offline: search,
-  overlay (real intensities, existing dot-dash reference style), and instant
-  peak-matching against the whole library.
+- **📚 Local .h5 libraries** — add one or more baked `.h5` files and work fully
+  offline: search, overlay (real intensities, existing dot-dash reference
+  style), and instant peak-matching against the union of active libraries.
 
-Overlay labels link to the entry's COD page. The whole sidebar is now scrollable.
-`mp_api` is no longer required for COD or for pattern simulation — only for the
-Materials Project search.
+**Multi-library manager.** You can load several libraries (e.g. inorganic +
+minerals + organic) and tick which ones are **active**; search/overlay/match use
+only the active set. Each row has a checkbox and an ❌ to remove it. The set is
+remembered across launches in `cod_libraries.json` (next to the script) and
+re-loaded automatically — so you set it up once and just toggle thereafter.
+
+Peaks-only libraries (e.g. the organic one) are supported: the overlay curve is
+rebuilt from the stored reflections on the fly. Overlay labels link to the COD
+page, and the whole sidebar is scrollable. `mp_api` is no longer required for COD
+or for pattern simulation — only for the Materials Project search.
 
 ## 3. Browser app (`xrd_plotter.html`)
 
-New **🌐 COD** panel (above RRUFF), offline only. **📚 Open COD .h5 Library**
-reads the baked file in-browser via h5wasm (the same mechanism the RRUFF panel
-uses), then Search / Overlay / Match by Selected Peaks work identically. The
-library is cached in IndexedDB, and a `cod_powder_library.h5` placed next to the
-page (or `?codlib=<url>`) auto-loads on startup.
+New **🌐 COD** panel (above RRUFF), offline only. **📚 Add COD .h5 Library**
+reads baked files in-browser via h5wasm (the same mechanism the RRUFF panel
+uses). Like the Python app it's a **multi-library manager**: add several
+libraries, tick which are active (checkbox), remove with ❌; search / overlay /
+match use the union of active libraries, and peaks-only libraries are rebuilt on
+the fly. The set (and the files) are cached in IndexedDB and restored on the next
+visit. A `cod_powder_library.h5` placed next to the page (or `?codlib=<url>`)
+auto-loads on first run.
 
 ## Notes / limitations
 

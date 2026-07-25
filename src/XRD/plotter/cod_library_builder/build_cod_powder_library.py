@@ -127,6 +127,9 @@ def select_from_db3(db3_path, args):
     if args.sg is not None:
         where.append("sgNumber = ?")
         params.append(args.sg)
+    if getattr(args, "minerals_only", False):
+        where.append("mineral IS NOT NULL AND mineral != '' AND mineral != ?")
+        params.append("\\N")
 
     sql = "SELECT file, a, b, c, alpha, beta, gamma, sg, sgNumber, " \
           "formula, calcformula, cellformula, mineral, chemname, commonname, Z " \
@@ -138,20 +141,29 @@ def select_from_db3(db3_path, args):
     rows = [dict(r) for r in cur.execute(sql, params).fetchall()]
     con.close()
 
-    # Element filtering is done in Python (COD has no element columns).
+    # Element-based filtering is done in Python (COD has no element columns).
     want = set(_normalise_element_list(args.elements)) if args.elements else set()
-    if want:
+    excl = set(_normalise_element_list(args.exclude_elements)) if args.exclude_elements else set()
+    if getattr(args, "inorganic", False):
+        excl |= {"C", "H"}                          # inorganic = no carbon, no hydrogen
+    need_pass = bool(want or excl or getattr(args, "organic", False))
+    if need_pass:
         filtered = []
         for r in rows:
             els = elements_in_formula(r.get("calcformula") or r.get("formula"))
             if not els:
                 continue
-            if args.only_elements:
-                if els and els <= want:            # subset: no other elements
-                    filtered.append(r)
-            else:
-                if want <= els:                    # contains all requested
-                    filtered.append(r)
+            if want:
+                if args.only_elements:
+                    if not (els <= want):           # subset: no other elements
+                        continue
+                elif not (want <= els):             # must contain all requested
+                    continue
+            if getattr(args, "organic", False) and not ({"C", "H"} <= els):
+                continue
+            if excl and (els & excl):               # drop if any excluded element present
+                continue
+            filtered.append(r)
         rows = filtered
 
     # Optional de-duplication: keep at most N per (reduced formula, space group).
@@ -205,6 +217,36 @@ def fetch_cif(cod_id, cache_dir, timeout=30, retries=3, pause=0.34, ua=DEFAULT_U
             last_err = e
             time.sleep(pause * (attempt + 1) * 2)
     raise RuntimeError(f"could not fetch COD {cod_id}: {last_err}")
+
+
+def mirror_cif_path(mirror_root, cod_id):
+    """Resolve a COD id to a CIF path inside a local rsync mirror.
+    The COD archive stores 7-digit ids hierarchically, e.g.
+    1000017 -> <root>/cif/1/00/00/1000017.cif. Several common layouts
+    (with/without the 'cif' prefix, and flat) are tried."""
+    s = str(cod_id)
+    sub = os.path.join(s[0], s[1:3], s[3:5]) if len(s) == 7 else ""
+    candidates = [
+        os.path.join(mirror_root, "cif", sub, f"{s}.cif"),
+        os.path.join(mirror_root, sub, f"{s}.cif"),
+        os.path.join(mirror_root, f"{s}.cif"),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def get_cif(cod_id, cfg):
+    """Return CIF text for a COD id from a local mirror if configured, else HTTP."""
+    if cfg.get("mirror"):
+        path = mirror_cif_path(cfg["mirror"], cod_id)
+        if not path:
+            raise FileNotFoundError(f"CIF {cod_id} not found in mirror {cfg['mirror']}")
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            return fh.read()
+    return fetch_cif(cod_id, cfg.get("cache"), ua=cfg.get("user_agent", DEFAULT_UA),
+                     pause=cfg.get("pause", 0.34))
 
 
 # ============================================================================
@@ -265,52 +307,92 @@ def reduced_formula(row):
     return str(f).replace("-", " ").strip()
 
 
+def _build_one(task):
+    """Worker: fetch/read a CIF and compute its reflection list.
+    Returns (cod_id, meta, peaks_x, peaks_y, error). Kept small (peaks only)
+    so it pickles cheaply across processes; broadening happens in the parent."""
+    cid, meta, cfg = task
+    try:
+        cif = get_cif(cid, cfg)
+        px, py = compute_pattern(cif, cfg["wavelength"], cfg["tt"])
+        if px.size == 0:
+            raise ValueError("no reflections in range")
+        mx = cfg.get("max_peaks")
+        if mx and px.size > mx:                       # keep the strongest N reflections
+            order = np.argsort(py)[::-1][:mx]
+            order = order[np.argsort(px[order])]
+            px, py = px[order], py[order]
+        return (cid, meta, px.astype("float32"), py.astype("float32"), None)
+    except Exception as e:
+        return (cid, meta, None, None, str(e))
+
+
 def build_library(rows, args):
     xmin, xmax = args.two_theta
-    kept, failed = 0, 0
+    cfg = {"wavelength": args.wavelength, "tt": (xmin, xmax),
+           "peaks_only": args.peaks_only, "mirror": args.mirror,
+           "cache": args.cache, "pause": args.pause, "user_agent": args.user_agent,
+           "max_peaks": args.max_peaks or None}
+    tasks = []
+    for r in rows:
+        formula = reduced_formula(r)
+        tasks.append((int(r["file"]),
+                      {"name": display_name(r, formula), "formula": formula,
+                       "sg": str(r.get("sg") or "")}, cfg))
+    total = len(tasks)
+    jobs = max(1, args.jobs)
+    if jobs > 1 and not args.mirror:
+        print(f"Note: --jobs {jobs} opens {jobs} parallel connections to COD. "
+              f"For large builds prefer a local --mirror (rsync) to stay polite and fast.")
+
+    def results_iter():
+        if jobs > 1:
+            from multiprocessing import Pool
+            with Pool(jobs) as pool:
+                for res in pool.imap_unordered(_build_one, tasks, chunksize=16):
+                    yield res
+        else:
+            for t in tasks:
+                yield _build_one(t)
+
+    kept = failed = 0
     with h5py.File(args.out, "w") as h5:
         h5.attrs["source"] = "COD"
         h5.attrs["wavelength"] = args.wavelength
         h5.attrs["two_theta_min"] = xmin
         h5.attrs["two_theta_max"] = xmax
+        h5.attrs["storage"] = "peaks" if args.peaks_only else "curve"
         spectra = h5.create_group("spectra")
 
-        for i, row in enumerate(rows, 1):
-            cid = row["file"]
-            try:
-                cif = fetch_cif(cid, args.cache, ua=args.user_agent,
-                                pause=args.pause)
-                px, py = compute_pattern(cif, args.wavelength, args.two_theta)
-                if px.size == 0:
-                    raise ValueError("no reflections in range")
-                gx, gy = broaden(px, py, xmin, xmax, args.step, args.sigma)
-            except Exception as e:
+        for n, (cid, meta, px, py, err) in enumerate(results_iter(), 1):
+            if err or px is None:
                 failed += 1
-                print(f"  [skip] COD {cid}: {e}")
-                continue
+                if err:
+                    print(f"  [skip] COD {cid}: {err}")
+            else:
+                g = spectra.create_group(str(cid))
+                if not args.peaks_only:               # store the ready-to-plot curve too
+                    gx, gy = broaden(px, py, xmin, xmax, args.step, args.sigma)
+                    g.create_dataset("x", data=gx.astype("float32"), compression="gzip")
+                    g.create_dataset("y", data=gy.astype("float32"), compression="gzip")
+                g.attrs["name"] = meta["name"]
+                g.attrs["cod_id"] = str(cid)
+                g.attrs["rruff_id"] = ""               # loader compatibility
+                g.attrs["url"] = COD_PAGE_URL.format(cid=cid)
+                g.attrs["peaks"] = px                  # reflection 2-theta (float32)
+                g.attrs["intensities"] = py            # reflection intensities (float32)
+                g.attrs["formula"] = meta["formula"]
+                g.attrs["sg"] = meta["sg"]
+                g.attrs["wavelength"] = args.wavelength
+                g.attrs["source"] = "COD"
+                kept += 1
+            if n % 100 == 0 or n == total:
+                print(f"  ... {n}/{total} processed ({kept} kept, {failed} skipped)")
 
-            formula = reduced_formula(row)
-            name = display_name(row, formula)
-            g = spectra.create_group(str(cid))
-            g.create_dataset("x", data=gx.astype("float32"), compression="gzip")
-            g.create_dataset("y", data=gy.astype("float32"), compression="gzip")
-            g.attrs["name"] = name
-            g.attrs["cod_id"] = str(cid)
-            g.attrs["rruff_id"] = ""                      # loader compatibility
-            g.attrs["url"] = COD_PAGE_URL.format(cid=cid)
-            g.attrs["peaks"] = px.astype("float32")
-            g.attrs["intensities"] = py.astype("float32")
-            g.attrs["formula"] = formula
-            g.attrs["sg"] = str(row.get("sg") or "")
-            g.attrs["wavelength"] = args.wavelength
-            g.attrs["source"] = "COD"
-            kept += 1
-            if i % 25 == 0 or i == len(rows):
-                print(f"  ... {i}/{len(rows)} processed ({kept} kept, {failed} skipped)")
-
-    print(f"\nDone: {kept} pattern(s) written to {args.out}  ({failed} skipped)")
+    mode = "peaks-only" if args.peaks_only else "curve+peaks"
+    print(f"\nDone: {kept} pattern(s) -> {args.out}  ({failed} skipped, storage={mode})")
     if kept == 0:
-        print("WARNING: no patterns were written. Check your selection / network.")
+        print("WARNING: no patterns were written. Check your selection / mirror / network.")
 
 
 # ============================================================================
@@ -333,6 +415,14 @@ def parse_args(argv=None):
     src.add_argument("--elements", help="comma/space list, e.g. 'Ti,O'")
     src.add_argument("--only-elements", action="store_true",
                      help="with --elements: exclude phases containing any other element")
+    src.add_argument("--exclude-elements", dest="exclude_elements",
+                     help="drop phases containing any of these elements (comma/space list)")
+    src.add_argument("--inorganic", action="store_true",
+                     help="keep only inorganic phases (no carbon and no hydrogen)")
+    src.add_argument("--organic", action="store_true",
+                     help="keep only organic-like phases (contain both C and H)")
+    src.add_argument("--minerals-only", dest="minerals_only", action="store_true",
+                     help="keep only entries that have a mineral name")
     src.add_argument("--sg", type=int, help="space-group number filter")
     src.add_argument("--max-per-formula", type=int, default=0,
                      help="keep at most N entries per (formula, space group)")
@@ -347,11 +437,24 @@ def parse_args(argv=None):
     comp.add_argument("--sigma", type=float, default=0.10,
                       help="Gaussian broadening sigma (default 0.10)")
 
+    store = p.add_argument_group("storage / performance")
+    store.add_argument("--peaks-only", dest="peaks_only", action="store_true",
+                       help="store only reflection peaks (no broadened curve); ~5-10x smaller, "
+                            "browser-friendly. Apps rebuild the curve on load. Ideal for huge sets.")
+    store.add_argument("--max-peaks", dest="max_peaks", type=int, default=0,
+                       help="keep only the N strongest reflections per phase (0 = all). "
+                            "Recommended for organic/large-cell phases, e.g. 300.")
+    store.add_argument("--jobs", type=int, default=1,
+                       help="parallel worker processes for CIF->pattern (use with --mirror)")
+
     net = p.add_argument_group("fetching")
+    net.add_argument("--mirror",
+                     help="read CIFs from a local COD rsync mirror directory instead of HTTP "
+                          "(rsync://www.crystallography.net/cif/). Enables fast offline builds.")
     net.add_argument("--cache", default="cod_cif_cache",
-                     help="directory for cached CIFs (default cod_cif_cache)")
+                     help="directory for cached CIFs when fetching over HTTP (default cod_cif_cache)")
     net.add_argument("--pause", type=float, default=0.34,
-                     help="seconds between downloads (default 0.34)")
+                     help="seconds between HTTP downloads (default 0.34)")
     net.add_argument("--user-agent", default=DEFAULT_UA, help="HTTP User-Agent")
 
     p.add_argument("--out", default="cod_library.h5", help="output .h5 path")
