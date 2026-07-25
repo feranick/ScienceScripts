@@ -3,6 +3,8 @@ import io
 import re
 import zipfile
 import threading
+import json
+import urllib.parse
 import urllib.request
 import webbrowser
 import tkinter as tk
@@ -26,7 +28,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "ftir-v2026.07.24.1"
+VERSION_TAG = "ftir-v2026.07.25.1"
 
 # RRUFF reference database (open FTIR spectra of minerals).
 # Data are distributed as per-quality zip archives of two-column .txt files.
@@ -35,6 +37,32 @@ RRUFF_DATASETS = [
     "infrared", "processed", "excellent", "fair", "poor",
 ]
 RRUFF_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".ftir_plotter_rruff")
+
+# Open Specy (https://openspecy.org, CC-BY) -- polymers, microplastics,
+# pigments and organics. Its infrared holdings (FLOPP, FLOPP-e, Primpke,
+# Cabernard) are if anything larger than its Raman ones. Used offline only,
+# via .h5 libraries baked by build_openspecy_library.py --only ftir; the same
+# files load in the browser build, which cannot fetch anything cross-origin.
+OPENSPECY_URL = "https://openspecy.org"
+
+# NIST Chemistry WebBook, SRD 69 -- ~16k IR spectra served as JCAMP-DX.
+# Online only, on demand, cached locally: the data *compilation* is
+# copyrighted by the U.S. Secretary of Commerce, so this app fetches
+# individual spectra for your own use and never bakes a redistributable
+# library out of them. NIST explicitly welcomes deep links to species pages.
+NIST_BASE_URL = "https://webbook.nist.gov/cgi/cbook.cgi"
+NIST_SPECIES_URL = NIST_BASE_URL + "?ID={sid}&Units=SI"
+NIST_JCAMP_URL = NIST_BASE_URL + "?JCAMP={sid}&Index={index}&Type=IR"
+NIST_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".ftir_plotter_nist")
+NIST_UA = ("Mozilla/5.0 (compatible; FTIR-Plotter/1.0; "
+           "+https://webbook.nist.gov/chemistry/)")
+
+# SDBS -- Spectral Database for Organic Compounds (AIST, Japan), ~34k
+# compounds including FT-IR. Deliberately NOT automated: SDBS prohibits
+# automated retrieval and rate-limits access, so the app only opens the
+# search page and lets the user download by hand. The resulting JCAMP-DX
+# file imports through the normal file open dialog.
+SDBS_SEARCH_URL = "https://sdbs.db.aist.go.jp/sdbs/cgi-bin/cre_index.cgi"
 
 
 # ==========================================
@@ -145,67 +173,170 @@ def load_raman_data(file_path):
         raise ValueError(f"Unsupported file extension: {ext}")
 
 
-def _load_jcamp(file_path, base_id):
-    """Parses a JCAMP-DX spectrum in (X++(Y..Y)) AFFN form (Thermo Nicolet, etc.).
-    Returns [{'x': wavenumber, 'y': absorbance, 'label': str}]."""
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        lines = f.read().splitlines()
-    hdr = {}
-    data_start = None
-    title = base_id
-    for i, raw in enumerate(lines):
-        s = raw.strip()
-        m = re.match(r'##\s*([^=]+)=(.*)', s)
+# --- JCAMP-DX ---------------------------------------------------------------
+# One parser for every JCAMP source the app touches: instrument exports
+# (Thermo Nicolet, Bruker), NIST WebBook downloads, SDBS downloads, and ROD.
+# Handles both data forms and ASDF compression, which vendors and NIST both
+# use and a naive whitespace split silently mis-reads.
+
+_ASDF_SQZ = {'@': '0', 'A': '1', 'B': '2', 'C': '3', 'D': '4', 'E': '5',
+             'F': '6', 'G': '7', 'H': '8', 'I': '9',
+             'a': '-1', 'b': '-2', 'c': '-3', 'd': '-4', 'e': '-5',
+             'f': '-6', 'g': '-7', 'h': '-8', 'i': '-9'}
+_ASDF_DIF = {'%': '0', 'J': '1', 'K': '2', 'L': '3', 'M': '4', 'N': '5',
+             'O': '6', 'P': '7', 'Q': '8', 'R': '9',
+             'j': '-1', 'k': '-2', 'l': '-3', 'm': '-4', 'n': '-5',
+             'o': '-6', 'p': '-7', 'q': '-8', 'r': '-9'}
+_ASDF_DUP = {'S': '1', 'T': '2', 'U': '3', 'V': '4', 'W': '5', 'X': '6',
+             'Y': '7', 'Z': '8', 's': '9'}
+
+
+def _asdf_tokenize(line):
+    """Splits a JCAMP data line into (kind, text) tokens.
+    kind is 'num' (AFFN/PAC), 'dif' or 'dup'."""
+    toks, cur, kind = [], '', None
+
+    def flush():
+        nonlocal cur, kind
+        if cur not in ('', '-', '+'):
+            toks.append((kind or 'num', cur))
+        cur, kind = '', None
+
+    for ch in line:
+        if ch in _ASDF_SQZ:
+            flush(); cur, kind = _ASDF_SQZ[ch], 'num'
+        elif ch in _ASDF_DIF:
+            flush(); cur, kind = _ASDF_DIF[ch], 'dif'
+        elif ch in _ASDF_DUP:
+            flush(); cur, kind = _ASDF_DUP[ch], 'dup'
+        elif ch in '+-':
+            flush(); cur, kind = ('' if ch == '+' else '-'), 'num'
+        elif ch.isdigit() or ch == '.':
+            if kind is None:
+                kind = 'num'
+            cur += ch
+        elif ch in 'eE' and cur and (cur[-1].isdigit() or cur[-1] == '.'):
+            cur += ch                      # exponent inside an AFFN number
+        else:
+            flush()
+    flush()
+    return toks
+
+
+def _asdf_expand(tokens):
+    """Reconstructs the Y values of one line. Returns (values, ended_in_dif)."""
+    ys, last_dif, ended_dif = [], None, False
+    for kind, text in tokens:
+        try:
+            val = float(text)
+        except ValueError:
+            continue
+        if kind == 'dup':
+            if not ys:
+                continue
+            for _ in range(int(val) - 1):
+                ys.append(ys[-1] + last_dif if last_dif is not None else ys[-1])
+        elif kind == 'dif':
+            if not ys:
+                continue
+            last_dif = val
+            ys.append(ys[-1] + val)
+            ended_dif = True
+        else:
+            ys.append(val)
+            last_dif, ended_dif = None, False
+    return ys, ended_dif
+
+
+def parse_jcamp_dx(text):
+    """Parses a JCAMP-DX spectrum. Returns (x, y, header).
+
+    Supports:
+      * ##XYDATA=(X++(Y..Y))   equidistant ordinates, AFFN/PAC/SQZ/DIF/DUP
+      * ##XYPOINTS=(XY..XY)    explicit point pairs (ROD, some SDBS exports)
+    """
+    header, data_lines = {}, []
+    block, collecting = None, False
+    for line in text.splitlines():
+        m = re.match(r'^\s*##\s*([^=]+?)\s*=\s*(.*)$', line)
         if m:
-            key = m.group(1).strip().upper()
-            val = m.group(2).strip()
-            hdr[key] = val
-            if key == 'TITLE' and val:
-                title = val
-            if key in ('XYDATA', 'XYPOINTS', 'DATA TABLE'):
-                data_start = i + 1
-                break
-    if data_start is None:
-        raise ValueError("No ##XYDATA block found in JCAMP file.")
+            key, val = m.group(1).strip().upper(), m.group(2).strip()
+            header[key] = val
+            if key in ('XYDATA', 'XYPOINTS', 'PEAK TABLE', 'DATA TABLE'):
+                block, collecting = (key, val.upper()), True
+            else:
+                collecting = False      # trailing headers close the data run
+            continue
+        if collecting and line.strip():
+            data_lines.append(line)
+
+    if not data_lines or block is None:
+        raise ValueError("No ##XYDATA / ##XYPOINTS block found in JCAMP file.")
 
     def _num(k, default=None):
         try:
-            return float(hdr[k])
-        except (KeyError, ValueError):
+            return float(str(header[k]).replace('D', 'E'))
+        except (KeyError, ValueError, TypeError):
             return default
 
-    xfactor = _num('XFACTOR', 1.0)
-    yfactor = _num('YFACTOR', 1.0)
-    firstx = _num('FIRSTX')
-    lastx = _num('LASTX')
-    deltax = _num('DELTAX')
-    npoints = _num('NPOINTS')
+    xfactor = _num('XFACTOR', 1.0) or 1.0
+    yfactor = _num('YFACTOR', 1.0) or 1.0
+    kind, form = block
 
-    ys = []
-    for raw in lines[data_start:]:
-        s = raw.strip()
-        if not s or s.startswith('##'):
-            if s.startswith('##'):
-                break
-            continue
-        toks = s.split()
-        # (X++(Y..Y)): first token is the abscissa of the row; the rest are Y values.
-        for t in toks[1:]:
-            try:
-                ys.append(float(t))
-            except ValueError:
-                pass
-    if not ys:
-        raise ValueError("No numeric data parsed from JCAMP file.")
-    y = np.array(ys, dtype=float) * (yfactor if yfactor else 1.0)
-    n = len(y)
-    if firstx is not None and lastx is not None and n > 1:
-        x = np.linspace(firstx, lastx, n) * (xfactor if xfactor else 1.0)
-    elif firstx is not None and deltax is not None:
-        x = (firstx + np.arange(n) * deltax) * (xfactor if xfactor else 1.0)
+    if kind == 'XYPOINTS' or 'XY..XY' in form:
+        nums = [float(t.replace('D', 'E').replace('d', 'e'))
+                for t in re.findall(r'[-+]?\d*\.?\d+(?:[EeDd][-+]?\d+)?',
+                                    " ".join(data_lines))]
+        if len(nums) % 2:
+            nums = nums[:-1]
+        if len(nums) < 4:
+            raise ValueError("Too few data points in JCAMP file.")
+        arr = np.asarray(nums, dtype=float).reshape(-1, 2)
+        x, y = arr[:, 0] * xfactor, arr[:, 1] * yfactor
     else:
-        x = np.arange(n, dtype=float)
-    return [{'x': x, 'y': y, 'label': title}]
+        ys, prev_dif = [], False
+        for raw in data_lines:
+            toks = _asdf_tokenize(raw)
+            if not toks:
+                continue
+            line_ys, ended_dif = _asdf_expand(toks[1:])   # toks[0] is the abscissa
+            if prev_dif and ys and line_ys and abs(line_ys[0] - ys[-1]) < 1e-9:
+                line_ys = line_ys[1:]      # DIF Y-check value, not a data point
+            ys.extend(line_ys)
+            prev_dif = ended_dif
+        if len(ys) < 2:
+            raise ValueError("No numeric data parsed from JCAMP file.")
+        y = np.asarray(ys, dtype=float) * yfactor
+        n = len(y)
+        firstx, lastx, deltax = _num('FIRSTX'), _num('LASTX'), _num('DELTAX')
+        # FIRSTX/LASTX are already in final units; only raw abscissas take XFACTOR.
+        if firstx is not None and lastx is not None and n > 1:
+            x = np.linspace(firstx, lastx, n)
+        elif firstx is not None and deltax is not None:
+            x = firstx + np.arange(n) * deltax
+        else:
+            x = np.arange(n, dtype=float)
+
+    order = np.argsort(x)                  # IR is usually written high->low
+    x, y = x[order], y[order]
+    good = np.isfinite(x) & np.isfinite(y)
+    x, y = x[good], y[good]
+    if x.size < 2:
+        raise ValueError("Fewer than 2 finite points in JCAMP file.")
+    return x, y, header
+
+
+def _load_jcamp(file_path, base_id):
+    """Loads a JCAMP-DX spectrum from disk (instrument export, NIST, SDBS, ROD).
+    Returns [{'x': wavenumber, 'y': absorbance, 'label': str}]."""
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        text = f.read()
+    x, y, header = parse_jcamp_dx(text)
+    label = (header.get('TITLE') or '').strip() or base_id
+    dtype = (header.get('DATA TYPE') or '').strip().upper()
+    if dtype and 'INFRARED' not in dtype and 'IR' not in dtype:
+        label = f"{label} [{dtype.title()}]"
+    return [{'x': x, 'y': y, 'label': label}]
 
 
 def _load_two_column(file_path, base_id):
@@ -360,6 +491,203 @@ def rruff_url(name, rid, stored=None):
     if name:
         return "https://rruff.info/" + str(name).strip().lower()
     return None
+
+
+# ==========================================
+# BAKED REFERENCE LIBRARIES (.h5)
+# ==========================================
+
+def load_speclib_h5(path):
+    """Reads a baked reference library .h5 (build_openspecy_library.py, or the
+    ROD/COD builders -- they all share one schema).
+
+    /spectra/<id> with x,y datasets and precomputed peaks, so matching is
+    instant. The `source` attribute drives labels and links. Peaks come from
+    the dataset when present, else the attribute. x/y stay on disk and are read
+    lazily when a reference is actually overlaid.
+    """
+    if not H5_AVAILABLE:
+        raise ImportError("Reading .h5 libraries requires 'h5py' (pip install h5py).")
+    entries = []
+    with h5py.File(path, 'r') as f:
+        if 'spectra' not in f:
+            raise ValueError("Not a reference library file ('spectra' group missing).")
+        file_source = _decode(f.attrs.get('source', '')) or 'Library'
+        technique = _decode(f.attrs.get('technique', ''))
+        sp = f['spectra']
+        for gname in sp:
+            g = sp[gname]
+            a = g.attrs
+            if 'peaks' in g:
+                peaks = np.asarray(g['peaks'][:], dtype=float)
+            elif 'peaks' in a:
+                peaks = np.asarray(a['peaks'], dtype=float)
+            else:
+                peaks = np.array([])
+            source = _decode(a.get('source', '')) or file_source
+            sid = (_decode(a.get('rruff_id', '')) or _decode(a.get('rod_id', ''))
+                   or gname)
+            entries.append({
+                'group': gname,
+                'name': _decode(a.get('name', gname)),
+                'id': sid,
+                'source': source,
+                'formula': _decode(a.get('formula', '')),
+                'collection': _decode(a.get('collection', '')),
+                'spectrum_type': _decode(a.get('spectrum_type', '')),
+                'url': _decode(a.get('url', '')),
+                'peaks': peaks,
+            })
+    if not entries:
+        raise ValueError("Library contains no spectra.")
+    return {'path': path, 'source': file_source, 'technique': technique,
+            'entries': entries}
+
+
+# ==========================================
+# NIST CHEMISTRY WEBBOOK (online, on demand)
+# ==========================================
+
+def _nist_http_get(url, timeout=45, retries=2, binary=False):
+    last = None
+    for _ in range(retries + 1):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": NIST_UA})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+            return raw if binary else raw.decode("utf-8", errors="replace")
+        except Exception as e:                     # noqa: BLE001 - retry anything
+            last = e
+    raise last
+
+
+def nist_species_url(sid):
+    return NIST_SPECIES_URL.format(sid=sid)
+
+
+def nist_search(query, field="auto", limit=100, timeout=45):
+    """Searches the WebBook for species that have IR spectra.
+
+    `field` is 'name', 'formula', 'cas', 'id', or 'auto'. A search that matches
+    exactly one species redirects straight to its page, so we handle both the
+    hit-list and single-species cases.
+
+    Returns [{'name', 'id', 'formula', 'url'}]. Note these are *species*, not
+    spectra -- a species commonly has several IR spectra (phases, instruments,
+    resolutions), enumerated separately by nist_species_spectra().
+    """
+    q = str(query or "").strip()
+    if not q:
+        return []
+    if field == "auto":
+        if re.fullmatch(r"C?\d{2,7}-?\d{0,2}-?\d?", q) and any(c.isdigit() for c in q):
+            field = "cas" if "-" in q else "id"
+        elif re.fullmatch(r"[A-Z][A-Za-z0-9]*", q) and any(c.isdigit() for c in q):
+            field = "formula"
+        else:
+            field = "name"
+
+    if field == "id":
+        sid = q if q.upper().startswith("C") else "C" + q
+        params = {"ID": sid, "Units": "SI", "Mask": "80"}
+    elif field == "cas":
+        params = {"ID": "C" + re.sub(r"\D", "", q), "Units": "SI", "Mask": "80"}
+    elif field == "formula":
+        params = {"Formula": q, "NoIon": "on", "Units": "SI", "cIR": "on"}
+    else:
+        params = {"Name": q, "Units": "SI", "cIR": "on"}
+
+    html = _nist_http_get(f"{NIST_BASE_URL}?{urllib.parse.urlencode(params)}",
+                          timeout=timeout)
+    return _nist_parse_search(html, limit=limit)
+
+
+def _nist_parse_search(html, limit=100):
+    """Pulls species out of a WebBook search response.
+
+    Deliberately regex-based rather than a DOM parse: the WebBook markup is
+    stable, simple, and this keeps the app dependency-free.
+    """
+    hits, seen = [], set()
+
+    # Single-species page: <h1 id="Top">Name</h1> plus an ID in the links.
+    m_title = re.search(r'<h1[^>]*id="Top"[^>]*>(.*?)</h1>', html, re.S | re.I)
+    m_id = re.search(r'[?&](?:ID|Struct|Str2File)=(C\d+)', html)
+    if m_title and m_id and 'Search Results' not in m_title.group(1):
+        name = _strip_tags(m_title.group(1))
+        formula = ""
+        mf = re.search(r'Formula</a>[^:]*:</strong>\s*([^<\s]+)', html, re.I)
+        if mf:
+            formula = _strip_tags(mf.group(1))
+        if name:
+            return [{'name': name, 'id': m_id.group(1), 'formula': formula,
+                     'url': nist_species_url(m_id.group(1))}]
+
+    # Hit list: <a href="/cgi/cbook.cgi?ID=C71432&...">Name</a>
+    for m in re.finditer(r'href="[^"]*[?&]ID=(C\d+)[^"]*"[^>]*>(.*?)</a>', html, re.S | re.I):
+        sid, name = m.group(1), _strip_tags(m.group(2))
+        if not name or sid in seen or len(name) > 120:
+            continue
+        seen.add(sid)
+        hits.append({'name': name, 'id': sid, 'formula': '',
+                     'url': nist_species_url(sid)})
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def _strip_tags(s):
+    s = re.sub(r'<[^>]+>', '', s or '')
+    s = (s.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+          .replace('&quot;', '"').replace('&#39;', "'").replace('&nbsp;', ' '))
+    return " ".join(s.split())
+
+
+def nist_species_spectra(sid, timeout=45):
+    """Lists the IR spectra available for one species.
+
+    Returns [{'index', 'description'}] -- the description carries phase,
+    instrument and resolution, which is what distinguishes the (often many)
+    spectra of a single compound.
+    """
+    html = _nist_http_get(nist_species_url(sid) + "&Mask=80", timeout=timeout)
+    out, seen = [], set()
+    for m in re.finditer(
+            r'href="[^"]*Type=IR-SPEC&(?:amp;)?Index=(\d+)[^"]*"[^>]*>(.*?)</a>',
+            html, re.S | re.I):
+        idx = int(m.group(1))
+        if idx in seen:
+            continue
+        seen.add(idx)
+        out.append({'index': idx, 'description': _strip_tags(m.group(2))})
+    if not out:
+        out = [{'index': 0, 'description': 'IR spectrum'}]
+    return sorted(out, key=lambda d: d['index'])
+
+
+def nist_fetch_ir(sid, index=0, timeout=45, use_cache=True):
+    """Downloads (and caches) one NIST IR spectrum. Returns (x, y, header).
+
+    Cached under ~/.ftir_plotter_nist/ so repeat use costs nothing and NIST
+    isn't hit twice for the same spectrum.
+    """
+    os.makedirs(NIST_CACHE_DIR, exist_ok=True)
+    path = os.path.join(NIST_CACHE_DIR, f"{sid}_{index}.jdx")
+    text = None
+    if use_cache and os.path.exists(path) and os.path.getsize(path) > 0:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    if text is None:
+        text = _nist_http_get(NIST_JCAMP_URL.format(sid=sid, index=index),
+                              timeout=timeout)
+        if "##" not in text:
+            raise ValueError(f"NIST returned no JCAMP data for {sid} index {index}")
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except Exception:
+            pass
+    return parse_jcamp_dx(text)
 
 
 # ==========================================
@@ -560,6 +888,111 @@ class FTIRPlotterGUI:
         self.rruff_local_dir = None
         self.rruff_lib = None
         self._refresh_rruff_status()
+
+        # --- Reference Libraries panel (Open Specy .h5, multi-library) ---
+        panel_lib = ttk.LabelFrame(sidebar_frame,
+                                   text=" 🔬 Reference Libraries (Open Specy) ",
+                                   padding=(8, 6))
+        panel_lib.pack(side="top", fill="x", pady=5)
+
+        self.spec_libs = []                # [{name, path, entries, active, var}]
+        self.lib_search_hits = []
+        self.lib_cfg_path = os.path.join(os.path.expanduser("~"),
+                                         ".ftir_plotter_libraries.json")
+
+        self.lib_frame = ttk.Frame(panel_lib)
+        self.lib_frame.pack(fill="x", pady=(0, 2))
+        ttk.Button(panel_lib, text="📚 Add .h5 Librar(ies)…",
+                   command=self.lib_add).pack(fill="x", pady=2)
+
+        lib_search_row = ttk.Frame(panel_lib)
+        lib_search_row.pack(fill="x", pady=(4, 3))
+        self.ent_lib_query = ttk.Entry(lib_search_row)
+        self.ent_lib_query.pack(side="left", fill="x", expand=True)
+        self.ent_lib_query.bind("<Return>", lambda e: self.lib_run_search())
+        ttk.Button(lib_search_row, text="🔍", width=3,
+                   command=self.lib_run_search).pack(side="right", padx=(3, 0))
+
+        self.lib_results_list = tk.Listbox(panel_lib, height=4, exportselection=False)
+        self.lib_results_list.pack(fill="x", pady=(0, 3))
+        ttk.Button(panel_lib, text="➕ Overlay Selected Reference",
+                   command=self.lib_overlay_selected).pack(fill="x", pady=(0, 2))
+
+        ttk.Separator(panel_lib, orient="horizontal").pack(fill="x", pady=4)
+        lib_tol_row = ttk.Frame(panel_lib)
+        lib_tol_row.pack(fill="x")
+        ttk.Label(lib_tol_row, text="Match tol (cm⁻¹):", font=("Helvetica", 8)).pack(side="left")
+        self.ent_lib_match_tol = ttk.Entry(lib_tol_row, width=6)
+        self.ent_lib_match_tol.insert(0, "12")
+        self.ent_lib_match_tol.pack(side="left", padx=(4, 0))
+        ttk.Button(panel_lib, text="🎯 Match by Selected Peaks (Libraries)",
+                   command=self.lib_match_by_peaks).pack(fill="x", pady=(2, 2))
+
+        self.lib_status_var = tk.StringVar(
+            value="Add an .h5 library built by build_openspecy_library.py --only ftir.")
+        ttk.Label(panel_lib, textvariable=self.lib_status_var, font=("Helvetica", 8),
+                  foreground="#555555", wraplength=250).pack(anchor="w")
+        self._lib_load_config()
+
+        # --- NIST WebBook panel (online, on demand) ---
+        panel_nist = ttk.LabelFrame(sidebar_frame, text=" 🌐 NIST WebBook (online) ",
+                                    padding=(8, 6))
+        panel_nist.pack(side="top", fill="x", pady=5)
+
+        self.nist_hits = []
+        self._nist_scan_cancel = False
+
+        nist_row = ttk.Frame(panel_nist)
+        nist_row.pack(fill="x", pady=(0, 3))
+        self.ent_nist_query = ttk.Entry(nist_row)
+        self.ent_nist_query.pack(side="left", fill="x", expand=True)
+        self.ent_nist_query.bind("<Return>", lambda e: self.nist_run_search())
+        ttk.Button(nist_row, text="🔍", width=3,
+                   command=self.nist_run_search).pack(side="right", padx=(3, 0))
+
+        nist_field_row = ttk.Frame(panel_nist)
+        nist_field_row.pack(fill="x", pady=(0, 3))
+        ttk.Label(nist_field_row, text="as", font=("Helvetica", 8)).pack(side="left")
+        self.combo_nist_field = ttk.Combobox(nist_field_row, state="readonly", width=8,
+                                             values=("auto", "name", "formula", "cas", "id"))
+        self.combo_nist_field.current(0)
+        self.combo_nist_field.pack(side="left", padx=(3, 0))
+        ttk.Label(nist_field_row, text="max:", font=("Helvetica", 8)).pack(side="left", padx=(8, 0))
+        self.ent_nist_cap = ttk.Entry(nist_field_row, width=5)
+        self.ent_nist_cap.insert(0, "25")
+        self.ent_nist_cap.pack(side="left", padx=(3, 0))
+
+        self.nist_results_list = tk.Listbox(panel_nist, height=4, exportselection=False)
+        self.nist_results_list.pack(fill="x", pady=(0, 3))
+        self.nist_results_list.bind("<Double-1>", self._nist_open_selected_page)
+        ttk.Button(panel_nist, text="➕ Overlay Selected Spectrum",
+                   command=self.nist_overlay_selected).pack(fill="x", pady=(0, 2))
+        self.btn_nist_match = ttk.Button(panel_nist, text="🎯 Match by Selected Peaks (NIST)",
+                                         command=self.nist_match_by_peaks)
+        self.btn_nist_match.pack(fill="x", pady=(0, 2))
+
+        self.nist_status_var = tk.StringVar(
+            value="Search NIST by name, formula or CAS. Spectra download on demand.")
+        ttk.Label(panel_nist, textvariable=self.nist_status_var, font=("Helvetica", 8),
+                  foreground="#555555", wraplength=250).pack(anchor="w")
+
+        # --- SDBS (external lookup only) ---
+        panel_sdbs = ttk.LabelFrame(sidebar_frame, text=" 🔗 SDBS (organic compounds) ",
+                                    padding=(8, 6))
+        panel_sdbs.pack(side="top", fill="x", pady=5)
+        ttk.Label(panel_sdbs,
+                  text="Opens SDBS in your browser. Download an FT-IR spectrum "
+                       "there, then load the .jdx normally.",
+                  font=("Helvetica", 8), foreground="#555555", wraplength=250).pack(anchor="w")
+        sdbs_row = ttk.Frame(panel_sdbs)
+        sdbs_row.pack(fill="x", pady=(4, 0))
+        self.ent_sdbs_query = ttk.Entry(sdbs_row)
+        self.ent_sdbs_query.pack(side="left", fill="x", expand=True)
+        self.ent_sdbs_query.bind("<Return>", lambda e: self.sdbs_lookup())
+        ttk.Button(sdbs_row, text="🔗", width=3,
+                   command=self.sdbs_lookup).pack(side="right", padx=(3, 0))
+        ttk.Button(panel_sdbs, text="🔗 Look up in SDBS",
+                   command=self.sdbs_lookup).pack(fill="x", pady=(3, 0))
 
         # --- Active Layers Control Panel ---
         self.panel_fit_targets = ttk.LabelFrame(sidebar_frame, text=" 📋 Plotted Spectra Layers ", padding=(8, 6))
@@ -1499,6 +1932,509 @@ class FTIRPlotterGUI:
         btn_row.pack(pady=8)
         ttk.Button(btn_row, text="🔗 Open RRUFF Page(s)", command=open_pages).pack(side="left", padx=4)
         ttk.Button(btn_row, text="➕ Overlay Selected Match(es)", command=overlay_chosen).pack(side="left", padx=4)
+
+    # ---------- Reference libraries (.h5, multi-library) ----------
+
+    def lib_add(self):
+        paths = filedialog.askopenfilenames(
+            title="Add reference .h5 librar(ies) (build_openspecy_library.py)",
+            filetypes=[("Reference library", ("*.h5", "*.hdf5")), ("All Files", "*.*")])
+        added = 0
+        for path in paths:
+            if self._lib_load_path(path, active=True):
+                added += 1
+        if added:
+            self._lib_save_config()
+        self._lib_refresh_panel()
+        self._lib_update_status()
+
+    def _lib_load_path(self, path, active=True):
+        if any(os.path.abspath(l['path']) == os.path.abspath(path) for l in self.spec_libs):
+            self.lib_status_var.set(f"Already loaded: {os.path.basename(path)}")
+            return False
+        try:
+            lib = load_speclib_h5(path)
+        except Exception as e:
+            messagebox.showerror("Library Error",
+                                 f"Could not open library:\n{os.path.basename(path)}\n{e}")
+            return False
+        for e in lib['entries']:
+            e['lib_path'] = path
+        self.spec_libs.append({'name': os.path.basename(path), 'path': path,
+                               'entries': lib['entries'], 'active': bool(active),
+                               'var': tk.BooleanVar(value=bool(active))})
+        return True
+
+    def _lib_remove(self, idx):
+        if 0 <= idx < len(self.spec_libs):
+            del self.spec_libs[idx]
+            self._lib_save_config()
+            self._lib_refresh_panel()
+            self._lib_update_status()
+
+    def _lib_toggle(self, idx):
+        if 0 <= idx < len(self.spec_libs):
+            self.spec_libs[idx]['active'] = bool(self.spec_libs[idx]['var'].get())
+            self._lib_save_config()
+            self._lib_update_status()
+
+    def _lib_refresh_panel(self):
+        for child in self.lib_frame.winfo_children():
+            child.destroy()
+        for idx, lib in enumerate(self.spec_libs):
+            row = ttk.Frame(self.lib_frame)
+            row.pack(fill="x", pady=1)
+            lib.setdefault('var', tk.BooleanVar(value=lib['active']))
+            lib['var'].set(lib['active'])
+            ttk.Checkbutton(row, text=f"{lib['name']} ({len(lib['entries'])})",
+                            variable=lib['var'],
+                            command=lambda i=idx: self._lib_toggle(i)).pack(side="left", anchor="w")
+            ttk.Button(row, text="❌", width=2,
+                       command=lambda i=idx: self._lib_remove(i)).pack(side="right")
+
+    def _lib_save_config(self):
+        try:
+            with open(self.lib_cfg_path, "w", encoding="utf-8") as fh:
+                json.dump([{'path': l['path'], 'active': l['active']}
+                           for l in self.spec_libs], fh, indent=2)
+        except Exception:
+            pass
+
+    def _lib_load_config(self):
+        if os.path.exists(self.lib_cfg_path):
+            try:
+                with open(self.lib_cfg_path, "r", encoding="utf-8") as fh:
+                    saved = json.load(fh)
+            except Exception:
+                saved = []
+            for item in saved or []:
+                p = item.get('path')
+                if p and os.path.exists(p):
+                    self._lib_load_path(p, active=item.get('active', True))
+        self._lib_refresh_panel()
+        self._lib_update_status()
+
+    def _lib_active_entries(self):
+        out = []
+        for lib in self.spec_libs:
+            if lib['active']:
+                out.extend(lib['entries'])
+        return out
+
+    def _lib_update_status(self):
+        active = [l for l in self.spec_libs if l['active']]
+        total = sum(len(l['entries']) for l in active)
+        if not self.spec_libs:
+            self.lib_status_var.set(
+                "Add an .h5 library built by build_openspecy_library.py --only ftir.")
+        else:
+            sources = sorted({e.get('source', 'Library') for l in active
+                              for e in l['entries']})
+            tag = "/".join(sources) if sources else "Libraries"
+            self.lib_status_var.set(
+                f"{tag}: {len(active)}/{len(self.spec_libs)} librar(ies) active · "
+                f"{total:,} spectra. Search / Overlay / Match.")
+
+    @staticmethod
+    def _lib_haystack(e):
+        return (f"{e.get('name','')} {e.get('id','')} {e.get('formula','')} "
+                f"{e.get('collection','')}").lower()
+
+    @staticmethod
+    def _lib_label(e):
+        src = e.get('source') or 'Library'
+        return f"{src}: {e.get('name','')}" + (f" ({e['id']})" if e.get('id') else "")
+
+    def lib_run_search(self):
+        self.lib_results_list.delete(0, tk.END)
+        self.lib_search_hits = []
+        pool = self._lib_active_entries()
+        if not pool:
+            messagebox.showinfo(
+                "No Library",
+                "Add a reference .h5 library first.\n\n"
+                "Build one with:\n"
+                "  python build_openspecy_library.py --only ftir --out openspecy_ftir.h5")
+            return
+        q = self.ent_lib_query.get().strip().lower()
+        hits = [e for e in pool if not q or q in self._lib_haystack(e)][:300]
+        self.lib_search_hits = hits
+        if not hits:
+            self.lib_status_var.set("Libraries: no matches.")
+            return
+        for h in hits:
+            bits = [h.get('name', ''), h.get('id', '')]
+            if h.get('collection'):
+                bits.append(h['collection'])
+            self.lib_results_list.insert(tk.END, "  ·  ".join(b for b in bits if b))
+        self.lib_status_var.set(f"Libraries: {len(hits)} match(es). Select and overlay.")
+
+    def _lib_read_xy(self, hit):
+        with h5py.File(hit['lib_path'], 'r') as f:
+            g = f['spectra'][hit['group']]
+            x = np.array(g['x'][:], dtype=float)
+            y = np.array(g['y'][:], dtype=float)
+        return x, y
+
+    def lib_overlay_selected(self):
+        sel = self.lib_results_list.curselection()
+        if not sel or sel[0] >= len(self.lib_search_hits):
+            self.lib_status_var.set("Libraries: select a search result first.")
+            return
+        hit = self.lib_search_hits[sel[0]]
+        try:
+            x, y = self._lib_read_xy(hit)
+        except Exception as e:
+            self.lib_status_var.set(f"Libraries: could not read that reference — {e}")
+            return
+        self.save_to_history()
+        self._add_reference(x, y, self._lib_label(hit), f"__ref_lib_{hit['id']}",
+                            rruff_name=hit.get('name'), rruff_id=hit.get('id'),
+                            rruff_url_=hit.get('url') or OPENSPECY_URL)
+        self.replot_and_refresh_canvas()
+        self.lib_status_var.set(f"Overlaid {hit.get('name')} ({hit.get('id')}).")
+
+    def lib_match_by_peaks(self):
+        if not self.peak_guesses:
+            messagebox.showinfo(
+                "Mark Peaks First",
+                "Turn on '🎯 Peak Selection', then right-click on the plot to mark the "
+                "bands you want to match. Then run 'Match by Selected Peaks'.")
+            return
+        pool = self._lib_active_entries()
+        if not pool:
+            messagebox.showinfo("No Library", "Add a reference .h5 library first.")
+            return
+        try:
+            tolerance = float(self.ent_lib_match_tol.get().strip())
+        except ValueError:
+            tolerance = 12.0
+        exp_peaks = list(self.peak_guesses)
+        q = self.ent_lib_query.get().strip().lower()
+
+        scored = []
+        for e in pool:
+            if q and q not in self._lib_haystack(e):
+                continue
+            if e['peaks'].size == 0:
+                continue
+            score, avg, matched = peak_match_score(e['peaks'], exp_peaks, tolerance)
+            if matched > 0:
+                scored.append({'score': score, 'avg': avg, 'matched': matched,
+                               'name': e['name'], 'id': e['id'],
+                               'source': e.get('source', 'Library'),
+                               'detail': e.get('collection', '') or e.get('formula', ''),
+                               'group': e['group'], 'lib_path': e.get('lib_path'),
+                               'url': e.get('url') or OPENSPECY_URL})
+        scored.sort(key=lambda t: (-t['score'], t['avg']))
+        self._show_match_results(scored[:100], len(exp_peaks), tolerance,
+                                 title="Reference Libraries", status_var=self.lib_status_var,
+                                 reader=self._lib_read_xy, labeler=self._lib_label)
+
+    # ---------- NIST WebBook (online, on demand) ----------
+
+    def nist_run_search(self):
+        query = self.ent_nist_query.get().strip()
+        self.nist_results_list.delete(0, tk.END)
+        self.nist_hits = []
+        if not query:
+            self.nist_status_var.set("NIST: type a compound name, formula or CAS number.")
+            return
+        field = self.combo_nist_field.get() or "auto"
+        try:
+            cap = max(1, int(float(self.ent_nist_cap.get().strip())))
+        except ValueError:
+            cap = 25
+        self.nist_status_var.set("NIST: searching …")
+
+        def worker():
+            try:
+                species = nist_search(query, field=field, limit=cap)
+                # Expand each species into its individual IR spectra, so the
+                # user picks a phase/instrument rather than a compound.
+                hits = []
+                for sp in species:
+                    try:
+                        for s in nist_species_spectra(sp['id']):
+                            hits.append({**sp, 'index': s['index'],
+                                         'detail': s['description']})
+                    except Exception:
+                        hits.append({**sp, 'index': 0, 'detail': 'IR spectrum'})
+                    if len(hits) >= cap * 4:
+                        break
+                err = None
+            except Exception as e:                       # noqa: BLE001
+                hits, err = [], e
+            self.root.after(0, lambda: self._nist_show_hits(hits, err))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _nist_show_hits(self, hits, err):
+        if err is not None:
+            self.nist_status_var.set(f"NIST search failed: {err}")
+            return
+        self.nist_hits = hits
+        if not hits:
+            self.nist_status_var.set("NIST: no species with IR spectra matched.")
+            return
+        for h in hits:
+            detail = (h.get('detail') or '')[:70]
+            self.nist_results_list.insert(
+                tk.END, f"{h['name']}  ·  #{h.get('index', 0)}" +
+                        (f"  ·  {detail}" if detail else ""))
+        self.nist_status_var.set(
+            f"NIST: {len(hits)} spectra across {len({h['id'] for h in hits})} species. "
+            f"Select and overlay; double-click opens the NIST page.")
+
+    def _nist_selected(self):
+        sel = self.nist_results_list.curselection()
+        if not sel or sel[0] >= len(self.nist_hits):
+            return None
+        return self.nist_hits[sel[0]]
+
+    def _nist_open_selected_page(self, event=None):
+        hit = self._nist_selected()
+        if hit:
+            webbrowser.open_new_tab(hit.get('url') or nist_species_url(hit['id']))
+
+    @staticmethod
+    def _nist_label(hit):
+        return f"NIST: {hit['name']} (#{hit.get('index', 0)})"
+
+    def nist_overlay_selected(self):
+        hit = self._nist_selected()
+        if not hit:
+            self.nist_status_var.set("NIST: select a search result first.")
+            return
+        self.nist_status_var.set(f"NIST: downloading {hit['name']} …")
+
+        def worker():
+            try:
+                x, y, _ = nist_fetch_ir(hit['id'], hit.get('index', 0))
+                err = None
+            except Exception as e:                       # noqa: BLE001
+                x = y = None
+                err = e
+
+            def done():
+                if err is not None:
+                    self.nist_status_var.set(f"NIST: could not fetch that spectrum — {err}")
+                    return
+                self.save_to_history()
+                self._add_reference(x, y, self._nist_label(hit),
+                                    f"__ref_nist_{hit['id']}_{hit.get('index', 0)}",
+                                    rruff_name=hit['name'], rruff_id=hit['id'],
+                                    rruff_url_=hit.get('url') or nist_species_url(hit['id']))
+                self.replot_and_refresh_canvas()
+                self.nist_status_var.set(f"NIST: overlaid {hit['name']}.")
+            self.root.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _nist_stop_scan(self):
+        self._nist_scan_cancel = True
+        self.nist_status_var.set("NIST: stopping …")
+
+    def _nist_set_scanning(self, scanning):
+        if scanning:
+            self.btn_nist_match.config(text="⏹ Stop scanning", command=self._nist_stop_scan)
+        else:
+            self.btn_nist_match.config(text="🎯 Match by Selected Peaks (NIST)",
+                                       command=self.nist_match_by_peaks)
+
+    def nist_match_by_peaks(self):
+        """Bounded online match: only the spectra currently listed are fetched.
+
+        Matching all of NIST live is not on -- it would mean downloading the
+        whole compilation. So the search results *are* the candidate set: run a
+        search first, then rank what it returned.
+        """
+        if not self.peak_guesses:
+            messagebox.showinfo(
+                "Mark Peaks First",
+                "Turn on '🎯 Peak Selection', then right-click on the plot to mark the "
+                "bands you want to match.")
+            return
+        if not self.nist_hits:
+            messagebox.showinfo(
+                "Search First",
+                "NIST matching ranks the spectra your search returned, because "
+                "scanning all of NIST would mean downloading the entire "
+                "compilation.\n\nSearch by name, formula or CAS first — then match. "
+                "Downloads are cached, so re-running is instant.")
+            return
+        try:
+            tolerance = float(self.ent_lib_match_tol.get().strip())
+        except (ValueError, AttributeError):
+            tolerance = 12.0
+        exp_peaks = list(self.peak_guesses)
+        hits = list(self.nist_hits)
+        n = len(hits)
+        self._nist_scan_cancel = False
+        self._nist_set_scanning(True)
+
+        def worker():
+            scored, failed = [], 0
+            for i, hit in enumerate(hits, 1):
+                if self._nist_scan_cancel:
+                    break
+                try:
+                    x, y, _ = nist_fetch_ir(hit['id'], hit.get('index', 0))
+                    ref_peaks = detect_reference_peaks(x, y)
+                    score, avg, matched = peak_match_score(ref_peaks, exp_peaks, tolerance)
+                    if matched > 0:
+                        scored.append({'score': score, 'avg': avg, 'matched': matched,
+                                       'name': hit['name'], 'id': hit['id'],
+                                       'source': 'NIST', 'index': hit.get('index', 0),
+                                       'detail': (hit.get('detail') or '')[:60],
+                                       'group': None, 'lib_path': None,
+                                       'url': hit.get('url') or nist_species_url(hit['id'])})
+                except Exception:                        # noqa: BLE001
+                    failed += 1
+                if i % 3 == 0 or i == n:
+                    self.root.after(0, lambda i=i: self.nist_status_var.set(
+                        f"NIST: scanned {i}/{n} …"))
+            scored.sort(key=lambda t: (-t['score'], t['avg']))
+            stopped = self._nist_scan_cancel
+
+            def done():
+                self._nist_set_scanning(False)
+                self._nist_scan_cancel = False
+                note = " (stopped early)" if stopped else ""
+                if failed:
+                    note += f", {failed} unavailable"
+                self.nist_status_var.set(
+                    f"NIST: {len(scored)} of {n} scanned matched{note}.")
+                self._show_match_results(
+                    scored[:100], len(exp_peaks), tolerance, title="NIST WebBook",
+                    status_var=self.nist_status_var,
+                    reader=lambda h: nist_fetch_ir(h['id'], h.get('index', 0))[:2],
+                    labeler=self._nist_label)
+            self.root.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ---------- Shared match-results window ----------
+
+    def _show_match_results(self, scored, n_exp, tolerance, title, status_var,
+                            reader, labeler):
+        """Ranked candidate window, shared by the library and NIST matchers.
+
+        `reader(hit) -> (x, y)` and `labeler(hit) -> str` are what differ
+        between the two sources; everything else is identical.
+        """
+        if not scored:
+            status_var.set(f"{title}: nothing matched the marked bands.")
+            messagebox.showinfo("No Matches",
+                                f"No {title} reference had bands near your marked "
+                                f"peaks.\nTry a larger match tolerance or different peaks.")
+            return
+
+        pop = tk.Toplevel(self.root)
+        pop.title(f"{title} — Candidate Ranking")
+        pop.geometry("760x360")
+        pop.transient(self.root)
+        pop.grab_set()
+        ttk.Label(pop, text=f"Ranked by alignment with your {n_exp} marked band(s) "
+                            f"(±{tolerance:g} cm⁻¹). Double-click a row to open its page.",
+                  font=("Helvetica", 9, "bold")).pack(pady=6, padx=8, anchor="w")
+
+        frame = ttk.Frame(pop)
+        frame.pack(fill="both", expand=True, padx=8, pady=4)
+        scroll = ttk.Scrollbar(frame)
+        scroll.pack(side="right", fill="y")
+        tree = ttk.Treeview(frame, columns=("Score", "Name", "ID", "Detail", "Matched"),
+                            show="headings", yscrollcommand=scroll.set, height=10,
+                            selectmode="extended")
+        for col, head, width, anchor in (
+                ("Score", "Match Score", 95, "center"),
+                ("Name", "Name", 210, "w"),
+                ("ID", "ID", 95, "center"),
+                ("Detail", "Collection / Detail", 240, "w"),
+                ("Matched", "Bands Matched", 105, "center")):
+            tree.heading(col, text=head)
+            tree.column(col, width=width, anchor=anchor)
+        tree.pack(fill="both", expand=True)
+        scroll.config(command=tree.yview)
+
+        row_map = {}
+        for rec in scored:
+            iid = tree.insert("", "end", values=(f"{rec['score']:.0f}%", rec['name'],
+                                                 rec['id'], rec.get('detail', ''),
+                                                 f"{rec['matched']}/{n_exp}"))
+            row_map[iid] = rec
+
+        def open_pages(event=None):
+            opened = 0
+            for iid in tree.selection():
+                rec = row_map.get(iid)
+                if rec and rec.get('url'):
+                    webbrowser.open_new_tab(rec['url'])
+                    opened += 1
+            if opened == 0:
+                messagebox.showinfo("Nothing Selected", "Select a row, then open its page.")
+        tree.bind("<Double-1>", open_pages)
+
+        def overlay_chosen():
+            sel = tree.selection()
+            if not sel:
+                return
+            pop.destroy()
+            self.save_to_history()
+            added = 0
+            for iid in sel:
+                hit = row_map[iid]
+                try:
+                    x, y = reader(hit)
+                    if len(x) == 0:
+                        continue
+                except Exception:
+                    continue
+                self._add_reference(x, y, labeler(hit),
+                                    f"__ref_match_{hit['source']}_{hit['id']}_{added}",
+                                    rruff_name=hit['name'], rruff_id=hit['id'],
+                                    rruff_url_=hit.get('url'))
+                added += 1
+            if added:
+                self.replot_and_refresh_canvas()
+                status_var.set(f"{title}: overlaid {added} matched reference(s).")
+
+        btn_row = ttk.Frame(pop)
+        btn_row.pack(pady=8)
+        ttk.Button(btn_row, text="🔗 Open Page(s)", command=open_pages).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="➕ Overlay Selected Match(es)",
+                   command=overlay_chosen).pack(side="left", padx=4)
+
+    # ---------- SDBS (external lookup) ----------
+
+    def sdbs_lookup(self):
+        """Opens the SDBS search page in the user's browser.
+
+        No scraping and no automated download: SDBS's terms prohibit automated
+        retrieval and impose a daily access limit, so the user drives it.
+        """
+        query = self.ent_sdbs_query.get().strip()
+        if not query:
+            query = self.ent_nist_query.get().strip() or self.ent_lib_query.get().strip()
+
+        webbrowser.open_new_tab(SDBS_SEARCH_URL)
+        if query:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(query)
+            messagebox.showinfo(
+                "SDBS Opened",
+                f"SDBS search page opened in your browser.\n\n"
+                f"'{query}' has been copied to your clipboard — paste it into the "
+                f"compound name field.\n\n"
+                f"SDBS does not permit automated downloads, so save the FT-IR "
+                f"spectrum yourself (JCAMP-DX), then bring it in with 📂 Load Spectra.")
+        else:
+            messagebox.showinfo(
+                "SDBS Opened",
+                "SDBS search page opened in your browser. Search by compound name, "
+                "formula, CAS number or SDBS number.\n\n"
+                "Save the FT-IR spectrum as JCAMP-DX, then bring it in with "
+                "📂 Load Spectra.")
 
     def clear_canvas(self):
         if self.active_datasets:
