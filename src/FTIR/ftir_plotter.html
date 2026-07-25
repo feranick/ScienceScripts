@@ -1064,10 +1064,7 @@
             // append rather than clobber.
             const host = document.getElementById('db-offers'); if (!host) return;
             Array.from(host.querySelectorAll('[data-rruff-offer]')).forEach(n => n.remove());
-            if (!rruffServerOffer || rruffServerOffer.loaded) {
-                if (!host.children.length) host.style.display = 'none';
-                return;
-            }
+            if (!rruffServerOffer || rruffServerOffer.loaded) { dbSyncOffersVisibility(); return; }
             host.style.display = 'flex';
             const o = rruffServerOffer;
             const wrap = document.createElement('div');
@@ -1085,6 +1082,7 @@
             btn.disabled = !!o.busy;
             btn.onclick = loadRruffServerLibrary;
             wrap.appendChild(lbl); wrap.appendChild(btn); host.appendChild(wrap);
+            dbSyncOffersVisibility();
         }
 
         async function loadRruffServerLibrary() {
@@ -1387,13 +1385,17 @@
         }
 
         function renderLibOffers() {
+            // The RRUFF offer shares this box, so only clear our own rows —
+            // clearing wholesale used to delete the RRUFF row the moment the
+            // library offers resolved, making an unloaded RRUFF library vanish.
             const host = document.getElementById('db-offers'); if (!host) return;
             const pending = libServerOffers.filter(o => !o.loaded);
-            host.innerHTML = "";
-            if (!pending.length) { host.style.display = 'none'; return; }
+            Array.from(host.querySelectorAll('[data-lib-offer]')).forEach(n => n.remove());
+            if (!pending.length) { renderRruffOffer(); dbSyncOffersVisibility(); return; }
             host.style.display = 'flex';
 
             const hdr = document.createElement('div');
+            hdr.setAttribute('data-lib-offer', '1');
             hdr.style.fontSize = '0.78rem'; hdr.style.fontWeight = 'bold'; hdr.style.color = '#084298';
             hdr.innerText = `📦 ${pending.length} librar${pending.length === 1 ? 'y' : 'ies'} available on the server`;
             host.appendChild(hdr);
@@ -1401,6 +1403,7 @@
             libServerOffers.forEach((o, idx) => {
                 if (o.loaded) return;
                 const row = document.createElement('div');
+                row.setAttribute('data-lib-offer', '1');
                 row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px';
                 const lbl = document.createElement('span');
                 lbl.style.flex = '1'; lbl.style.fontSize = '0.78rem'; lbl.style.overflow = 'hidden';
@@ -1419,6 +1422,7 @@
 
             if (pending.length > 1) {
                 const all = document.createElement('button');
+                all.setAttribute('data-lib-offer', '1');
                 all.className = 'btn-crop';
                 all.style.padding = '4px'; all.style.fontSize = '0.75rem';
                 all.innerText = `⬇ Load all (${fmtBytes(pending.reduce((s, o) => s + (o.size || 0), 0)) || 'unknown size'})`;
@@ -1429,6 +1433,15 @@
                 };
                 host.appendChild(all);
             }
+            renderRruffOffer();
+            dbSyncOffersVisibility();
+        }
+
+        // The offer box holds rows from two independent sources; it is visible
+        // whenever either has something pending.
+        function dbSyncOffersVisibility() {
+            const host = document.getElementById('db-offers'); if (!host) return;
+            host.style.display = host.children.length ? 'flex' : 'none';
         }
 
         async function loadSpecServerLibrary(idx) {

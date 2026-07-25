@@ -193,73 +193,40 @@
         
         <div class="status-badge" id="status-display">Active profiles loaded: 0</div>
 
-        <div class="rruff-panel" id="cod-panel" style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 6px;">
-            <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">🌐 COD (Crystallography Open DB)</label>
-            <p class="info-text" id="cod-intro" style="margin: 0;">Open a baked COD powder .h5 library (from build_cod_powder_library.py) to search, overlay, and match — fully offline.</p>
-            <div id="cod-loaded-note">✅ Library loaded</div>
-            <div id="cod-libs" style="display:flex; flex-direction:column; gap:2px;"></div>
+        <div class="rruff-panel" id="db-panel" style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 7px;">
+            <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">🔬 Reference Databases</label>
 
-            <div id="cod-match-group" style="display: flex; flex-direction: column; gap: 6px;">
-                <div style="display: flex; align-items: center; gap: 6px;">
-                    <span style="font-size: 0.8rem; font-weight: bold; color:#495057;">Match tol. ±</span>
-                    <input type="number" id="cod-match-tol" value="0.2" step="0.05" min="0.01" style="width: 56px; padding: 6px; border: 1px solid #ced4da; border-radius: 6px;">
-                    <span style="font-size: 0.8rem; color:#495057;">°2θ</span>
-                </div>
-                <button class="btn-fit-toggle" style="background-color:#0d6efd;" onclick="codMatchByPeaks()">🎯 Match by Selected Peaks (COD)</button>
+            <div style="display: flex; gap: 6px;">
+                <input type="text" id="db-query" placeholder="name or formula (e.g. Quartz, TiO2)" style="flex-grow: 1; padding: 8px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.82rem;">
+                <button class="btn-crop" style="width: auto; padding: 8px 10px;" onclick="dbSearch()">🔍</button>
             </div>
 
-            <div id="cod-search-group" style="display: flex; flex-direction: column; gap: 6px;">
-                <div style="display: flex; gap: 6px;">
-                    <input type="text" id="cod-query" placeholder="name or formula (e.g. Quartz, TiO2)" style="flex-grow: 1; padding: 8px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.82rem;">
-                    <button class="btn-crop" style="width: auto; padding: 8px 10px;" onclick="codSearch()">🔍</button>
-                </div>
-                <select id="cod-results" size="4" style="width: 100%; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.8rem; padding: 4px;"></select>
-                <button class="btn-ref-sub" onclick="codOverlaySelected()">➕ Overlay Selected Reference</button>
+            <div id="db-sources" style="display: flex; flex-direction: column; gap: 2px;"></div>
+            <div id="db-offers" style="display: none; flex-direction: column; gap: 3px; border: 1px dashed #b6d4fe; border-radius: 6px; padding: 6px; background: #f8fbff;"></div>
+
+            <div id="db-results" style="display: none; flex-direction: column; max-height: 168px; overflow-y: auto; border: 1px solid #ced4da; border-radius: 6px;"></div>
+
+            <div style="display: flex; gap: 6px; align-items: center;">
+                <button class="btn-ref-sub" style="flex: 1; padding: 8px;" onclick="dbOverlaySelected()">➕ Overlay</button>
+                <button class="btn-fit-toggle" style="flex: 1; padding: 8px; background-color:#0d6efd;" onclick="dbMatchByPeaks()">🎯 Match</button>
+                <input type="number" id="db-match-tol" value="0.2" step="0.05" min="0.01" title="Match tolerance (deg 2θ)" style="width: 52px; padding: 7px 4px; border: 1px solid #ced4da; border-radius: 6px; text-align: center;">
             </div>
 
-            <div id="cod-load-group" style="display: flex; flex-direction: column; gap: 6px;">
-                <label class="btn-crop" for="cod-h5" style="text-align: center; cursor: pointer;">📚 Add COD .h5 Library</label>
-                <input type="file" id="cod-h5" accept=".h5,.hdf5" multiple style="display:none;" onchange="addCodLibrary(event)">
+            <div id="db-status" style="font-size: 0.78rem; color: #6c757d;">Add a library below, then search. To match: turn on Peak Selection, right-click to mark peaks, then Match.</div>
+
+            <div style="border-top: 1px solid #e9ecef; padding-top: 6px; display: flex; align-items: center; gap: 6px;">
+                <span style="flex: 1; font-size: 0.78rem; color: #6c757d;">Manage sources</span>
+                <button class="btn-crop" id="db-manage-toggle" style="width: auto; padding: 3px 9px; font-size: 0.75rem;" onclick="dbToggleManage()">▾</button>
             </div>
 
-            <div id="cod-status" style="font-size: 0.78rem; color: #6c757d;">Open a COD .h5 library. To match: turn on Peak Selection, right-click to mark peaks, then Match.</div>
-        </div>
-
-        <div class="rruff-panel" id="rruff-panel" style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 6px;">
-            <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">💎 RRUFF (powder)</label>
-            <p class="info-text" id="rruff-intro" style="margin: 0;">Open a RRUFF powder .h5 library or a local folder to search, overlay, and match — alongside Materials Project.</p>
-            <div id="rruff-loaded-note">✅ Library loaded</div>
-
-            <div id="rruff-match-group" style="display: flex; flex-direction: column; gap: 6px;">
-                <div style="display: flex; align-items: center; gap: 4px; font-size: 0.8rem; color: #495057;">
-                    <span>Match tol. ±</span>
-                    <input type="number" id="rruff-match-tol" value="0.2" step="0.05" min="0.01" style="width: 56px; padding: 6px; border: 1px solid #ced4da; border-radius: 6px;">
-                    <span>°2θ</span>
-                </div>
-                <button class="btn-fit-toggle" style="background-color:#6f42c1;" onclick="rruffMatchByPeaks()">🎯 Match by Selected Peaks (RRUFF)</button>
-            </div>
-
-            <div id="rruff-search-group" style="display: flex; flex-direction: column; gap: 6px;">
-                <div style="display: flex; gap: 4px; align-items: center;">
-                    <input type="text" id="rruff-query" placeholder="mineral or RRUFF ID (e.g. Quartz)" style="flex-grow: 1; padding: 8px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.82rem;">
-                    <button class="btn-crop" style="width: auto; padding: 8px 10px;" onclick="rruffSearch()">🔍</button>
-                </div>
-                <select id="rruff-results" size="4" style="width: 100%; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.8rem; padding: 4px;"></select>
-                <button class="btn-ref-sub" onclick="rruffOverlaySelected()">➕ Overlay Selected Reference</button>
-            </div>
-
-            <div id="rruff-load-group" style="display: flex; flex-direction: column; gap: 6px;">
-                <label class="btn-crop" for="rruff-folder" style="text-align: center; cursor: pointer;">📂 Load Local RRUFF Folder</label>
+            <div id="db-manage" style="display: none; flex-direction: column; gap: 6px;">
+                <label class="btn-crop" for="db-h5" style="text-align: center; cursor: pointer; font-size: 0.8rem;">📚 Add .h5 librar(ies)</label>
+                <input type="file" id="db-h5" accept=".h5,.hdf5" multiple style="display:none;" onchange="addDbLibrary(event)">
+                <label class="btn-crop" for="rruff-folder" style="text-align: center; cursor: pointer; font-size: 0.8rem;">📂 Load local RRUFF folder</label>
                 <input type="file" id="rruff-folder" webkitdirectory directory multiple style="display:none;" onchange="loadRruffFolder(event)">
-                <label class="btn-crop" for="rruff-h5" style="text-align: center; cursor: pointer;">📚 Open RRUFF .h5 Library</label>
-                <input type="file" id="rruff-h5" accept=".h5,.hdf5" style="display:none;" onchange="loadRruffLibrary(event)">
-                <button class="btn-crop" style="font-size: 0.72rem; padding: 5px;" onclick="forgetSavedLibrary()">🗑 Forget saved library</button>
+                <button class="btn-crop" style="font-size: 0.75rem; padding: 5px;" onclick="forgetSavedLibrary()">🗑 Forget saved RRUFF library</button>
             </div>
-
-            <div id="rruff-status" style="font-size: 0.78rem; color: #6c757d;">Open a library below. To match: turn on Peak Selection, right-click to mark peaks, then Match.</div>
         </div>
-
-        <div class="checkbox-container" style="flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 5px; width: 100%;">
             <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">📋 Plotted Canvas Layers:</label>
             <div id="fit-targets-panel" style="width: 100%; max-height: 140px; overflow-y: auto; border: 1px solid #ced4da; border-radius: 6px; background-color: #fff; padding: 8px; box-sizing: border-box;">
                 <div style="color: #888888; font-size: 0.85rem; font-style: italic;">No Scans Loaded</div>
@@ -294,22 +261,11 @@
             <div id="cod-match-list" style="width: 100%; max-height: 320px; overflow-y: auto; padding: 6px; border: 1px solid #ced4da; border-radius: 6px; box-sizing: border-box;"></div>
             <div style="display: flex; justify-content: flex-end; gap: 8px;">
                 <button class="btn-crop" style="width: auto; padding: 8px 14px; margin: 0;" onclick="closeCodMatchModal()">Close</button>
-                <button class="btn-ref-sub" style="width: auto; padding: 8px 14px; margin: 0;" onclick="codOverlayMatches()">➕ Overlay Selected Match(es)</button>
+                <button class="btn-ref-sub" style="width: auto; padding: 8px 14px; margin: 0;" onclick="dbOverlayMatches()">➕ Overlay Selected Match(es)</button>
             </div>
         </div>
     </div>
 
-    <div id="rruff-match-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
-        <div style="background: white; padding: 22px; border-radius: 8px; width: 560px; max-height: 82vh; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
-            <h3 style="margin: 0; color: #6f42c1; font-size: 1.1rem;">💎 RRUFF Powder — Search &amp; Match</h3>
-            <p class="info-text" id="rruff-match-subtitle" style="margin: 0;"></p>
-            <div id="rruff-match-list" style="width: 100%; max-height: 320px; overflow-y: auto; padding: 6px; border: 1px solid #ced4da; border-radius: 6px; box-sizing: border-box;"></div>
-            <div style="display: flex; justify-content: flex-end; gap: 8px;">
-                <button class="btn-crop" style="width: auto; padding: 8px 14px; margin: 0;" onclick="closeRruffMatchModal()">Close</button>
-                <button class="btn-ref-sub" style="width: auto; padding: 8px 14px; margin: 0;" onclick="rruffOverlayMatches()">➕ Overlay Selected Match(es)</button>
-            </div>
-        </div>
-    </div>
 
     <div id="main-content">
         <div id="chart-container"></div>
@@ -1224,7 +1180,7 @@
                     try { FS.unlink(fsName); } catch (e) {}
                 }
                 rruffLibrary = out; rruffLocalFiles = [];
-                document.getElementById('rruff-status').innerText = `RRUFF library${sourceLabel ? ' (' + sourceLabel + ')' : ''}: ${out.length} patterns (precomputed peaks). Search or Match.`;
+                document.getElementById('db-status').innerText = `RRUFF library${sourceLabel ? ' (' + sourceLabel + ')' : ''}: ${out.length} patterns (precomputed peaks). Search or Match.`;
                 updateRruffPanelState();
                 return out.length;
             } finally { hideInitBanner(); }
@@ -1233,7 +1189,7 @@
         async function loadRruffLibrary(event) {
             const file = event.target.files && event.target.files[0]; event.target.value = '';
             if (!file) return;
-            const statusEl = document.getElementById('rruff-status');
+            const statusEl = document.getElementById('db-status');
             statusEl.innerText = "Loading RRUFF .h5 library ...";
             try {
                 const buf = await file.arrayBuffer();
@@ -1252,7 +1208,7 @@
                 return { name, id, url: null, file: f };
             });
             rruffLibrary = [];
-            document.getElementById('rruff-status').innerText = rruffLocalFiles.length
+            document.getElementById('db-status').innerText = rruffLocalFiles.length
                 ? `RRUFF folder: ${rruffLocalFiles.length} files. Search or Match by peaks.`
                 : "No .txt files found in that folder.";
             updateRruffPanelState();
@@ -1273,7 +1229,7 @@
         async function forgetSavedLibrary() {
             try { await idbClear(); } catch (e) {}
             rruffLibrary = []; updateRruffPanelState();
-            document.getElementById('rruff-status').innerText = "Saved library cleared. Load a folder (📂) or an .h5 library (📚).";
+            document.getElementById('db-status').innerText = "Saved library cleared. Load a folder (📂) or an .h5 library (📚).";
         }
 
         async function fetchArrayBufferWithProgress(url, onProgress, timeoutMs) {
@@ -1294,7 +1250,7 @@
         }
 
         async function tryAutoLoadLibrary() {
-            const statusEl = document.getElementById('rruff-status');
+            const statusEl = document.getElementById('db-status');
             const params = new URLSearchParams(location.search);
             const url = params.get('lib') || HOST_LIBRARY_URL;
             showInitBanner('⏳ Loading RRUFF library from server…');
@@ -1322,20 +1278,6 @@
             if (note && loaded) note.innerText = rruffLibrary.length ? `✅ Library loaded — ${rruffLibrary.length} patterns` : `✅ Folder loaded — ${rruffLocalFiles.length} files`;
         }
 
-        function rruffSearch() {
-            const q = document.getElementById('rruff-query').value.trim();
-            const statusEl = document.getElementById('rruff-status');
-            const resultsEl = document.getElementById('rruff-results');
-            resultsEl.innerHTML = ""; rruffHits = [];
-            let pool = rruffLibrary.length ? rruffLibrary : (rruffLocalFiles.length ? rruffLocalFiles : null);
-            if (!pool) { statusEl.innerText = "No references loaded. Use 📂 (folder) or 📚 (.h5 library) first."; return; }
-            const ql = q.toLowerCase();
-            const hits = pool.filter(e => !ql || (`${e.name} ${e.id} ${e.file ? e.file.name : ''}`).toLowerCase().includes(ql)).slice(0, 300);
-            if (!hits.length) { statusEl.innerText = "No matches."; return; }
-            rruffHits = hits;
-            hits.forEach((h, i) => { const o = document.createElement('option'); o.value = String(i); o.innerText = `${h.name}${h.id ? ' · ' + h.id : ''}`; resultsEl.appendChild(o); });
-            statusEl.innerText = `${hits.length} match(es)${hits.length === 300 ? ' (first 300)' : ''}. Select and overlay.`;
-        }
 
         async function recordToParsed(rec) {
             let x, y;
@@ -1354,89 +1296,10 @@
             if (refMax > 0 && dataMax > 0 && isFinite(dataMax)) ref.intensities = ref.intensities.map(v => v / refMax * dataMax);
         }
 
-        async function rruffOverlaySelected() {
-            const resultsEl = document.getElementById('rruff-results');
-            const statusEl = document.getElementById('rruff-status');
-            const val = resultsEl.value;
-            if (val === '' || !rruffHits[+val]) { statusEl.innerText = "Select a search result first."; return; }
-            const hit = rruffHits[+val];
-            try {
-                const parsed = await recordToParsed(hit);
-                saveToHistory(); scaleRefToData(parsed);
-                persistentDatasets[`__ref_rruff_${hit.name}_${hit.id}`] = parsed;
-                refreshCheckboxTargetsPanel(); updateChartCanvas();
-                statusEl.innerText = `Overlaid ${hit.name}${hit.id ? ' (' + hit.id + ')' : ''}.`;
-            } catch (err) { statusEl.innerText = "Could not read that reference: " + err.message; }
-        }
 
-        async function rruffMatchByPeaks() {
-            const statusEl = document.getElementById('rruff-status');
-            if (!peakGuessesX.length) { alert("Mark peaks first: turn on '🎯 Peak Selection', then right-click on the plot to mark peaks."); return; }
-            let tol = parseFloat(document.getElementById('rruff-match-tol').value); if (isNaN(tol)) tol = 0.2;
-            const q = document.getElementById('rruff-query').value.trim().toLowerCase();
-            const exp = peakGuessesX.slice();
 
-            if (rruffLibrary.length) {
-                const scored = [];
-                rruffLibrary.forEach(e => {
-                    if (q && !(`${e.name} ${e.id}`).toLowerCase().includes(q)) return;
-                    const s = peakMatchScore(e.peaks, exp, tol);
-                    if (s.matched > 0) scored.push({ ...s, name: e.name, id: e.id, rec: e });
-                });
-                scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
-                statusEl.innerText = `Matched ${scored.length}/${rruffLibrary.length} references (tol ±${tol}°).`;
-                showRruffMatchResults(scored.slice(0, 100), exp.length, tol);
-                return;
-            }
-            if (!rruffLocalFiles.length) { alert("Load a RRUFF folder (📂) or an .h5 library (📚) first."); return; }
-            let files = rruffLocalFiles;
-            if (q) files = files.filter(f => (`${f.name} ${f.id} ${f.file.name}`).toLowerCase().includes(q));
-            if (!files.length) { alert("No local references match the search filter."); return; }
-            const scored = [];
-            for (let i = 0; i < files.length; i++) {
-                try {
-                    const p = parseRruffPowder(await files[i].file.text());
-                    const rp = p.peaks !== null ? p.peaks : detectReferencePeaks(p.angles, p.intensities);
-                    const s = peakMatchScore(rp, exp, tol);
-                    if (s.matched > 0) scored.push({ ...s, name: files[i].name, id: files[i].id, rec: { name: files[i].name, id: files[i].id, url: files[i].url, file: files[i].file } });
-                } catch (e) {}
-                if (i % 50 === 0) { statusEl.innerText = `Matching ${i}/${files.length} ...`; await new Promise(r => setTimeout(r, 0)); }
-            }
-            scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
-            statusEl.innerText = `Matched ${scored.length}/${files.length} references (tol ±${tol}°).`;
-            showRruffMatchResults(scored.slice(0, 100), exp.length, tol);
-        }
 
-        function showRruffMatchResults(scored, nExp, tol) {
-            const listEl = document.getElementById('rruff-match-list'); listEl.innerHTML = "";
-            if (!scored.length) { alert("No RRUFF reference had bands near your marked peaks. Try a larger tolerance."); return; }
-            rruffMatchRecords = scored;
-            document.getElementById('rruff-match-subtitle').innerText = `Ranked by alignment of RRUFF bands with your ${nExp} marked peak(s) (±${tol}°). Tick to overlay; ↗ opens the RRUFF page.`;
-            scored.forEach((s, i) => {
-                const row = document.createElement('div'); row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px'; row.style.padding = '2px 0';
-                const cb = document.createElement('input'); cb.type = 'checkbox'; cb.className = 'rruff-match-cb'; cb.value = String(i); cb.id = `rmatch-${i}`;
-                const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.style.flex = '1'; lbl.style.cursor = 'pointer'; lbl.style.fontFamily = "'Consolas', monospace"; lbl.style.fontSize = '0.82rem';
-                lbl.innerText = `${String(Math.round(s.score)).padStart(3, ' ')}%  ${s.matched}/${nExp}  ${s.name}${s.id ? ' · ' + s.id : ''}`;
-                row.appendChild(cb); row.appendChild(lbl);
-                const url = rruffUrl(s.name, s.id, s.rec && s.rec.url);
-                if (url) { const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener'; a.innerText = '↗'; a.title = 'Open RRUFF page'; a.style.textDecoration = 'none'; a.style.fontSize = '1rem'; a.style.padding = '0 4px'; row.appendChild(a); }
-                listEl.appendChild(row);
-            });
-            document.getElementById('rruff-match-modal').style.display = 'flex';
-        }
 
-        function closeRruffMatchModal() { document.getElementById('rruff-match-modal').style.display = 'none'; }
-
-        async function rruffOverlayMatches() {
-            const chosen = Array.from(document.querySelectorAll('#rruff-match-list input.rruff-match-cb:checked')).map(cb => +cb.value);
-            if (!chosen.length) { alert("Tick one or more matches to overlay."); return; }
-            closeRruffMatchModal(); saveToHistory(); let added = 0;
-            for (const idx of chosen) {
-                const rec = rruffMatchRecords[idx] && rruffMatchRecords[idx].rec; if (!rec) continue;
-                try { const parsed = await recordToParsed(rec); scaleRefToData(parsed); persistentDatasets[`__ref_rruff_${rec.name}_${rec.id}_match`] = parsed; added++; } catch (e) {}
-            }
-            if (added) { refreshCheckboxTargetsPanel(); updateChartCanvas(); document.getElementById('rruff-status').innerText = `Overlaid ${added} matched reference(s).`; }
-        }
 
         // ============================================================
         // COD (Crystallography Open Database) — offline .h5 libraries
@@ -1445,6 +1308,95 @@
         // cod_id / url attributes, so overlays carry real intensities.
         // ============================================================
         const COD_HOST_LIBRARY_URL = "cod_powder_library.h5";
+
+        // Work out which .h5 libraries the server is offering, in order of how
+        // explicit the instruction is. A browser cannot list a directory, so
+        // "everything in the folder" needs one of these to stand in for `ls`:
+        //   1. ?codlib=a.h5,b.h5      — explicit, always wins
+        //   2. libraries.json         — a manifest you control, most reliable
+        //   3. the directory index    — works with `python -m http.server`,
+        //                               Apache/nginx autoindex, etc.
+        //   4. the conventional name  — rod_raman_library.h5
+        // Under file:// none of these work (no directory listing, and fetch is
+        // blocked), so the panel just waits for you to add libraries by hand.
+        async function discoverLibraryUrls(paramName, manifestName, defaultName) {
+            const params = new URLSearchParams(location.search);
+            const explicit = params.get(paramName);
+            if (explicit) return explicit.split(',').map(s => s.trim()).filter(Boolean);
+
+            const found = [];
+            try {                                    // 2) manifest
+                const r = await fetch(manifestName, { cache: 'no-cache' });
+                if (r.ok) {
+                    const list = await r.json();
+                    for (const item of (Array.isArray(list) ? list : (list.libraries || []))) {
+                        const f = (typeof item === 'string') ? item : (item && (item.file || item.url || item.name));
+                        if (f) found.push(f);
+                    }
+                }
+            } catch (e) { /* no manifest */ }
+            if (found.length) return found;
+
+            try {                                    // 3) directory index
+                const r = await fetch('./', { cache: 'no-cache' });
+                if (r.ok && (r.headers.get('content-type') || '').includes('html')) {
+                    const html = await r.text();
+                    const seen = new Set();
+                    for (const m of html.matchAll(/href="([^"?#]+\.(?:h5|hdf5))"/gi)) {
+                        let href = m[1];
+                        try { href = decodeURIComponent(href); } catch (e) {}
+                        if (href.startsWith('http') && !href.startsWith(location.origin)) continue;
+                        const name = href.split('/').pop();
+                        if (name && !seen.has(name)) { seen.add(name); found.push(name); }
+                    }
+                }
+            } catch (e) { /* no index / blocked */ }
+            if (found.length) return found;
+
+            // 4) convention — probe the whole family, not just one name. This is
+            // what was missing: with no manifest and no directory index, only
+            // `defaultName` was ever tried, so a second library sitting right
+            // next to it (openspecy_raman.h5) was never found.
+            const candidates = (typeof DB_CANDIDATE_LIBRARIES !== 'undefined')
+                ? [defaultName, ...DB_CANDIDATE_LIBRARIES] : [defaultName];
+            const seen = new Set(), hits = [];
+            for (const c of candidates) {
+                const key = c.toLowerCase();
+                if (seen.has(key)) continue;
+                seen.add(key);
+                if (await headSize(c) !== null) hits.push(c);
+            }
+            return hits.length ? hits : [defaultName];
+        }
+
+        function isHdf5(buffer) {                    // magic: 0x89 'H' 'D' 'F'
+            const sig = new Uint8Array(buffer.slice(0, 4));
+            return sig[0] === 0x89 && sig[1] === 0x48 && sig[2] === 0x44 && sig[3] === 0x46;
+        }
+
+        function fmtBytes(n) {
+            if (!n || n < 0) return '';
+            return n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`;
+        }
+
+        async function headSize(url) {
+            try {
+                const r = await fetch(url, { method: 'HEAD' });
+                if (!r.ok) return null;
+                const ct = (r.headers.get('content-type') || '').toLowerCase();
+                if (ct.includes('text/html')) return null;      // a 404 page, not a file
+                const len = r.headers.get('content-length');
+                return len ? parseInt(len, 10) : 0;             // 0 = exists, size unknown
+            } catch (e) { return null; }
+        }
+
+        // The single-library RRUFF panel owns its own file; discovering it here
+        // too would load the same spectra twice under the wrong source label.
+        function excludeOwnedByOtherPanels(urls) {
+            const owned = new Set([HOST_LIBRARY_URL.split('/').pop().toLowerCase()]);
+            return urls.filter(u => !owned.has(u.split('/').pop().toLowerCase()));
+        }
+
         const COD_IDB_INDEX_KEY = "cod_lib_index";       // remembers the set of libraries
         const COD_SYNTH_MIN = 5.0, COD_SYNTH_MAX = 90.0, COD_SYNTH_STEP = 0.02, COD_SYNTH_SIGMA = 0.10;
         let codHits = [];
@@ -1533,7 +1485,7 @@
         }
         async function addCodLibrary(event) {
             const files = Array.from(event.target.files || []); event.target.value = '';
-            const statusEl = document.getElementById('cod-status');
+            const statusEl = document.getElementById('db-status');
             for (const file of files) {
                 statusEl.innerText = `Loading ${file.name} …`;
                 try {
@@ -1561,7 +1513,7 @@
             codSaveIndex(); refreshCodLibsPanel(); updateCodPanelState();
         }
         function refreshCodLibsPanel() {
-            const host = document.getElementById('cod-libs'); if (!host) return;
+            const host = document.getElementById('db-sources-legacy'); if (!host) return;
             host.innerHTML = "";
             codLibraries.forEach((lib, idx) => {
                 const row = document.createElement('div'); row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px'; row.style.padding = '1px 0';
@@ -1580,24 +1532,293 @@
             panel.classList.toggle('lib-loaded', loaded);
             const note = document.getElementById('cod-loaded-note');
             if (note && loaded) note.innerText = `✅ ${active.length}/${codLibraries.length} librar(ies) active — ${total} patterns`;
-            const statusEl = document.getElementById('cod-status');
+            const statusEl = document.getElementById('db-status');
             if (statusEl && loaded) statusEl.innerText = `COD: ${active.length}/${codLibraries.length} active · ${total} patterns. Search or Match.`;
         }
 
-        function codSearch() {
-            const q = document.getElementById('cod-query').value.trim();
-            const statusEl = document.getElementById('cod-status');
-            const resultsEl = document.getElementById('cod-results');
-            resultsEl.innerHTML = ""; codHits = [];
-            const pool = codActiveEntries();
-            if (!pool.length) { statusEl.innerText = "No active COD library. Add one (📚) or tick a library above."; return; }
-            const ql = q.toLowerCase();
-            const hits = pool.filter(e => !ql || (`${e.name} ${e.id} ${e.formula || ''}`).toLowerCase().includes(ql)).slice(0, 300);
-            if (!hits.length) { statusEl.innerText = "No matches."; return; }
-            codHits = hits;
-            hits.forEach((h, i) => { const o = document.createElement('option'); o.value = String(i); o.innerText = `${h.name} · ${h.id}${h.formula ? ' · ' + h.formula : ''}`; resultsEl.appendChild(o); });
-            statusEl.innerText = `${hits.length} match(es)${hits.length === 300 ? ' (first 300)' : ''}. Select and overlay.`;
+        // ============================================================
+        // Unified reference-database panel
+        //
+        // One search box over every enabled source. Sources are the RRUFF
+        // library or folder plus any number of baked .h5 libraries (ROD,
+        // Open Specy, COD — they share a schema and are told apart by their
+        // `source` attribute). Results merge into one list with a badge per
+        // row, and Match ranks across all enabled sources in a single pass.
+        //
+        // The per-source loaders below are unchanged; this is a front end
+        // over them, so nothing about parsing or scoring moved.
+        // ============================================================
+        let dbHits = [];              // merged search results
+        let dbSelected = -1;          // index into dbHits
+        const dbDisabled = new Set(); // source keys the user unticked
+
+        // Conventional filenames to probe when the server offers no manifest
+        // and no directory index. A HEAD request is cheap, so probing the whole
+        // family beats guessing one name — that is what previously hid
+        // openspecy_raman.h5 when only rod_raman_library.h5 was looked for.
+        const DB_CANDIDATE_LIBRARIES = [
+            "cod_powder_library.h5", "cod_inorganic.h5",
+            "cod_minerals.h5", "cod_organic.h5",
+            "cod_library.h5", "xrd_library.h5"
+        ];
+
+        function dbSourceList() {
+            const out = [];
+            if (rruffLibrary && rruffLibrary.length)
+                out.push({ key: 'rruff-lib', label: 'RRUFF library', kind: 'rruff',
+                           count: rruffLibrary.length, entries: rruffLibrary });
+            if (rruffLocalFiles && rruffLocalFiles.length)
+                out.push({ key: 'rruff-folder', label: 'RRUFF folder', kind: 'folder',
+                           count: rruffLocalFiles.length, entries: rruffLocalFiles });
+            codLibraries.forEach((lib, i) => {
+                const src = (lib.entries[0] && lib.entries[0].source) || 'Library';
+                out.push({ key: 'lib-' + i, label: `${src} — ${lib.name}`, kind: 'lib',
+                           count: lib.entries.length, entries: lib.entries, libIndex: i });
+            });
+            return out;
         }
+
+        const dbEnabledSources = () => dbSourceList().filter(s => !dbDisabled.has(s.key));
+
+        function dbBadge(kind, entry) {
+            if (kind === 'rruff' || kind === 'folder') return 'RRUFF';
+            const src = (entry && entry.source) || 'LIB';
+            return src === 'OpenSpecy' ? 'SPECY' : src.toUpperCase().slice(0, 6);
+        }
+
+        function renderDbSources() {
+            const host = document.getElementById('db-sources'); if (!host) return;
+            const list = dbSourceList();
+            host.innerHTML = "";
+            if (!list.length) {
+                host.innerHTML = '<div style="font-size:0.78rem; color:#6c757d; font-style:italic;">No sources loaded — add an .h5 library under Manage sources.</div>';
+                return;
+            }
+            list.forEach(s => {
+                const row = document.createElement('label');
+                row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px';
+                row.style.fontSize = '0.8rem'; row.style.cursor = 'pointer';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox'; cb.checked = !dbDisabled.has(s.key);
+                cb.style.width = '13px'; cb.style.height = '13px';
+                cb.onchange = () => {
+                    if (cb.checked) dbDisabled.delete(s.key); else dbDisabled.add(s.key);
+                    if (s.kind === 'lib' && codLibraries[s.libIndex]) {
+                        codLibraries[s.libIndex].active = cb.checked;
+                        codSaveIndex();
+                    }
+                    dbUpdateStatus();
+                };
+                const txt = document.createElement('span');
+                txt.style.flex = '1'; txt.style.overflow = 'hidden';
+                txt.style.textOverflow = 'ellipsis'; txt.style.whiteSpace = 'nowrap';
+                txt.title = s.label;
+                txt.innerHTML = `${s.label} <span style="color:#6c757d;">· ${s.count.toLocaleString()}</span>`;
+                row.appendChild(cb); row.appendChild(txt);
+                if (s.kind === 'lib') {
+                    const del = document.createElement('span');
+                    del.innerText = '❌'; del.title = 'Remove this library';
+                    del.style.cursor = 'pointer'; del.style.fontSize = '0.78rem';
+                    del.onclick = (e) => { e.preventDefault(); removeCodLibrary(s.libIndex); dbRefresh(); };
+                    row.appendChild(del);
+                }
+                host.appendChild(row);
+            });
+        }
+
+        function dbUpdateStatus(msg) {
+            const el = document.getElementById('db-status'); if (!el) return;
+            if (msg) { el.innerText = msg; return; }
+            const on = dbEnabledSources();
+            const all = dbSourceList();
+            if (!all.length) { el.innerText = "Add a library below, then search."; return; }
+            const total = on.reduce((n, s) => n + s.count, 0);
+            el.innerText = `${on.length}/${all.length} source(s) enabled · ${total.toLocaleString()} patterns. Search, or mark peaks and Match.`;
+        }
+
+        function dbRefresh() { renderDbSources(); dbUpdateStatus(); }
+
+        function dbToggleManage() {
+            const box = document.getElementById('db-manage');
+            const btn = document.getElementById('db-manage-toggle');
+            const open = box.style.display === 'flex';
+            box.style.display = open ? 'none' : 'flex';
+            btn.innerText = open ? '▾' : '▴';
+        }
+
+        function dbHaystack(kind, e) {
+            if (kind === 'folder') return `${e.name} ${e.id} ${e.file ? e.file.name : ''}`.toLowerCase();
+            if (kind === 'rruff') return `${e.name} ${e.id}`.toLowerCase();
+            return codHaystack(e);
+        }
+
+        function dbSearch() {
+            const q = document.getElementById('db-query').value.trim().toLowerCase();
+            const resultsEl = document.getElementById('db-results');
+            dbHits = []; dbSelected = -1;
+            const sources = dbEnabledSources();
+            if (!sources.length) { dbUpdateStatus("No sources enabled. Tick one above, or add a library under Manage sources."); return; }
+            for (const s of sources) {
+                for (const e of s.entries) {
+                    if (q && !dbHaystack(s.kind, e).includes(q)) continue;
+                    dbHits.push({ kind: s.kind, srcLabel: s.label, rec: e });
+                    if (dbHits.length >= 400) break;
+                }
+                if (dbHits.length >= 400) break;
+            }
+            resultsEl.innerHTML = "";
+            if (!dbHits.length) {
+                resultsEl.style.display = 'none';
+                dbUpdateStatus(q ? `No matches for "${q}".` : "No entries.");
+                return;
+            }
+            resultsEl.style.display = 'flex';
+            dbHits.forEach((h, i) => {
+                const e = h.rec;
+                const row = document.createElement('div');
+                row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px';
+                row.style.padding = '4px 6px'; row.style.cursor = 'pointer';
+                row.style.borderBottom = '1px solid #f1f3f5'; row.style.fontSize = '0.78rem';
+                row.dataset.idx = String(i);
+                const badge = document.createElement('span');
+                badge.innerText = dbBadge(h.kind, e);
+                badge.style.fontSize = '0.66rem'; badge.style.padding = '1px 5px';
+                badge.style.borderRadius = '4px'; badge.style.background = '#cfe2ff';
+                badge.style.color = '#084298'; badge.style.flexShrink = '0';
+                const name = document.createElement('span');
+                name.style.flex = '1'; name.style.overflow = 'hidden';
+                name.style.textOverflow = 'ellipsis'; name.style.whiteSpace = 'nowrap';
+                const extra = e.formula || e.collection || '';
+                name.innerText = `${e.name}${e.id ? ' · ' + e.id : ''}${extra ? ' · ' + extra : ''}`;
+                name.title = `${h.srcLabel}: ${name.innerText}`;
+                row.appendChild(badge); row.appendChild(name);
+                row.onclick = () => dbSelect(i);
+                row.ondblclick = () => dbOverlaySelected();
+                resultsEl.appendChild(row);
+            });
+            dbSelect(0);
+            dbUpdateStatus(`${dbHits.length} match(es)${dbHits.length >= 400 ? ' (first 400)' : ''} across ${sources.length} source(s). Select and overlay.`);
+        }
+
+        function dbSelect(i) {
+            dbSelected = i;
+            const rows = document.getElementById('db-results').children;
+            for (let k = 0; k < rows.length; k++)
+                rows[k].style.background = (k === i) ? '#e7f1ff' : 'transparent';
+        }
+
+        async function dbOverlaySelected() {
+            if (dbSelected < 0 || !dbHits[dbSelected]) { dbUpdateStatus("Select a search result first."); return; }
+            const h = dbHits[dbSelected];
+            try {
+                // COD libraries may be peaks-only; codRecordToParsed rebuilds
+                // the profile from peaks+intensities when there is no stored curve.
+                const parsed = (h.kind === 'lib') ? codRecordToParsed(h.rec)
+                                                  : await recordToParsed(h.rec);
+                if (!parsed.angles || !parsed.angles.length) { dbUpdateStatus("That entry has no pattern data."); return; }
+                saveToHistory(); scaleRefToData(parsed);
+                persistentDatasets[`__ref_${h.kind}_${h.rec.name}_${h.rec.id}`] = parsed;
+                refreshCheckboxTargetsPanel(); updateChartCanvas();
+                dbUpdateStatus(`Overlaid ${h.rec.name}${h.rec.id ? ' (' + h.rec.id + ')' : ''}.`);
+            } catch (err) {
+                dbUpdateStatus("Could not read that reference: " + err.message);
+            }
+        }
+
+        async function dbMatchByPeaks() {
+            if (!peakGuessesX.length) {
+                alert("Mark peaks first: turn on '🎯 Peak Selection', then right-click on the plot to mark the peaks to match.");
+                return;
+            }
+            const sources = dbEnabledSources();
+            if (!sources.length) { alert("Enable or add at least one source first."); return; }
+            let tol = parseFloat(document.getElementById('db-match-tol').value); if (isNaN(tol)) tol = 0.2;
+            const q = document.getElementById('db-query').value.trim().toLowerCase();
+            const exp = peakGuessesX.slice();
+            const scored = [];
+            let scanned = 0;
+
+            for (const s of sources) {
+                for (const e of s.entries) {
+                    if (q && !dbHaystack(s.kind, e).includes(q)) continue;
+                    let peaks = e.peaks;
+                    if (s.kind === 'folder') {           // raw .txt — detect on the fly
+                        try {
+                            const parsed = parseTwoColumn(await e.file.text(), e.name);
+                            peaks = detectReferencePeaks(parsed.angles, parsed.intensities);
+                        } catch (err) { continue; }
+                    }
+                    if (!peaks || !peaks.length) continue;
+                    scanned++;
+                    const sc = peakMatchScore(peaks, exp, tol);
+                    if (sc.matched > 0) scored.push({ ...sc, name: e.name, id: e.id,
+                        source: dbBadge(s.kind, e), kind: s.kind, srcLabel: s.label,
+                        detail: e.formula || e.collection || '', rec: e });
+                }
+            }
+            scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
+            dbUpdateStatus(`Matched ${scored.length}/${scanned} references across ${sources.length} source(s) (tol ±${tol} ° 2θ).`);
+            dbShowMatchResults(scored.slice(0, 100), exp.length, tol);
+        }
+
+        function dbShowMatchResults(scored, nExp, tol) {
+            const listEl = document.getElementById('cod-match-list'); listEl.innerHTML = "";
+            if (!scored.length) { alert("No reference had reflections near your marked peaks. Try a larger tolerance."); return; }
+            codMatchRecords = scored;
+            document.getElementById('cod-match-subtitle').innerText =
+                `Ranked across every enabled source by alignment with your ${nExp} marked peak(s) (±${tol} ° 2θ). Tick to overlay; ↗ opens the source page.`;
+            scored.forEach((s, i) => {
+                const row = document.createElement('div');
+                row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px'; row.style.padding = '2px 0';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox'; cb.className = 'cod-match-cb'; cb.value = String(i); cb.id = `dmatch-${i}`;
+                const lbl = document.createElement('label');
+                lbl.htmlFor = cb.id; lbl.style.flex = '1'; lbl.style.cursor = 'pointer';
+                lbl.style.fontFamily = "'Consolas', monospace"; lbl.style.fontSize = '0.8rem';
+                lbl.innerText = `${String(Math.round(s.score)).padStart(3, ' ')}%  ${s.matched}/${nExp}  [${s.source}] ${s.name}${s.id ? ' · ' + s.id : ''}${s.detail ? '  ' + s.detail : ''}`;
+                row.appendChild(cb); row.appendChild(lbl);
+                const url = (s.rec && s.rec.url) || (s.kind !== 'lib' ? rruffUrl(s.name, s.id) : null);
+                if (url) { const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener'; a.innerText = '↗'; a.title = 'Open source page'; a.style.textDecoration = 'none'; a.style.fontSize = '1rem'; a.style.padding = '0 4px'; row.appendChild(a); }
+                listEl.appendChild(row);
+            });
+            document.getElementById('cod-match-modal').style.display = 'flex';
+        }
+
+        async function dbOverlayMatches() {
+            const chosen = Array.from(document.querySelectorAll('#cod-match-list input.cod-match-cb:checked')).map(cb => +cb.value);
+            if (!chosen.length) { alert("Tick one or more matches to overlay."); return; }
+            closeCodMatchModal(); saveToHistory(); let added = 0;
+            for (const idx of chosen) {
+                const s = codMatchRecords[idx]; if (!s || !s.rec) continue;
+                try {
+                    const parsed = (s.kind === 'lib') ? codRecordToParsed(s.rec)
+                                                      : await recordToParsed(s.rec);
+                    if (!parsed.angles || !parsed.angles.length) continue;
+                    scaleRefToData(parsed);
+                    persistentDatasets[`__ref_match_${s.name}_${s.id}`] = parsed;
+                    added++;
+                } catch (e) {}
+            }
+            if (added) {
+                refreshCheckboxTargetsPanel(); updateChartCanvas();
+                dbUpdateStatus(`Overlaid ${added} matched reference(s).`);
+            }
+        }
+
+        // Adding libraries goes through the existing multi-library manager, then
+        // refreshes the unified source list.
+        async function addDbLibrary(event) {
+            await addCodLibrary(event);
+            dbRefresh();
+        }
+
+
+        async function dbInit() {
+            try { await tryAutoLoadLibrary(); } catch (e) {}
+            try { await tryAutoLoadCodLibrary(); } catch (e) {}
+            dbRefresh();
+        }
+
 
         function codRecordToParsed(rec) {
             // Reuse the rruff* fields: scaleRefToData and the layers panel read them.
@@ -1607,70 +1828,11 @@
                      rruffName: rec.name, rruffId: rec.id, rruffUrl: rec.url || codUrl(rec.id) };
         }
 
-        function codOverlaySelected() {
-            const resultsEl = document.getElementById('cod-results');
-            const statusEl = document.getElementById('cod-status');
-            const val = resultsEl.value;
-            if (val === '' || !codHits[+val]) { statusEl.innerText = "Select a search result first."; return; }
-            const hit = codHits[+val];
-            const parsed = codRecordToParsed(hit);
-            if (!parsed.angles.length) { statusEl.innerText = "That entry has no pattern data."; return; }
-            saveToHistory(); scaleRefToData(parsed);
-            persistentDatasets[`__ref_cod_${hit.id}`] = parsed;
-            refreshCheckboxTargetsPanel(); updateChartCanvas();
-            statusEl.innerText = `Overlaid ${hit.name} (${hit.id}).`;
-        }
 
-        function codMatchByPeaks() {
-            const statusEl = document.getElementById('cod-status');
-            if (!peakGuessesX.length) { alert("Mark peaks first: turn on '🎯 Peak Selection', then right-click on the plot to mark peaks."); return; }
-            const pool = codActiveEntries();
-            if (!pool.length) { alert("Add or activate a COD .h5 library first."); return; }
-            let tol = parseFloat(document.getElementById('cod-match-tol').value); if (isNaN(tol)) tol = 0.2;
-            const q = document.getElementById('cod-query').value.trim().toLowerCase();
-            const exp = peakGuessesX.slice();
-            const scored = [];
-            pool.forEach(e => {
-                if (q && !(`${e.name} ${e.id} ${e.formula || ''}`).toLowerCase().includes(q)) return;
-                if (!e.peaks || !e.peaks.length) return;
-                const s = peakMatchScore(e.peaks, exp, tol);
-                if (s.matched > 0) scored.push({ ...s, name: e.name, id: e.id, formula: e.formula, rec: e });
-            });
-            scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
-            statusEl.innerText = `Matched ${scored.length}/${pool.length} references (tol ±${tol}°).`;
-            showCodMatchResults(scored.slice(0, 100), exp.length, tol);
-        }
 
-        function showCodMatchResults(scored, nExp, tol) {
-            const listEl = document.getElementById('cod-match-list'); listEl.innerHTML = "";
-            if (!scored.length) { alert("No COD reference had reflections near your marked peaks. Try a larger tolerance."); return; }
-            codMatchRecords = scored;
-            document.getElementById('cod-match-subtitle').innerText = `Ranked by alignment of COD reflections with your ${nExp} marked peak(s) (±${tol}°). Tick to overlay; ↗ opens the COD page.`;
-            scored.forEach((s, i) => {
-                const row = document.createElement('div'); row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px'; row.style.padding = '2px 0';
-                const cb = document.createElement('input'); cb.type = 'checkbox'; cb.className = 'cod-match-cb'; cb.value = String(i); cb.id = `cmatch-${i}`;
-                const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.style.flex = '1'; lbl.style.cursor = 'pointer'; lbl.style.fontFamily = "'Consolas', monospace"; lbl.style.fontSize = '0.82rem';
-                lbl.innerText = `${String(Math.round(s.score)).padStart(3, ' ')}%  ${s.matched}/${nExp}  ${s.name} · ${s.id}${s.formula ? '  ' + s.formula : ''}`;
-                row.appendChild(cb); row.appendChild(lbl);
-                const url = (s.rec && s.rec.url) || codUrl(s.id);
-                if (url) { const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener'; a.innerText = '↗'; a.title = 'Open COD page'; a.style.textDecoration = 'none'; a.style.fontSize = '1rem'; a.style.padding = '0 4px'; row.appendChild(a); }
-                listEl.appendChild(row);
-            });
-            document.getElementById('cod-match-modal').style.display = 'flex';
-        }
 
         function closeCodMatchModal() { document.getElementById('cod-match-modal').style.display = 'none'; }
 
-        function codOverlayMatches() {
-            const chosen = Array.from(document.querySelectorAll('#cod-match-list input.cod-match-cb:checked')).map(cb => +cb.value);
-            if (!chosen.length) { alert("Tick one or more matches to overlay."); return; }
-            closeCodMatchModal(); saveToHistory(); let added = 0;
-            for (const idx of chosen) {
-                const rec = codMatchRecords[idx] && codMatchRecords[idx].rec; if (!rec) continue;
-                try { const parsed = codRecordToParsed(rec); scaleRefToData(parsed); persistentDatasets[`__ref_cod_${rec.id}_match`] = parsed; added++; } catch (e) {}
-            }
-            if (added) { refreshCheckboxTargetsPanel(); updateChartCanvas(); document.getElementById('cod-status').innerText = `Overlaid ${added} matched reference(s).`; }
-        }
 
         async function tryAutoLoadCodLibrary() {
             // 1) Restore the remembered set of libraries.
@@ -1710,7 +1872,7 @@
 
         // Auto-load a host-provided / previously-saved library (independent of Plotly).
         window.addEventListener('load', function () {
-            tryAutoLoadLibrary().catch(function () {}).then(function () { return tryAutoLoadCodLibrary().catch(function () {}); });
+            dbInit().catch(function () {});
         });
     </script>
 </body>
