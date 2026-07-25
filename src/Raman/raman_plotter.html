@@ -98,6 +98,22 @@
         #rruff-panel.lib-loaded #rruff-search-group { order: 2; }
         #rruff-panel.lib-loaded #rruff-load-group { order: 3; }
         #rruff-panel.lib-loaded #rruff-status { order: 4; }
+
+        /* ROD panel: same reorder behaviour once libraries are loaded. */
+        #rod-panel > label { order: -1; }
+        #rod-intro { order: 0; }
+        #rod-loaded-note { display: none; order: 0; font-size: 0.82rem; font-weight: bold; color: #084298; background: #cfe2ff; border: 1px solid #b6d4fe; border-radius: 6px; padding: 6px 8px; }
+        #rod-load-group { order: 1; }
+        #rod-search-group { order: 2; }
+        #rod-match-group { order: 3; }
+        #rod-status { order: 4; }
+        #rod-panel.lib-loaded #rod-intro { display: none; }
+        #rod-panel.lib-loaded #rod-loaded-note { display: block; }
+        #rod-panel.lib-loaded #rod-match-group { order: 1; }
+        #rod-panel.lib-loaded #rod-search-group { order: 2; }
+        #rod-panel.lib-loaded #rod-load-group { order: 3; }
+        #rod-panel.lib-loaded #rod-status { order: 4; }
+
         .btn-run-fit { background-color: #fd7e14; color: white; border: none; padding: 11px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s ease; }
         .btn-run-fit:hover { background-color: #e06d0f; }
 
@@ -232,6 +248,37 @@
             <div id="rruff-status" style="font-size: 0.78rem; color: #6c757d;">Load a library below. To match: turn on Peak Selection, right-click to mark peaks, then Match.</div>
         </div>
 
+        <div class="rruff-panel" id="rod-panel" style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 6px;">
+            <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">🔬 ROD (Raman Open Database)</label>
+            <p class="info-text" id="rod-intro" style="margin: 0;">Open one or more ROD .h5 libraries (from build_rod_library.py) to search, overlay, and match — fully offline. ROD data are CC0.</p>
+            <div id="rod-loaded-note">✅ Library loaded</div>
+            <div id="rod-libs" style="display:flex; flex-direction:column; gap:2px;"></div>
+
+            <div id="rod-match-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <div style="display: flex; align-items: center; gap: 6px;">
+                    <label style="font-size: 0.8rem; color: #495057;">Match tol (cm⁻¹):</label>
+                    <input type="number" id="rod-match-tol" value="12" step="1" min="1" style="width: 56px; padding: 6px; border: 1px solid #ced4da; border-radius: 6px;">
+                </div>
+                <button class="btn-fit-toggle" style="background-color:#0d6efd;" onclick="rodMatchByPeaks()">🎯 Match by Selected Peaks (ROD)</button>
+            </div>
+
+            <div id="rod-search-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <div style="display: flex; gap: 6px;">
+                    <input type="text" id="rod-query" placeholder="name, id or formula (e.g. Calcite, O2 Si)" style="flex-grow: 1; padding: 8px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.82rem;">
+                    <button class="btn-crop" style="width: auto; padding: 8px 10px;" onclick="rodSearch()">🔍</button>
+                </div>
+                <select id="rod-results" size="4" style="width: 100%; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.8rem; padding: 4px;"></select>
+                <button class="btn-ref-sub" onclick="rodOverlaySelected()">➕ Overlay Selected Reference</button>
+            </div>
+
+            <div id="rod-load-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <label class="btn-crop" for="rod-h5" style="text-align: center; cursor: pointer;">📚 Add ROD .h5 Library</label>
+                <input type="file" id="rod-h5" accept=".h5,.hdf5" multiple style="display:none;" onchange="addRodLibrary(event)">
+            </div>
+
+            <div id="rod-status" style="font-size: 0.78rem; color: #6c757d;">Open a ROD .h5 library. To match: turn on Peak Selection, right-click to mark peaks, then Match.</div>
+        </div>
+
         <div class="checkbox-container" style="flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 5px; width: 100%;">
             <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">📋 Plotted Spectra Layers:</label>
             <div id="fit-targets-panel" style="width: 100%; max-height: 140px; overflow-y: auto; border: 1px solid #ced4da; border-radius: 6px; background-color: #fff; padding: 8px; box-sizing: border-box;">
@@ -272,6 +319,18 @@
         </div>
     </div>
 
+    <div id="rod-match-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+        <div style="background: white; padding: 22px; border-radius: 8px; width: 620px; max-height: 82vh; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
+            <h3 style="margin: 0; color: #0d6efd; font-size: 1.1rem;">🔬 ROD Search &amp; Match</h3>
+            <p class="info-text" id="rod-match-subtitle" style="margin: 0;"></p>
+            <div id="rod-match-list" style="width: 100%; max-height: 320px; overflow-y: auto; padding: 6px; border: 1px solid #ced4da; border-radius: 6px; box-sizing: border-box;"></div>
+            <div style="display: flex; justify-content: flex-end; gap: 8px;">
+                <button class="btn-crop" style="width: auto; padding: 8px 14px; margin: 0;" onclick="closeRodMatchModal()">Close</button>
+                <button class="btn-ref-sub" style="width: auto; padding: 8px 14px; margin: 0;" onclick="rodOverlayMatches()">➕ Overlay Selected Match(es)</button>
+            </div>
+        </div>
+    </div>
+
     <div id="main-content">
         <div id="chart-container"></div>
         <div id="cursor-bar">Cursor Position: Raman shift = --</div>
@@ -294,7 +353,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "raman-v2026.07.24.1";
+        const VERSION_TAG = "raman-v2026.07.25.1";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -312,7 +371,8 @@
             // Auto-load the library independently of the chart/Plotly readiness,
             // so a server-hosted rruff_raman_library.h5 loads even if the Plotly
             // CDN is slow or blocked.
-            tryAutoLoadLibrary().catch(function () {});
+            tryAutoLoadLibrary().catch(function () {})
+                .then(function () { return tryAutoLoadRodLibraries().catch(function () {}); });
 
             const startChart = function () {
                 renderPlaceholderCanvas();
@@ -525,7 +585,8 @@
                     leftDiv.appendChild(cb); leftDiv.appendChild(label);
                 } else {
                     const data = persistentDatasets[key];
-                    const url = key.startsWith("__ref_") ? rruffUrl(data.rruffName, data.rruffId) : null;
+                    // ROD/COD-baked references carry an explicit URL; RRUFF ones are derived.
+                    const url = key.startsWith("__ref_") ? (data.rruffUrl || rruffUrl(data.rruffName, data.rruffId)) : null;
                     let el;
                     if (url) {
                         el = document.createElement('a');
@@ -1140,6 +1201,298 @@
             hideInitBanner();
             if (statusEl) statusEl.innerText =
                 "No server library found. Load a library below, or place rruff_raman_library.h5 next to this page.";
+        }
+
+        // ============================================================
+        // ROD (Raman Open Database) — offline .h5 libraries built by
+        // build_rod_library.py. Same schema as the RRUFF library
+        // (spectra/<id> with x,y datasets + peaks) plus rod_id / cod_id /
+        // url attributes. Multiple libraries can be loaded and toggled;
+        // the set is remembered across sessions in IndexedDB.
+        //
+        // Live querying of the ROD REST API is deliberately absent: ROD
+        // currently serves Access-Control-Allow-Origin for a single third-
+        // party origin, so a browser fetch from this page is blocked. The
+        // desktop (Python) build does the online pulls instead.
+        // ============================================================
+        const ROD_HOST_LIBRARY_URL = "rod_raman_library.h5";
+        const ROD_IDB_INDEX_KEY = "rod_lib_index";     // remembers the set of libraries
+        let rodHits = [];
+        let rodLibraries = [];      // [{name, key, entries, active}]
+        let rodMatchRecords = [];
+
+        function rodUrl(id) {
+            if (id === undefined || id === null || id === "" || id === "\\N") return null;
+            return "https://solsa.crystallography.net/rod/" + id + ".html";
+        }
+
+        // Generic IndexedDB helpers (same store as the RRUFF library, distinct keys).
+        async function idbSaveKey(key, buf) { const db = await idbOpen(); return new Promise((res, rej) => { const tx = db.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).put(buf, key); tx.oncomplete = () => { db.close(); res(); }; tx.onerror = () => rej(tx.error); }); }
+        async function idbLoadKey(key) { const db = await idbOpen(); return new Promise((res, rej) => { const tx = db.transaction(IDB_STORE, "readonly"); const g = tx.objectStore(IDB_STORE).get(key); g.onsuccess = () => { db.close(); res(g.result || null); }; g.onerror = () => rej(g.error); }); }
+        async function idbClearKey(key) { const db = await idbOpen(); return new Promise((res, rej) => { const tx = db.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).delete(key); tx.oncomplete = () => { db.close(); res(); }; tx.onerror = () => rej(tx.error); }); }
+
+        // Parse .h5 bytes -> entries[]. Peaks come from the dataset when present
+        // (build_rod_library.py writes both) and fall back to the attribute.
+        async function rodIngestBytes(arrayBuffer) {
+            showInitBanner('⏳ Initializing ROD library…');
+            await new Promise(r => setTimeout(r, 0));
+            try {
+                const lib = await window.loadH5Wasm();
+                const h5 = lib.h5, FS = lib.FS;
+                const fsName = `rodlib_${Date.now()}.h5`;
+                FS.writeFile(fsName, new Uint8Array(arrayBuffer));
+                let f, out = [];
+                try {
+                    f = new h5.File(fsName, "r");
+                    const sp = f.get("spectra");
+                    if (!sp) throw new Error("Not a ROD library (no 'spectra' group).");
+                    const names = sp.keys();
+                    const tick = Math.max(1, Math.floor(names.length / 50));
+                    for (let idx = 0; idx < names.length; idx++) {
+                        const gname = names[idx];
+                        const g = f.get("spectra/" + gname);
+                        if (!g || !g.attrs) continue;
+                        const xds = f.get("spectra/" + gname + "/x");
+                        const yds = f.get("spectra/" + gname + "/y");
+                        const pkds = f.get("spectra/" + gname + "/peaks");
+                        const rodId = attrToString(g.attrs["rod_id"]) || attrToString(g.attrs["rruff_id"]) || gname;
+                        const codId = attrToString(g.attrs["cod_id"]);
+                        out.push({
+                            name: attrToString(g.attrs["name"]) || gname,
+                            id: rodId,
+                            codId: codId,
+                            formula: attrToString(g.attrs["formula"]),
+                            mineral: attrToString(g.attrs["mineral"]),
+                            laser: attrToString(g.attrs["laser_nm"]),
+                            url: attrToString(g.attrs["url"]) || rodUrl(rodId),
+                            codUrl: attrToString(g.attrs["cod_url"]),
+                            peaks: pkds ? Array.from(pkds.value) : Array.from(attrToArray(g.attrs["peaks"])),
+                            x: xds ? Array.from(xds.value) : [],
+                            y: yds ? Array.from(yds.value) : []
+                        });
+                        if (idx % tick === 0) {
+                            showInitBanner(`⏳ Initializing ROD library… (${idx}/${names.length})`);
+                            await new Promise(r => setTimeout(r, 0));
+                        }
+                    }
+                } finally {
+                    try { if (f) f.close(); } catch (e) {}
+                    try { FS.unlink(fsName); } catch (e) {}
+                }
+                return out;
+            } finally { hideInitBanner(); }
+        }
+
+        // ---- multi-library management (remembered across sessions) ----
+        function rodActiveEntries() {
+            const out = [];
+            for (const lib of rodLibraries) if (lib.active) for (const e of lib.entries) out.push(e);
+            return out;
+        }
+        async function rodSaveIndex() {
+            try { await idbSaveKey(ROD_IDB_INDEX_KEY, rodLibraries.map(l => ({ name: l.name, key: l.key, active: l.active }))); } catch (e) {}
+        }
+        async function addRodLibrary(event) {
+            const files = Array.from(event.target.files || []); event.target.value = '';
+            const statusEl = document.getElementById('rod-status');
+            for (const file of files) {
+                statusEl.innerText = `Loading ${file.name} …`;
+                try {
+                    const buf = await file.arrayBuffer();
+                    const entries = await rodIngestBytes(buf);
+                    const key = "rod_lib_" + file.name;
+                    const existing = rodLibraries.findIndex(l => l.name === file.name);
+                    if (existing >= 0) rodLibraries.splice(existing, 1);   // reloading replaces
+                    rodLibraries.push({ name: file.name, key, entries, active: true });
+                    try { await idbSaveKey(key, buf); } catch (e) { /* persistence optional */ }
+                } catch (err) { statusEl.innerText = "Could not open " + file.name + ": " + err.message; }
+            }
+            await rodSaveIndex();
+            refreshRodLibsPanel(); updateRodPanelState();
+        }
+        function removeRodLibrary(idx) {
+            const lib = rodLibraries[idx]; if (!lib) return;
+            idbClearKey(lib.key).catch(() => {});
+            rodLibraries.splice(idx, 1);
+            rodSaveIndex(); refreshRodLibsPanel(); updateRodPanelState();
+        }
+        function toggleRodLibrary(idx) {
+            if (!rodLibraries[idx]) return;
+            rodLibraries[idx].active = !rodLibraries[idx].active;
+            rodSaveIndex(); refreshRodLibsPanel(); updateRodPanelState();
+        }
+        function refreshRodLibsPanel() {
+            const host = document.getElementById('rod-libs'); if (!host) return;
+            host.innerHTML = "";
+            rodLibraries.forEach((lib, idx) => {
+                const row = document.createElement('div'); row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px'; row.style.padding = '1px 0';
+                const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = lib.active; cb.id = `rodlib-${idx}`; cb.onchange = () => toggleRodLibrary(idx);
+                const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.style.flex = '1'; lbl.style.fontSize = '0.8rem'; lbl.style.cursor = 'pointer';
+                lbl.innerText = `${lib.name} (${lib.entries.length})`;
+                const del = document.createElement('span'); del.innerText = '❌'; del.title = 'Remove'; del.style.cursor = 'pointer'; del.style.fontSize = '0.8rem'; del.onclick = () => removeRodLibrary(idx);
+                row.appendChild(cb); row.appendChild(lbl); row.appendChild(del); host.appendChild(row);
+            });
+        }
+        function updateRodPanelState() {
+            const panel = document.getElementById('rod-panel'); if (!panel) return;
+            const active = rodLibraries.filter(l => l.active);
+            const total = active.reduce((s, l) => s + l.entries.length, 0);
+            const loaded = rodLibraries.length > 0;
+            panel.classList.toggle('lib-loaded', loaded);
+            const note = document.getElementById('rod-loaded-note');
+            if (note && loaded) note.innerText = `✅ ${active.length}/${rodLibraries.length} librar(ies) active — ${total} spectra`;
+            const statusEl = document.getElementById('rod-status');
+            if (statusEl && loaded) statusEl.innerText = `ROD: ${active.length}/${rodLibraries.length} active · ${total} spectra. Search or Match.`;
+        }
+
+        function rodHaystack(e) {
+            return `${e.name} ${e.id} ${e.formula || ''} ${e.mineral || ''} ${e.codId || ''}`.toLowerCase();
+        }
+
+        function rodSearch() {
+            const q = document.getElementById('rod-query').value.trim();
+            const statusEl = document.getElementById('rod-status');
+            const resultsEl = document.getElementById('rod-results');
+            resultsEl.innerHTML = ""; rodHits = [];
+            const pool = rodActiveEntries();
+            if (!pool.length) { statusEl.innerText = "No active ROD library. Add one (📚) or tick a library above."; return; }
+            const ql = q.toLowerCase();
+            const hits = pool.filter(e => !ql || rodHaystack(e).includes(ql)).slice(0, 300);
+            if (!hits.length) { statusEl.innerText = "No matches."; return; }
+            rodHits = hits;
+            hits.forEach((h, i) => {
+                const opt = document.createElement('option');
+                opt.value = String(i);
+                opt.innerText = `${h.name} · ${h.id}${h.formula ? ' · ' + h.formula : ''}${h.laser ? ' · ' + h.laser + 'nm' : ''}`;
+                resultsEl.appendChild(opt);
+            });
+            statusEl.innerText = `${hits.length} match(es)${hits.length === 300 ? ' (first 300)' : ''}. Select and overlay.`;
+        }
+
+        // Reuse the rruff* fields: scaleRefToData and the layers panel read them.
+        function rodRecordToParsed(rec) {
+            return {
+                angles: rec.x.slice(), intensities: rec.y.slice(),
+                label: `ROD: ${rec.name} (${rec.id})`,
+                rruffName: rec.name, rruffId: rec.id,
+                rruffUrl: rec.url || rodUrl(rec.id)
+            };
+        }
+
+        function rodOverlaySelected() {
+            const resultsEl = document.getElementById('rod-results');
+            const statusEl = document.getElementById('rod-status');
+            const val = resultsEl.value;
+            if (val === '' || !rodHits[+val]) { statusEl.innerText = "Select a search result first."; return; }
+            const hit = rodHits[+val];
+            if (!hit.x || !hit.x.length) { statusEl.innerText = "That entry has no spectrum data."; return; }
+            const parsed = rodRecordToParsed(hit);
+            saveToHistory(); scaleRefToData(parsed);
+            persistentDatasets[`__ref_rod_${hit.id}`] = parsed;
+            refreshCheckboxTargetsPanel(); updateChartCanvas();
+            statusEl.innerText = `Overlaid ${hit.name} (${hit.id}).`;
+        }
+
+        function rodMatchByPeaks() {
+            const statusEl = document.getElementById('rod-status');
+            if (!peakGuessesX.length) {
+                alert("Mark peaks first: turn on '🎯 Peak Selection', then right-click on the plot to mark the peaks to match.");
+                return;
+            }
+            const pool = rodActiveEntries();
+            if (!pool.length) { alert("Add or activate a ROD .h5 library first."); return; }
+            let tol = parseFloat(document.getElementById('rod-match-tol').value); if (isNaN(tol)) tol = 12;
+            const q = document.getElementById('rod-query').value.trim().toLowerCase();
+            const exp = peakGuessesX.slice();
+            const scored = [];
+            pool.forEach(e => {
+                if (q && !rodHaystack(e).includes(q)) return;
+                if (!e.peaks || !e.peaks.length) return;
+                const s = peakMatchScore(e.peaks, exp, tol);
+                if (s.matched > 0) scored.push({ ...s, name: e.name, id: e.id, formula: e.formula, rec: e });
+            });
+            scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
+            statusEl.innerText = `Matched ${scored.length}/${pool.length} references (tol ±${tol} cm⁻¹).`;
+            showRodMatchResults(scored.slice(0, 100), exp.length, tol);
+        }
+
+        function showRodMatchResults(scored, nExp, tol) {
+            const listEl = document.getElementById('rod-match-list'); listEl.innerHTML = "";
+            if (!scored.length) { alert("No ROD reference had bands near your marked peaks. Try a larger tolerance."); return; }
+            rodMatchRecords = scored;
+            document.getElementById('rod-match-subtitle').innerText =
+                `Ranked by alignment of ROD bands with your ${nExp} marked peak(s) (±${tol} cm⁻¹). Tick to overlay; ↗ opens the ROD page, ⬡ the linked COD structure.`;
+            scored.forEach((s, i) => {
+                const row = document.createElement('div'); row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px'; row.style.padding = '2px 0';
+                const cb = document.createElement('input'); cb.type = 'checkbox'; cb.className = 'rod-match-cb'; cb.value = String(i); cb.id = `rmatch-${i}`;
+                const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.style.flex = '1'; lbl.style.cursor = 'pointer'; lbl.style.fontFamily = "'Consolas', monospace"; lbl.style.fontSize = '0.82rem';
+                lbl.innerText = `${String(Math.round(s.score)).padStart(3, ' ')}%  ${s.matched}/${nExp}  ${s.name} · ${s.id}${s.formula ? '  ' + s.formula : ''}`;
+                row.appendChild(cb); row.appendChild(lbl);
+                const url = (s.rec && s.rec.url) || rodUrl(s.id);
+                if (url) { const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener'; a.innerText = '↗'; a.title = 'Open ROD page'; a.style.textDecoration = 'none'; a.style.fontSize = '1rem'; a.style.padding = '0 4px'; row.appendChild(a); }
+                const cu = s.rec && s.rec.codUrl;
+                if (cu) { const a = document.createElement('a'); a.href = cu; a.target = '_blank'; a.rel = 'noopener'; a.innerText = '⬡'; a.title = 'Open the cross-linked COD structure'; a.style.textDecoration = 'none'; a.style.fontSize = '1rem'; a.style.padding = '0 4px'; row.appendChild(a); }
+                listEl.appendChild(row);
+            });
+            document.getElementById('rod-match-modal').style.display = 'flex';
+        }
+
+        function closeRodMatchModal() { document.getElementById('rod-match-modal').style.display = 'none'; }
+
+        function rodOverlayMatches() {
+            const chosen = Array.from(document.querySelectorAll('#rod-match-list input.rod-match-cb:checked')).map(cb => +cb.value);
+            if (!chosen.length) { alert("Tick one or more matches to overlay."); return; }
+            closeRodMatchModal(); saveToHistory(); let added = 0;
+            for (const idx of chosen) {
+                const rec = rodMatchRecords[idx] && rodMatchRecords[idx].rec; if (!rec) continue;
+                try {
+                    const parsed = rodRecordToParsed(rec);
+                    if (!parsed.angles.length) continue;
+                    scaleRefToData(parsed);
+                    persistentDatasets[`__ref_rod_${rec.id}_match`] = parsed;
+                    added++;
+                } catch (e) {}
+            }
+            if (added) {
+                refreshCheckboxTargetsPanel(); updateChartCanvas();
+                document.getElementById('rod-status').innerText = `Overlaid ${added} matched reference(s).`;
+            }
+        }
+
+        async function tryAutoLoadRodLibraries() {
+            // 1) Restore the remembered set of libraries.
+            try {
+                const index = await idbLoadKey(ROD_IDB_INDEX_KEY);
+                if (index && index.length) {
+                    for (const meta of index) {
+                        try {
+                            const buf = await idbLoadKey(meta.key);
+                            if (!buf) continue;
+                            const entries = await rodIngestBytes(buf);
+                            rodLibraries.push({ name: meta.name, key: meta.key, entries, active: meta.active !== false });
+                        } catch (e) {}
+                    }
+                    refreshRodLibsPanel(); updateRodPanelState();
+                    return;
+                }
+            } catch (e) {}
+            // 2) First-run convenience: a library served next to the page (or ?rodlib=URL).
+            const params = new URLSearchParams(location.search);
+            const url = params.get('rodlib') || ROD_HOST_LIBRARY_URL;
+            try {
+                const res = await fetchArrayBufferWithProgress(url, function () {}, 60000);
+                if (res.ok) {
+                    const sig = new Uint8Array(res.buffer.slice(0, 4));   // HDF5 magic
+                    if (sig[0] === 0x89 && sig[1] === 0x48 && sig[2] === 0x44 && sig[3] === 0x46) {
+                        const entries = await rodIngestBytes(res.buffer);
+                        const key = "rod_lib_server";
+                        rodLibraries.push({ name: "(server) " + url.split('/').pop(), key, entries, active: true });
+                        try { await idbSaveKey(key, res.buffer); } catch (e) {}
+                        await rodSaveIndex();
+                        refreshRodLibsPanel(); updateRodPanelState();
+                    }
+                }
+            } catch (e) { /* not hosted / blocked */ }
         }
 
         function rruffSearch() {

@@ -1,8 +1,10 @@
 import os
 import io
 import re
+import json
 import zipfile
 import threading
+import urllib.parse
 import urllib.request
 import webbrowser
 import xml.etree.ElementTree as ET
@@ -27,7 +29,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "raman-v2026.07.24.1"
+VERSION_TAG = "raman-v2026.07.25.1"
 
 # RRUFF reference database (open Raman spectra of minerals).
 # Data are distributed as per-quality zip archives of two-column .txt files.
@@ -39,6 +41,19 @@ RRUFF_DATASETS = [
     "ignore_unoriented",
 ]
 RRUFF_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".raman_plotter_rruff")
+
+# ROD -- Raman Open Database (https://solsa.crystallography.net/rod/).
+# The Raman sibling of the COD, CC0, ~1100 entries. Two access modes:
+#   * offline: one or more baked .h5 libraries from build_rod_library.py
+#              (the browser build can only do this -- ROD's CORS header is
+#              pinned to a single third-party origin)
+#   * online:  the documented REST endpoints, queried on demand
+ROD_BASE_URL = "https://solsa.crystallography.net/rod"
+ROD_SEARCH_URL = ROD_BASE_URL + "/result"
+ROD_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".raman_plotter_rod")
+ROD_UA = ("Mozilla/5.0 (compatible; Raman-Plotter/1.0; "
+          "+https://solsa.crystallography.net/rod/)")
+COD_PAGE_URL = "https://www.crystallography.net/cod/{cid}.html"
 
 
 # ==========================================
@@ -405,6 +420,328 @@ def rruff_url(name, rid):
 
 
 # ==========================================
+# ROD -- RAMAN OPEN DATABASE (offline .h5 libraries + online REST)
+# ==========================================
+
+def rod_url(rod_id):
+    """Information-card page for a ROD entry."""
+    if rod_id in (None, "", "\\N"):
+        return None
+    return f"{ROD_BASE_URL}/{rod_id}.html"
+
+
+def load_rod_h5_library(path):
+    """Reads a baked ROD library .h5 (built by build_rod_library.py).
+
+    Same schema as the RRUFF/COD libraries: /spectra/<id> with x,y datasets and
+    precomputed peaks, so matching is instant. Peaks are read from the dataset
+    when present and fall back to the attribute. x/y stay on disk and are read
+    lazily when a reference is actually overlaid.
+
+    Returns {'path', 'entries': [{group, name, id, cod_id, formula, mineral,
+                                  laser, url, cod_url, peaks}]}.
+    """
+    if not H5_AVAILABLE:
+        raise ImportError("Reading .h5 libraries requires 'h5py' (pip install h5py).")
+    entries = []
+    with h5py.File(path, 'r') as f:
+        if 'spectra' not in f:
+            raise ValueError("Not a ROD library file ('spectra' group missing).")
+        sp = f['spectra']
+        for gname in sp:
+            g = sp[gname]
+            a = g.attrs
+            if 'peaks' in g:                       # dataset (preferred)
+                peaks = np.asarray(g['peaks'][:], dtype=float)
+            elif 'peaks' in a:                     # attribute (fallback)
+                peaks = np.asarray(a['peaks'], dtype=float)
+            else:
+                peaks = np.array([])
+            rid = _decode(a.get('rod_id', '')) or _decode(a.get('rruff_id', '')) or gname
+            cid = _decode(a.get('cod_id', ''))
+            entries.append({
+                'group': gname,
+                'name': _decode(a.get('name', gname)),
+                'id': rid,
+                'cod_id': cid,
+                'formula': _decode(a.get('formula', '')),
+                'mineral': _decode(a.get('mineral', '')),
+                'laser': _decode(a.get('laser_nm', '')),
+                'url': _decode(a.get('url', '')) or rod_url(rid),
+                'cod_url': _decode(a.get('cod_url', '')) or (COD_PAGE_URL.format(cid=cid) if cid else ''),
+                'peaks': peaks,
+            })
+    if not entries:
+        raise ValueError("Library contains no spectra.")
+    return {'path': path, 'entries': entries}
+
+
+def _rod_http_get(url, timeout=45, retries=2):
+    last = None
+    for attempt in range(retries + 1):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": ROD_UA})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except Exception as e:                     # noqa: BLE001 - retry anything
+            last = e
+    raise last
+
+
+def rod_search_params(query, field="auto"):
+    """Builds ROD `result` query parameters for a user query.
+
+    `field` selects how the query is interpreted:
+      'text'      free text over names and bibliography
+      'elements'  comma/space list -> el1..el8 (all must be present)
+      'formula'   empirical formula in Hill notation, e.g. 'C8 H10 N4 O2'
+      'id'        one or more ROD ids ('%' wildcard allowed)
+      'auto'      ids if it looks numeric, otherwise text
+    """
+    q = str(query or "").strip()
+    if not q:
+        return {"id": "%"}
+    if field == "auto":
+        field = "id" if re.fullmatch(r"[\d,\s%]+", q) else "text"
+
+    if field == "id":
+        return {"id": re.sub(r"[\s,]+", ",", q)}
+    if field == "elements":
+        els = [t for t in re.split(r"[,\s]+", q) if t][:8]
+        return {f"el{i}": el for i, el in enumerate(els, start=1)} or {"text": q}
+    if field == "formula":
+        return {"formula": q}
+    return {"text": q}
+
+
+def rod_search_online(query, field="auto", limit=300, timeout=45):
+    """Queries the ROD REST search endpoint.
+
+    Result formats are tried in decreasing order of parse-friendliness --
+    `csv` and `json` carry names, `lst` is ids only.
+
+    Returns a list of {'name','id','formula','url','online':True}.
+    """
+    params = rod_search_params(query, field)
+
+    for fmt in ("csv", "json", "lst"):
+        url = f"{ROD_SEARCH_URL}?{urllib.parse.urlencode(dict(params, format=fmt))}"
+        try:
+            text = _rod_http_get(url, timeout=timeout)
+        except Exception:
+            continue
+        hits = _rod_parse_results(text, fmt)
+        if hits:
+            return hits[:limit]
+    return []
+
+
+def _rod_parse_results(text, fmt):
+    """Turns a ROD search payload into hit dicts. Tolerant by design: the CSV
+    column set has changed across ROD releases, so we locate columns by header
+    name rather than position and fall back to bare id extraction."""
+    hits = []
+    if not text:
+        return hits
+
+    if fmt == "json":
+        try:
+            data = json.loads(text)
+        except Exception:
+            data = None
+        rows = data if isinstance(data, list) else (data or {}).get("results", [])
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            rid = str(row.get("file") or row.get("id") or row.get("rod_id") or "").strip()
+            if not rid:
+                continue
+            hits.append({'name': (row.get("mineral") or row.get("chemname")
+                                  or row.get("commonname") or row.get("formula")
+                                  or f"ROD {rid}"),
+                         'id': rid,
+                         'formula': str(row.get("formula") or "").replace("-", " ").strip(),
+                         'url': rod_url(rid), 'online': True})
+        if hits:
+            return hits
+
+    if fmt == "csv":
+        import csv as _csv
+        try:
+            rows = list(_csv.reader(io.StringIO(text)))
+        except Exception:
+            rows = []
+        if rows:
+            head = [h.strip().lower() for h in rows[0]]
+
+            def col(*cands):
+                for c in cands:
+                    if c in head:
+                        return head.index(c)
+                return None
+
+            i_id = col("file", "id", "rod_id", "codid")
+            i_min = col("mineral", "mineral name", "chemname", "commonname")
+            i_for = col("formula", "calcformula", "cellformula")
+            if i_id is not None:
+                for r in rows[1:]:
+                    if len(r) <= i_id:
+                        continue
+                    rid = r[i_id].strip()
+                    if not re.fullmatch(r"\d{6,9}", rid):
+                        continue
+                    name = (r[i_min].strip() if i_min is not None and len(r) > i_min else "")
+                    # COD/ROD wrap formulae in dashes: "- Fe H2 Na O2 S2 -"
+                    formula = (" ".join(r[i_for].replace("-", " ").split())
+                               if i_for is not None and len(r) > i_for else "")
+                    hits.append({'name': name or formula or f"ROD {rid}", 'id': rid,
+                                 'formula': formula, 'url': rod_url(rid), 'online': True})
+                if hits:
+                    return hits
+
+    seen = set()
+    for m in re.finditer(r"\b(\d{6,9})\b", text):
+        rid = m.group(1)
+        if rid in seen:
+            continue
+        seen.add(rid)
+        hits.append({'name': f"ROD {rid}", 'id': rid, 'formula': '',
+                     'url': rod_url(rid), 'online': True})
+    return hits
+
+
+def rod_fetch_spectrum(rod_id, timeout=45, use_cache=True):
+    """Downloads (and caches) one ROD spectrum. Returns (x, y, meta).
+
+    The spectrum comes from the JCAMP-DX serialization, which is compact and
+    unambiguous; the CIF is fetched alongside only for the display name."""
+    os.makedirs(ROD_CACHE_DIR, exist_ok=True)
+    jdx_path = os.path.join(ROD_CACHE_DIR, f"{rod_id}.jdx")
+
+    text = None
+    if use_cache and os.path.exists(jdx_path) and os.path.getsize(jdx_path) > 0:
+        with open(jdx_path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    if text is None:
+        text = _rod_http_get(f"{ROD_BASE_URL}/{rod_id}.jdx", timeout=timeout)
+        try:
+            with open(jdx_path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except Exception:
+            pass
+
+    x, y, header = parse_jcamp_dx(text)
+
+    meta = {'id': str(rod_id), 'url': rod_url(rod_id),
+            'name': header.get("TITLE", "") or f"ROD {rod_id}",
+            'formula': header.get("MOLFORM", ""), 'cod_id': '', 'cod_url': ''}
+
+    cif_path = os.path.join(ROD_CACHE_DIR, f"{rod_id}.rod")
+    cif = None
+    try:
+        if use_cache and os.path.exists(cif_path) and os.path.getsize(cif_path) > 0:
+            with open(cif_path, "r", encoding="utf-8", errors="replace") as fh:
+                cif = fh.read()
+        else:
+            cif = _rod_http_get(f"{ROD_BASE_URL}/{rod_id}.rod", timeout=timeout)
+            try:
+                with open(cif_path, "w", encoding="utf-8") as fh:
+                    fh.write(cif)
+            except Exception:
+                pass
+    except Exception:
+        cif = None
+
+    if cif:
+        mineral = _rod_cif_value(cif, "_chemical_name_mineral")
+        formula = _rod_cif_value(cif, "_chemical_formula_sum")
+        for m in re.finditer(r"^\s*(_\S*cod\S*)\s+(\d{7,8})\s*$", cif, re.M):
+            meta['cod_id'] = m.group(2)
+            meta['cod_url'] = COD_PAGE_URL.format(cid=m.group(2))
+            break
+        if mineral:
+            meta['name'] = mineral
+        if formula:
+            meta['formula'] = formula.replace("-", " ").strip()
+
+    return x, y, meta
+
+
+def _rod_cif_value(cif_text, tag):
+    """Single-line or `;`-delimited value for one CIF tag."""
+    m = re.search(r"^\s*" + re.escape(tag) + r"\s+(.+?)\s*$", cif_text, re.M | re.I)
+    if m:
+        v = m.group(1).strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+            v = v[1:-1]
+        return "" if v in ("?", ".") else v
+    m = re.search(r"^\s*" + re.escape(tag) + r"\s*\n;\s*(.*?)\n;", cif_text, re.M | re.S | re.I)
+    if m:
+        return " ".join(m.group(1).split())
+    return ""
+
+
+def parse_jcamp_dx(text):
+    """Parses a JCAMP-DX spectrum. Returns (x, y, header).
+
+    Handles the (XY..XY) point-pair form ROD emits and the equidistant
+    (X++(Y..Y)) form some depositors use. Shared by the ROD online fetch and
+    the generic .jdx file importer, so anything the user downloads by hand from
+    another database (SDBS included) opens the same way.
+    """
+    header, data_lines = {}, []
+    block, collecting = None, False
+    for line in text.splitlines():
+        m = re.match(r"^\s*##\s*([^=]+?)\s*=\s*(.*)$", line)
+        if m:
+            key, val = m.group(1).strip().upper(), m.group(2).strip()
+            header[key] = val
+            if key in ("XYPOINTS", "XYDATA", "PEAK TABLE", "DATA TABLE"):
+                block, collecting = (key, val.upper()), True
+            else:
+                collecting = False       # trailing headers close the data run
+            continue
+        if collecting and line.strip():
+            data_lines.append(line)
+
+    if not data_lines or block is None:
+        raise ValueError("no data block found in JCAMP-DX")
+
+    num = r"[-+]?\d*\.?\d+(?:[EeDd][-+]?\d+)?"
+    kind, form = block
+    if kind in ("XYPOINTS", "PEAK TABLE", "DATA TABLE") or "XY..XY" in form:
+        nums = [float(t.replace("D", "E").replace("d", "e"))
+                for t in re.findall(num, " ".join(data_lines))]
+        if len(nums) < 4:
+            raise ValueError("too few data points")
+        if len(nums) % 2:
+            nums = nums[:-1]
+        arr = np.asarray(nums, dtype=float).reshape(-1, 2)
+        x, y = arr[:, 0], arr[:, 1]
+    else:
+        ys = []
+        for line in data_lines:
+            toks = re.findall(num, line)
+            if len(toks) > 1:
+                ys.extend(float(t.replace("D", "E")) for t in toks[1:])
+        if len(ys) < 4:
+            raise ValueError("too few data points")
+        y = np.asarray(ys, dtype=float)
+        x = np.linspace(float(header.get("FIRSTX", 0.0)),
+                        float(header.get("LASTX", len(y) - 1)), len(y))
+
+    x = x * float(header.get("XFACTOR", 1.0) or 1.0)
+    y = y * float(header.get("YFACTOR", 1.0) or 1.0)
+    order = np.argsort(x)                          # some deposits run high->low
+    x, y = x[order], y[order]
+    good = np.isfinite(x) & np.isfinite(y)
+    x, y = x[good], y[good]
+    if x.size < 5:
+        raise ValueError("fewer than 5 finite points")
+    return x, y, header
+
+
+# ==========================================
 # GUI & EMBEDDED PLOTTING INTERFACE
 # ==========================================
 
@@ -603,6 +940,78 @@ class RamanPlotterGUI:
         self.rruff_lib = None
         self._refresh_rruff_status()
 
+        # --- ROD Reference Database Panel (offline .h5 libraries + online REST) ---
+        panel_rod = ttk.LabelFrame(sidebar_frame, text=" 🔬 ROD (Raman Open Database) ", padding=(8, 6))
+        panel_rod.pack(side="top", fill="x", pady=5)
+
+        self.rod_libs = []                 # [{name, path, entries, active, var}]
+        self.rod_search_hits = []
+        self.rod_cfg_path = os.path.join(os.path.expanduser("~"), ".raman_plotter_rod_libraries.json")
+        self.rod_mode_var = tk.StringVar(value="h5")
+
+        mode_row = ttk.Frame(panel_rod)
+        mode_row.pack(fill="x", pady=(0, 3))
+        ttk.Label(mode_row, text="Source:", font=("Helvetica", 8, "bold")).pack(side="left")
+        ttk.Radiobutton(mode_row, text="Offline .h5", value="h5", variable=self.rod_mode_var,
+                        command=self._rod_update_status).pack(side="left", padx=(4, 0))
+        ttk.Radiobutton(mode_row, text="Online", value="online", variable=self.rod_mode_var,
+                        command=self._rod_update_status).pack(side="left", padx=(4, 0))
+
+        self.rod_libs_frame = ttk.Frame(panel_rod)
+        self.rod_libs_frame.pack(fill="x", pady=(0, 2))
+        ttk.Button(panel_rod, text="📚 Add ROD .h5 Librar(ies)…",
+                   command=self.rod_add_library).pack(fill="x", pady=2)
+
+        ttk.Label(panel_rod, text="Search name / formula / ID:",
+                  font=("Helvetica", 8, "bold")).pack(anchor="w", pady=(4, 0))
+        rod_search_row = ttk.Frame(panel_rod)
+        rod_search_row.pack(fill="x", pady=(0, 3))
+        self.ent_rod_query = ttk.Entry(rod_search_row)
+        self.ent_rod_query.pack(side="left", fill="x", expand=True)
+        self.ent_rod_query.bind("<Return>", lambda e: self.rod_run_search())
+        ttk.Button(rod_search_row, text="🔍", width=3, command=self.rod_run_search).pack(side="right", padx=(3, 0))
+
+        # How the query is interpreted. Offline libraries always substring-match;
+        # online this picks which ROD search key is used (text / el1..el8 /
+        # formula / id), which is what makes a bounded online match possible.
+        rod_field_row = ttk.Frame(panel_rod)
+        rod_field_row.pack(fill="x", pady=(0, 3))
+        ttk.Label(rod_field_row, text="as", font=("Helvetica", 8)).pack(side="left")
+        self.combo_rod_field = ttk.Combobox(rod_field_row, state="readonly", width=9,
+                                            values=("auto", "text", "elements", "formula", "id"))
+        self.combo_rod_field.current(0)
+        self.combo_rod_field.pack(side="left", padx=(3, 0))
+        ttk.Label(rod_field_row, text="max online:", font=("Helvetica", 8)).pack(side="left", padx=(8, 0))
+        self.ent_rod_scan_cap = ttk.Entry(rod_field_row, width=5)
+        self.ent_rod_scan_cap.insert(0, "100")
+        self.ent_rod_scan_cap.pack(side="left", padx=(3, 0))
+
+        self.rod_results_list = tk.Listbox(panel_rod, height=4, exportselection=False)
+        self.rod_results_list.pack(fill="x", pady=(0, 3))
+        self.rod_results_list.bind("<Double-1>", self._rod_open_selected_page)
+
+        ttk.Button(panel_rod, text="➕ Overlay Selected Reference",
+                   command=self.rod_overlay_selected).pack(fill="x", pady=(0, 2))
+
+        ttk.Separator(panel_rod, orient="horizontal").pack(fill="x", pady=4)
+        rod_tol_row = ttk.Frame(panel_rod)
+        rod_tol_row.pack(fill="x")
+        ttk.Label(rod_tol_row, text="Match tol (cm⁻¹):", font=("Helvetica", 8)).pack(side="left")
+        self.ent_rod_match_tol = ttk.Entry(rod_tol_row, width=6)
+        self.ent_rod_match_tol.insert(0, "12")
+        self.ent_rod_match_tol.pack(side="left", padx=(4, 0))
+
+        self.btn_rod_match = ttk.Button(panel_rod, text="🎯 Match by Selected Peaks (ROD)",
+                                        command=self.rod_match_by_peaks)
+        self.btn_rod_match.pack(fill="x", pady=(2, 2))
+
+        self._rod_scan_cancel = False      # set by the Stop button mid online scan
+        self.rod_status_var = tk.StringVar(value="ROD: add a baked .h5 library, or switch to Online.")
+        ttk.Label(panel_rod, textvariable=self.rod_status_var, font=("Helvetica", 8),
+                  foreground="#555555", wraplength=250).pack(anchor="w")
+
+        self._rod_load_config()
+
         # --- Active Layers Control Panel ---
         self.panel_fit_targets = ttk.LabelFrame(sidebar_frame, text=" 📋 Plotted Spectra Layers ", padding=(8, 6))
         self.panel_fit_targets.pack(side="top", fill="x", pady=8, expand=True)
@@ -722,7 +1131,10 @@ class RamanPlotterGUI:
                                      command=self.redraw_plot)
                 cb.pack(side="left", anchor="w")
             else:
-                url = rruff_url(data.get('rruff_name'), data.get('rruff_id')) if key.startswith("__ref_") else None
+                # ROD/COD-baked references carry an explicit URL; RRUFF ones are derived.
+                url = None
+                if key.startswith("__ref_"):
+                    url = data.get('ref_url') or rruff_url(data.get('rruff_name'), data.get('rruff_id'))
                 if url:
                     lbl = ttk.Label(row_frame, text=data['label'], font=("Helvetica", 9, "underline"),
                                     foreground="#0d6efd", cursor="hand2")
@@ -1290,15 +1702,20 @@ class RamanPlotterGUI:
             label = f"RRUFF: {hit['name']}" + (f" ({hit['id']})" if hit['id'] else "")
         return x, y, label
 
-    def _add_reference(self, x, y, label, key, rruff_name=None, rruff_id=None):
-        """Scales a reference to the current data maximum and stores it."""
+    def _add_reference(self, x, y, label, key, rruff_name=None, rruff_id=None, ref_url=None):
+        """Scales a reference to the current data maximum and stores it.
+
+        `ref_url` is an explicit database link (ROD/COD-baked references carry
+        one); when absent the layers panel derives an RRUFF link from the name.
+        """
         data_keys = [k for k in self.active_datasets.keys()
                      if not k.startswith("__fit_") and not k.startswith("__ref_")]
         if data_keys and np.max(y) > 0:
             max_scale = max(np.max(self.active_datasets[k]['intensities']) for k in data_keys)
             y = (y / np.max(y)) * max_scale
         self.active_datasets[key] = {'angles': x, 'intensities': y, 'label': label,
-                                     'rruff_name': rruff_name, 'rruff_id': rruff_id}
+                                     'rruff_name': rruff_name, 'rruff_id': rruff_id,
+                                     'ref_url': ref_url}
 
     def rruff_run_search(self):
         query = self.ent_rruff_query.get().strip()
@@ -1536,6 +1953,502 @@ class RamanPlotterGUI:
         btn_row.pack(pady=8)
         ttk.Button(btn_row, text="🔗 Open RRUFF Page(s)", command=open_pages).pack(side="left", padx=4)
         ttk.Button(btn_row, text="➕ Overlay Selected Match(es)", command=overlay_chosen).pack(side="left", padx=4)
+
+    # ---------- ROD reference database ----------
+    # Two modes, chosen by the Source radio:
+    #   'h5'     one or more baked libraries, searched and matched in memory
+    #   'online' the ROD REST API, queried on demand (desktop only -- the
+    #            browser build cannot, because ROD's CORS header names a
+    #            single third-party origin)
+
+    def rod_add_library(self):
+        """Add one or more baked ROD .h5 libraries to the managed list."""
+        paths = filedialog.askopenfilenames(
+            title="Add ROD .h5 librar(ies) (from build_rod_library.py)",
+            filetypes=[("ROD Raman library", ("*.h5", "*.hdf5")), ("All Files", "*.*")])
+        added = 0
+        for path in paths:
+            if self._rod_load_library_path(path, active=True):
+                added += 1
+        if added:
+            self.rod_mode_var.set("h5")
+            self._rod_save_config()
+        self._rod_refresh_libs_panel()
+        self._rod_update_status()
+
+    def _rod_load_library_path(self, path, active=True):
+        """Load an .h5 into the managed list. Returns True on success."""
+        if any(os.path.abspath(l['path']) == os.path.abspath(path) for l in self.rod_libs):
+            self.rod_status_var.set(f"Already loaded: {os.path.basename(path)}")
+            return False
+        try:
+            lib = load_rod_h5_library(path)
+        except Exception as e:
+            messagebox.showerror("Library Error",
+                                 f"Could not open ROD library:\n{os.path.basename(path)}\n{e}")
+            return False
+        for e in lib['entries']:
+            e['lib_path'] = path
+        self.rod_libs.append({'name': os.path.basename(path), 'path': path,
+                              'entries': lib['entries'], 'active': bool(active),
+                              'var': tk.BooleanVar(value=bool(active))})
+        return True
+
+    def _rod_remove_library(self, idx):
+        if 0 <= idx < len(self.rod_libs):
+            del self.rod_libs[idx]
+            self._rod_save_config()
+            self._rod_refresh_libs_panel()
+            self._rod_update_status()
+
+    def _rod_toggle_library(self, idx):
+        if 0 <= idx < len(self.rod_libs):
+            self.rod_libs[idx]['active'] = bool(self.rod_libs[idx]['var'].get())
+            self.rod_mode_var.set("h5")
+            self._rod_save_config()
+            self._rod_update_status()
+
+    def _rod_refresh_libs_panel(self):
+        for child in self.rod_libs_frame.winfo_children():
+            child.destroy()
+        for idx, lib in enumerate(self.rod_libs):
+            row = ttk.Frame(self.rod_libs_frame)
+            row.pack(fill="x", pady=1)
+            lib.setdefault('var', tk.BooleanVar(value=lib['active']))
+            lib['var'].set(lib['active'])
+            ttk.Checkbutton(row, text=f"{lib['name']} ({len(lib['entries'])})",
+                            variable=lib['var'],
+                            command=lambda i=idx: self._rod_toggle_library(i)).pack(side="left", anchor="w")
+            ttk.Button(row, text="❌", width=2,
+                       command=lambda i=idx: self._rod_remove_library(i)).pack(side="right")
+
+    def _rod_save_config(self):
+        try:
+            with open(self.rod_cfg_path, "w", encoding="utf-8") as fh:
+                json.dump([{'path': l['path'], 'active': l['active']} for l in self.rod_libs],
+                          fh, indent=2)
+        except Exception:
+            pass
+
+    def _rod_load_config(self):
+        """On launch, re-load remembered libraries (skipping any now-missing files)."""
+        if os.path.exists(self.rod_cfg_path):
+            try:
+                with open(self.rod_cfg_path, "r", encoding="utf-8") as fh:
+                    saved = json.load(fh)
+            except Exception:
+                saved = []
+            for item in saved or []:
+                p = item.get('path')
+                if p and os.path.exists(p):
+                    self._rod_load_library_path(p, active=item.get('active', True))
+        self._rod_refresh_libs_panel()
+        self._rod_update_status()
+
+    def _rod_active_entries(self):
+        out = []
+        for lib in self.rod_libs:
+            if lib['active']:
+                out.extend(lib['entries'])
+        return out
+
+    def _rod_update_status(self):
+        if self.rod_mode_var.get() == "online":
+            self.rod_status_var.set(
+                "ROD online: queries solsa.crystallography.net. Matching needs a "
+                "narrowing query (name / formula / elements) and downloads up to "
+                "'max online' spectra.")
+            return
+        active = [l for l in self.rod_libs if l['active']]
+        total = sum(len(l['entries']) for l in active)
+        if not self.rod_libs:
+            self.rod_status_var.set("ROD: add a baked .h5 library, or switch to Online.")
+        else:
+            self.rod_status_var.set(
+                f"ROD: {len(active)}/{len(self.rod_libs)} librar(ies) active · "
+                f"{total:,} spectra. Search / Overlay / Match.")
+
+    @staticmethod
+    def _rod_haystack(e):
+        return (f"{e.get('name','')} {e.get('id','')} {e.get('formula','')} "
+                f"{e.get('mineral','')} {e.get('cod_id','')}").lower()
+
+    def rod_run_search(self):
+        query = self.ent_rod_query.get().strip()
+        self.rod_results_list.delete(0, tk.END)
+        self.rod_search_hits = []
+
+        if self.rod_mode_var.get() == "online":
+            field = self.combo_rod_field.get() or "auto"
+            self.rod_status_var.set("ROD online: searching …")
+
+            def worker():
+                try:
+                    hits = rod_search_online(query, field=field)
+                    err = None
+                except Exception as e:                       # noqa: BLE001
+                    hits, err = [], e
+                self.root.after(0, lambda: self._rod_show_search_hits(hits, err))
+
+            threading.Thread(target=worker, daemon=True).start()
+            return
+
+        pool = self._rod_active_entries()
+        if not pool:
+            messagebox.showinfo(
+                "No ROD Library",
+                "Add a ROD .h5 library (built by build_rod_library.py), tick one in the "
+                "list, or switch Source to Online.")
+            return
+        q = query.lower()
+        hits = [e for e in pool if not q or q in self._rod_haystack(e)][:300]
+        self._rod_show_search_hits(hits, None)
+
+    def _rod_show_search_hits(self, hits, err):
+        if err is not None:
+            self.rod_status_var.set(f"ROD online search failed: {err}")
+            return
+        self.rod_search_hits = hits
+        if not hits:
+            self.rod_status_var.set("ROD: no matches.")
+            return
+        for h in hits:
+            bits = [h.get('name') or f"ROD {h.get('id')}", str(h.get('id', ''))]
+            if h.get('formula'):
+                bits.append(h['formula'])
+            if h.get('laser'):
+                bits.append(f"{h['laser']}nm")
+            self.rod_results_list.insert(tk.END, "  ·  ".join(b for b in bits if b))
+        where = "online" if self.rod_mode_var.get() == "online" else "libraries"
+        self.rod_status_var.set(
+            f"ROD ({where}): {len(hits)} match(es). Select and overlay; double-click opens the ROD page.")
+
+    def _rod_selected_hit(self):
+        sel = self.rod_results_list.curselection()
+        if not sel or sel[0] >= len(self.rod_search_hits):
+            return None
+        return self.rod_search_hits[sel[0]]
+
+    def _rod_open_selected_page(self, event=None):
+        hit = self._rod_selected_hit()
+        if not hit:
+            return
+        url = hit.get('url') or rod_url(hit.get('id'))
+        if url:
+            webbrowser.open_new_tab(url)
+
+    def _rod_read_xy(self, hit):
+        """Returns (x, y, label, url) for a hit, from the .h5 group (lazy read)
+        or by downloading it from ROD."""
+        if hit.get('group') is not None and hit.get('lib_path'):
+            with h5py.File(hit['lib_path'], 'r') as f:
+                g = f['spectra'][hit['group']]
+                x = np.array(g['x'][:], dtype=float)
+                y = np.array(g['y'][:], dtype=float)
+            label = f"ROD: {hit['name']} ({hit['id']})"
+            return x, y, label, (hit.get('url') or rod_url(hit.get('id')))
+
+        x, y, meta = rod_fetch_spectrum(hit['id'])
+        name = hit.get('name') or meta.get('name') or f"ROD {hit['id']}"
+        return x, y, f"ROD: {name} ({hit['id']})", (meta.get('url') or rod_url(hit['id']))
+
+    def rod_overlay_selected(self):
+        hit = self._rod_selected_hit()
+        if not hit:
+            self.rod_status_var.set("ROD: select a search result first.")
+            return
+
+        def finish(x, y, label, url, err):
+            if err is not None:
+                self.rod_status_var.set(f"ROD: could not read that reference — {err}")
+                return
+            if len(x) == 0:
+                self.rod_status_var.set("ROD: that entry has no spectrum data.")
+                return
+            self.save_to_history()
+            self._add_reference(x, y, label, f"__ref_rod_{hit['id']}",
+                                rruff_name=hit.get('name'), rruff_id=hit.get('id'),
+                                ref_url=url)
+            self.replot_and_refresh_canvas()
+            self.rod_status_var.set(f"ROD: overlaid {hit.get('name')} ({hit['id']}).")
+
+        if hit.get('group') is not None:
+            try:
+                x, y, label, url = self._rod_read_xy(hit)
+                finish(x, y, label, url, None)
+            except Exception as e:                           # noqa: BLE001
+                finish(None, None, None, None, e)
+            return
+
+        self.rod_status_var.set(f"ROD: downloading {hit['id']} …")
+
+        def worker():
+            try:
+                x, y, label, url = self._rod_read_xy(hit)
+                self.root.after(0, lambda: finish(x, y, label, url, None))
+            except Exception as e:                           # noqa: BLE001
+                self.root.after(0, lambda e=e: finish(None, None, None, None, e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def rod_match_by_peaks(self):
+        """Rank ROD references by how well their bands explain the marked peaks."""
+        if not self.peak_guesses:
+            messagebox.showinfo(
+                "Mark Peaks First",
+                "Turn on '🎯 Peak Selection', then right-click on the plot to mark the "
+                "peaks you want to match. Then run 'Match by Selected Peaks (ROD)'.")
+            return
+        try:
+            tolerance = float(self.ent_rod_match_tol.get().strip())
+        except ValueError:
+            tolerance = 12.0
+        exp_peaks = list(self.peak_guesses)
+
+        if self.rod_mode_var.get() == "online":
+            self._rod_match_online(exp_peaks, tolerance)
+            return
+
+        pool = self._rod_active_entries()
+        if not pool:
+            messagebox.showinfo(
+                "No ROD Library",
+                "Peak matching in offline mode runs against baked libraries, which "
+                "carry precomputed bands. Add a ROD .h5 library "
+                "(build_rod_library.py) first, or switch Source to Online and give "
+                "a narrowing query.")
+            return
+        q = self.ent_rod_query.get().strip().lower()
+
+        scored = []
+        for e in pool:
+            if q and q not in self._rod_haystack(e):
+                continue
+            if e['peaks'].size == 0:
+                continue
+            score, avg, matched = peak_match_score(e['peaks'], exp_peaks, tolerance)
+            if matched > 0:
+                scored.append({'score': score, 'avg': avg, 'matched': matched,
+                               'name': e['name'], 'id': e['id'], 'group': e['group'],
+                               'lib_path': e.get('lib_path'), 'formula': e.get('formula', ''),
+                               'url': e.get('url'), 'cod_url': e.get('cod_url', '')})
+        scored.sort(key=lambda t: (-t['score'], t['avg']))
+        self._show_rod_match_results(scored[:100], len(exp_peaks), tolerance)
+
+    def _rod_stop_scan(self):
+        self._rod_scan_cancel = True
+        self.rod_status_var.set("ROD online: stopping …")
+
+    def _rod_set_scanning(self, scanning):
+        if scanning:
+            self.btn_rod_match.config(text="⏹ Stop scanning", command=self._rod_stop_scan)
+        else:
+            self.btn_rod_match.config(text="🎯 Match by Selected Peaks (ROD)",
+                                      command=self.rod_match_by_peaks)
+
+    def _rod_match_online(self, exp_peaks, tolerance):
+        """Bounded online match: narrow with a query, download only that subset,
+        detect bands, and rank.
+
+        Matching all of ROD live would mean downloading the whole database, so a
+        narrowing query is required and the number of spectra actually fetched
+        is capped. Downloads land in the shared cache, so re-running a scan over
+        the same subset (or a wider tolerance) costs nothing.
+        """
+        query = self.ent_rod_query.get().strip()
+        field = self.combo_rod_field.get() or "auto"
+        if not query:
+            messagebox.showinfo(
+                "Narrow the Search First",
+                "Online matching needs a narrowing query, because ranking every "
+                "entry would mean downloading all of ROD.\n\n"
+                "Type a mineral or compound name, a formula, or an element list "
+                "in the search box and set 'as' accordingly — for example:\n"
+                "    elements   Ti,O\n"
+                "    formula    C8 H10 N4 O2\n"
+                "    text       calcite\n\n"
+                "Then run the match again.")
+            return
+        try:
+            cap = max(1, int(float(self.ent_rod_scan_cap.get().strip())))
+        except ValueError:
+            cap = 100
+
+        self.rod_status_var.set("ROD online: searching …")
+
+        def worker():
+            try:
+                hits = rod_search_online(query, field=field, limit=10000)
+            except Exception as e:                           # noqa: BLE001
+                self.root.after(0, lambda e=e: self.rod_status_var.set(
+                    f"ROD online search failed: {e}"))
+                return
+            self.root.after(0, lambda: self._rod_confirm_and_scan(
+                hits, cap, exp_peaks, tolerance))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _rod_confirm_and_scan(self, hits, cap, exp_peaks, tolerance):
+        if not hits:
+            self.rod_status_var.set("ROD online: nothing matched that query.")
+            messagebox.showinfo("No Entries",
+                                "That query matched no ROD entries, so there is "
+                                "nothing to download and rank.")
+            return
+        total = len(hits)
+        if total > cap:
+            proceed = messagebox.askyesno(
+                "Narrow Further?",
+                f"That query matches {total} ROD entries, more than the "
+                f"cap of {cap}.\n\n"
+                f"Scan the first {cap}? Choose No to narrow the query instead "
+                f"(or raise 'max online' next to the search box).")
+            if not proceed:
+                self.rod_status_var.set(
+                    f"ROD online: {total} entries matched — narrow the query or raise the cap.")
+                return
+            hits = hits[:cap]
+
+        self._rod_scan_cancel = False
+        self._rod_set_scanning(True)
+        n = len(hits)
+
+        def worker():
+            scored, failed = [], 0
+            for i, hit in enumerate(hits, 1):
+                if self._rod_scan_cancel:
+                    break
+                try:
+                    x, y, meta = rod_fetch_spectrum(hit['id'])
+                    ref_peaks = detect_reference_peaks(x, y)
+                    score, avg, matched = peak_match_score(ref_peaks, exp_peaks, tolerance)
+                    if matched > 0:
+                        scored.append({
+                            'score': score, 'avg': avg, 'matched': matched,
+                            'name': hit.get('name') or meta.get('name') or f"ROD {hit['id']}",
+                            'id': hit['id'], 'group': None, 'lib_path': None,
+                            'formula': hit.get('formula') or meta.get('formula', ''),
+                            'url': hit.get('url') or meta.get('url'),
+                            'cod_url': meta.get('cod_url', ''),
+                        })
+                except Exception:                            # noqa: BLE001
+                    failed += 1
+                if i % 5 == 0 or i == n:
+                    self.root.after(0, lambda i=i: self.rod_status_var.set(
+                        f"ROD online: scanned {i}/{n} …"))
+
+            scored.sort(key=lambda t: (-t['score'], t['avg']))
+            stopped = self._rod_scan_cancel
+
+            def done():
+                self._rod_set_scanning(False)
+                self._rod_scan_cancel = False
+                self._show_rod_match_results(scored[:100], len(exp_peaks), tolerance)
+                note = " (stopped early)" if stopped else ""
+                if failed:
+                    note += f", {failed} unavailable"
+                if scored:
+                    self.rod_status_var.set(
+                        f"ROD online: {len(scored)} of {n} scanned entr(ies) matched{note}.")
+            self.root.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_rod_match_results(self, scored, n_exp, tolerance):
+        if not scored:
+            self.rod_status_var.set("ROD: no references matched the marked peaks.")
+            messagebox.showinfo("No Matches",
+                                "No ROD reference had bands near your marked peaks.\n"
+                                "Try a larger match tolerance or different peaks.")
+            return
+        self.rod_status_var.set(f"ROD: {len(scored)} candidate(s) ranked (tol ±{tolerance:g} cm⁻¹).")
+
+        pop = tk.Toplevel(self.root)
+        pop.title("ROD Search & Match — Candidate Ranking")
+        pop.geometry("720x360")
+        pop.transient(self.root)
+        pop.grab_set()
+        ttk.Label(pop, text=f"Ranked by alignment of ROD bands with your {n_exp} marked peak(s) "
+                            f"(±{tolerance:g} cm⁻¹). Double-click a row to open its ROD page.",
+                  font=("Helvetica", 9, "bold")).pack(pady=6, padx=8, anchor="w")
+
+        frame = ttk.Frame(pop)
+        frame.pack(fill="both", expand=True, padx=8, pady=4)
+        scroll = ttk.Scrollbar(frame)
+        scroll.pack(side="right", fill="y")
+        tree = ttk.Treeview(frame, columns=("Score", "Name", "ID", "Formula", "Matched"),
+                            show="headings", yscrollcommand=scroll.set, height=10,
+                            selectmode="extended")
+        for col, head, width, anchor in (
+                ("Score", "Match Score", 100, "center"),
+                ("Name", "Name / Mineral", 220, "w"),
+                ("ID", "ROD ID", 100, "center"),
+                ("Formula", "Formula", 140, "w"),
+                ("Matched", "Peaks Matched", 110, "center")):
+            tree.heading(col, text=head)
+            tree.column(col, width=width, anchor=anchor)
+        tree.pack(fill="both", expand=True)
+        scroll.config(command=tree.yview)
+
+        row_map = {}
+        for rec in scored:
+            iid = tree.insert("", "end", values=(f"{rec['score']:.0f}%", rec['name'], rec['id'],
+                                                 rec.get('formula', ''), f"{rec['matched']}/{n_exp}"))
+            row_map[iid] = rec
+
+        def open_pages(event=None):
+            opened = 0
+            for iid in tree.selection():
+                rec = row_map.get(iid)
+                url = rec and (rec.get('url') or rod_url(rec.get('id')))
+                if url:
+                    webbrowser.open_new_tab(url)
+                    opened += 1
+            if opened == 0:
+                messagebox.showinfo("Nothing Selected", "Select a row, then open its ROD page.")
+        tree.bind("<Double-1>", open_pages)
+
+        def open_cod_pages():
+            opened = 0
+            for iid in tree.selection():
+                rec = row_map.get(iid)
+                if rec and rec.get('cod_url'):
+                    webbrowser.open_new_tab(rec['cod_url'])
+                    opened += 1
+            if opened == 0:
+                messagebox.showinfo("No Linked Structure",
+                                    "None of the selected entries has a cross-linked "
+                                    "COD structure.")
+
+        def overlay_chosen():
+            sel = tree.selection()
+            if not sel:
+                return
+            pop.destroy()
+            self.save_to_history()
+            added = 0
+            for iid in sel:
+                hit = row_map[iid]
+                try:
+                    x, y, label, url = self._rod_read_xy(hit)
+                    if len(x) == 0:
+                        continue
+                except Exception:
+                    continue
+                self._add_reference(x, y, label, f"__ref_rod_{hit['id']}_match",
+                                    rruff_name=hit['name'], rruff_id=hit['id'], ref_url=url)
+                added += 1
+            if added:
+                self.replot_and_refresh_canvas()
+                self.rod_status_var.set(f"ROD: overlaid {added} matched reference(s).")
+
+        btn_row = ttk.Frame(pop)
+        btn_row.pack(pady=8)
+        ttk.Button(btn_row, text="🔗 Open ROD Page(s)", command=open_pages).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="⬡ Open Linked COD Structure(s)",
+                   command=open_cod_pages).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="➕ Overlay Selected Match(es)",
+                   command=overlay_chosen).pack(side="left", padx=4)
 
     def clear_canvas(self):
         if self.active_datasets:
