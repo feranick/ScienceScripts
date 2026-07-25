@@ -76,24 +76,95 @@ done
 
 Then pass `--mirror ./cod-cif-mirror` and parallelise with `--jobs N`.
 
-### The three general-purpose libraries
+### Sizing: build for the desktop app, or for the browser?
 
-With the mirror in place, these are the recommended defaults (adjust `--jobs`
-to your CPU):
+**This is the decision that matters most, and getting it wrong produces a file
+the browser cannot open.** Storage mode drives size by a factor of ~70:
+
+| Build | Per phase | 62k inorganic phases |
+| --- | --- | --- |
+| full curves (default, 4251 pts) | 33 KB | **2.1 GB** |
+| `--peaks-only` (all ~200 reflections) | 1.6 KB | 99 MB |
+| `--peaks-only --max-peaks 60` | 0.5 KB | **30 MB** |
+| `--peaks-only --max-peaks 30` | 0.2 KB | 15 MB |
+
+- **`xrd_plotter.py` (desktop)** reads `x`/`y` lazily through h5py, one phase at
+  a time. Size is irrelevant; a 2.1 GB curve library is fine.
+- **`xrd_plotter.html` (browser)** must hold the library in the tab. Full-curve
+  libraries above a few hundred MB **cannot work** — see the next section.
+
+So for anything large, build twice: full curves for the desktop, peaks-only for
+the browser. Peak positions and relative intensities are identical either way;
+only the stored profile differs, and the browser rebuilds it on overlay.
+
+### Why the browser cannot take a multi-GB library
+
+Loading a library in the tab costs three copies, and the third dominates:
+
+| | 2.1 GB library |
+| --- | --- |
+| the downloaded `ArrayBuffer` (JS heap) | 2.1 GB |
+| the Emscripten MEMFS copy inside h5wasm | 2.1 GB |
+| per-phase JS arrays for `x` and `y` | **~4.2 GB** |
+
+h5wasm is compiled for wasm32, so its entire address space caps at 4 GB
+regardless of how much RAM the machine has. A renderer asked to do this is
+killed part-way through loading — Chrome shows **"Aw, Snap!", error code 5**,
+with nothing in the console because the process is gone.
+
+The apps now defend against this rather than crashing:
+
+- above **1.2 GB** the library is refused with a message telling you to rebuild
+  peaks-only;
+- above **150 MB** stored curves are dropped at load and profiles are rebuilt
+  from `peaks`+`intensities` on overlay (reported in the status line);
+- above **300 MB** the file is not cached to IndexedDB;
+- spectral data is held as `Float32Array` rather than JS `Array` — a quarter of
+  the memory.
+
+Those guards make an oversized file fail cleanly. They are not a substitute for
+building peaks-only.
+
+### The recommended library set
+
+With the mirror in place, these are sensible defaults (adjust `--jobs` to your
+CPU). Note the inorganic and minerals sets are built twice:
 
 ```bash
-# 1) Inorganic — no C/H (~62k). Full curves; browser-friendly.
+# 1) Inorganic — no C/H (~62k)
+#    desktop: full curves (2.1 GB)
 python build_cod_powder_library.py --db3 cod-260101.db3 --inorganic \
        --mirror ./cod-cif-mirror --jobs 8 --out cod_inorganic.h5
+#    browser: peaks-only (~30 MB)
+python build_cod_powder_library.py --db3 cod-260101.db3 --inorganic \
+       --mirror ./cod-cif-mirror --jobs 8 --peaks-only --max-peaks 60 \
+       --out cod_inorganic_web.h5
 
-# 2) Minerals — entries with a mineral name (~16k). Full curves.
+# 2) Minerals — entries with a mineral name (~16k)
+#    desktop: full curves (~540 MB); browser: peaks-only (~8 MB)
 python build_cod_powder_library.py --db3 cod-260101.db3 --minerals-only \
        --mirror ./cod-cif-mirror --jobs 8 --out cod_minerals.h5
+python build_cod_powder_library.py --db3 cod-260101.db3 --minerals-only \
+       --mirror ./cod-cif-mirror --jobs 8 --peaks-only --max-peaks 60 \
+       --out cod_minerals_web.h5
 
-# 3) Organic — C+H (~448k). PEAKS-ONLY + capped reflections (large set).
+# 3) Organic — C+H (~448k). Peaks-only for both; full curves would be ~15 GB.
 python build_cod_powder_library.py --db3 cod-260101.db3 --organic \
-       --mirror ./cod-cif-mirror --jobs 8 --peaks-only --max-peaks 300 \
+       --mirror ./cod-cif-mirror --jobs 8 --peaks-only --max-peaks 60 \
        --out cod_organic.h5
+```
+
+`--max-peaks 60` keeps the 60 strongest reflections, which is far more than
+peak matching needs and still resolves crowded low-symmetry patterns. Drop to
+30 if you want the organic set smaller; raise it if you overlay peaks-only
+references and want a denser rebuilt profile.
+
+Check a build before committing to a long run:
+
+```bash
+python build_cod_powder_library.py --db3 cod-260101.db3 --inorganic \
+       --limit 200 --peaks-only --max-peaks 60 --out probe.h5
+# multiply the resulting size by (total entries / 200)
 ```
 
 (No mirror? Drop `--mirror` and use `--jobs 1` — it fetches over HTTP, fine for
@@ -113,40 +184,58 @@ Output `.h5` schema (per phase): attributes `name`, `cod_id`, `url`, `peaks`
 `x`,`y` (broadened profile 0–100) **unless** `--peaks-only`, in which case the
 apps rebuild the curve from `peaks`+`intensities` on load.
 
-## 2. Python app (`xrd_plotter.py`)
+## 2. Both apps: one **🔬 Reference Databases** panel
 
-New **🌐 COD** panel (above RRUFF). One button — **🗂️ Open COD Source…** — asks
-how you want to work:
+RRUFF, COD and (in the desktop app) the Materials Project used to have a panel
+each. They are now a single panel with one search box:
 
-- **🌐 db3 index + Online** — pick a Profex `cod-*.db3` to search all of COD;
-  *Overlay Selected* fetches that entry's CIF and simulates it on the fly, and
-  *Match by Selected Peaks* fetches + simulates the current search hits and ranks
-  them (needs `pymatgen` + network). No `.h5` required in this mode.
-- **📚 Local .h5 libraries** — add one or more baked `.h5` files and work fully
-  offline: search, overlay (real intensities, existing dot-dash reference
-  style), and instant peak-matching against the union of active libraries.
+- **Sources** are listed as checkboxes with live counts — the RRUFF folder or
+  `.h5`, plus every loaded COD library. Tick which ones are live; ❌ removes a
+  library.
+- **One search** queries every enabled source and merges the results into one
+  list, each row tagged with its origin (`[RRUFF]`, `[COD]`).
+- **One Match** ranks across every enabled source in a single pass, in a window
+  with a Source column. Previously this meant matching once per panel and
+  comparing the rankings by eye.
+- **Manage sources** (collapsed by default) holds the setup controls: adding
+  `.h5` libraries, the RRUFF folder, the COD db3 index, and the Materials
+  Project API key.
 
-**Multi-library manager.** You can load several libraries (e.g. inorganic +
-minerals + organic) and tick which ones are **active**; search/overlay/match use
-only the active set. Each row has a checkbox and an ❌ to remove it. The set is
-remembered across launches in `cod_libraries.json` (next to the script) and
-re-loaded automatically — so you set it up once and just toggle thereafter.
+**Multi-library manager.** Load several libraries (inorganic + minerals +
+organic) and toggle which are active. The set is remembered across launches —
+`cod_libraries.json` next to the script in the desktop app, IndexedDB in the
+browser — so you set it up once and just toggle thereafter.
 
-Peaks-only libraries (e.g. the organic one) are supported: the overlay curve is
-rebuilt from the stored reflections on the fly. Overlay labels link to the COD
-page, and the whole sidebar is scrollable. `mp_api` is no longer required for COD
-or for pattern simulation — only for the Materials Project search.
+Peaks-only libraries are supported everywhere: the overlay curve is rebuilt from
+the stored reflections on the fly. Overlay labels link to the COD page.
+`mp_api` is required only for the Materials Project search, not for COD or for
+pattern simulation.
 
-## 3. Browser app (`xrd_plotter.html`)
+### Desktop-only: the db3 index
 
-New **🌐 COD** panel (above RRUFF), offline only. **📚 Add COD .h5 Library**
-reads baked files in-browser via h5wasm (the same mechanism the RRUFF panel
-uses). Like the Python app it's a **multi-library manager**: add several
-libraries, tick which are active (checkbox), remove with ❌; search / overlay /
-match use the union of active libraries, and peaks-only libraries are rebuilt on
-the fly. The set (and the files) are cached in IndexedDB and restored on the next
-visit. A `cod_powder_library.h5` placed next to the page (or `?codlib=<url>`)
-auto-loads on first run.
+**🗂️ Open COD Source…** under Manage sources also accepts a Profex `cod-*.db3`,
+which searches all of COD without any `.h5`: *Overlay* fetches that entry's CIF
+and simulates it on the fly, and matching fetches + simulates the current search
+hits (needs `pymatgen` + network).
+
+### Browser-only: libraries are offered, not auto-loaded
+
+On load the page works out which `.h5` files the server has and lists them with
+their sizes and a **Load** button — nothing is downloaded until you ask, since a
+library can be tens or hundreds of MB. Libraries you loaded before are restored
+from IndexedDB automatically.
+
+Discovery tries, in order: `?codlib=a.h5,b.h5` → a `libraries.json` manifest you
+provide → the server's directory index → a list of conventional filenames
+(`cod_powder_library.h5`, `cod_inorganic.h5`, `cod_minerals.h5`,
+`cod_organic.h5`, …). A manifest is the reliable choice for a fixed deployment:
+
+```json
+["cod_inorganic_web.h5", "cod_minerals_web.h5", "cod_organic.h5"]
+```
+
+Under `file://` none of this works — no directory listing, and `fetch` is
+blocked — so add libraries by hand there.
 
 ## Notes / limitations
 
@@ -156,6 +245,29 @@ auto-loads on first run.
   the same caveat as the Materials Project overlays and is fine for phase ID.
 - COD is community-contributed; a few CIFs are partial and will be skipped by
   the builder (reported, never fatal).
+- A peaks-only overlay is a Gaussian rebuild from the stored reflections, not
+  the profile the builder computed. Positions and relative intensities match;
+  the peak shape is nominal. For publication figures, overlay from a full-curve
+  library in the desktop app.
 - Verified: quartz (COD 1011097) computes its strongest reflection at 26.66°
   2θ (Cu-Kα, the (101) line), and marked quartz peaks rank the quartz entry at
   100% vs. 25% for anatase in the match tool.
+
+## Troubleshooting
+
+**Chrome shows "Aw, Snap!" with error code 5 while a library initializes.**
+The renderer ran out of memory — the tab was killed, which is why the console is
+empty. The library is a full-curve build too large for a browser. Rebuild it
+with `--peaks-only --max-peaks 60` and keep the full one for the desktop app.
+Current builds refuse politely above 1.2 GB instead of crashing, but a file
+between roughly 300 MB and 1.2 GB will still load slowly and drop its stored
+curves; peaks-only is the right answer at that size.
+
+**The browser only offers some of the `.h5` files in the folder.** With no
+`libraries.json` and no server directory index, discovery falls back to a list
+of conventional filenames. Either name your files accordingly, add a manifest,
+or pass them explicitly with `?codlib=a.h5,b.h5`.
+
+**A library loads but Match finds nothing.** Check the tolerance — the default
+is 0.2° 2θ, which is tight for a poorly-calibrated diffractometer. Also confirm
+the library is actually ticked in the source list.
