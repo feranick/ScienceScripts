@@ -55,6 +55,14 @@ ROD_UA = ("Mozilla/5.0 (compatible; Raman-Plotter/1.0; "
           "+https://solsa.crystallography.net/rod/)")
 COD_PAGE_URL = "https://www.crystallography.net/cod/{cid}.html"
 
+# SDBS -- Spectral Database for Organic Compounds (AIST, Japan).
+# ~34k organic compounds including laser Raman. Deliberately NOT automated:
+# SDBS prohibits automated retrieval and rate-limits access, so the app only
+# opens the search page in a browser and lets the user download by hand. The
+# resulting JCAMP-DX file imports through the normal file open dialog.
+SDBS_SEARCH_URL = "https://sdbs.db.aist.go.jp/sdbs/cgi-bin/cre_index.cgi"
+SDBS_HOME_URL = "https://sdbs.db.aist.go.jp/"
+
 
 # ==========================================
 # MATHEMATICAL FUNCTION CODES
@@ -152,6 +160,8 @@ def load_raman_data(file_path):
       * .xml          -> HORIBA LabSpec 6 "LSX" XML export (single or multi-row)
       * .txt / .csv / .dat / .asc -> two-column (Raman shift, Intensity),
                          including RRUFF reference files with '##' headers
+      * .jdx / .dx    -> JCAMP-DX, the interchange format used by ROD, SDBS
+                         and most instrument vendors for exported spectra
     """
     ext = os.path.splitext(file_path)[1].lower()
     filename = os.path.basename(file_path)
@@ -161,10 +171,32 @@ def load_raman_data(file_path):
         return _load_labspec_h5(file_path, base_id)
     elif ext == '.xml':
         return _load_labspec_xml(file_path, base_id)
+    elif ext in ('.jdx', '.dx', '.jcm'):
+        return _load_jcamp(file_path, base_id)
     elif ext in ('.txt', '.csv', '.dat', '.asc', '.spc'):
         return _load_two_column(file_path, base_id)
     else:
         raise ValueError(f"Unsupported file extension: {ext}")
+
+
+def _load_jcamp(file_path, base_id):
+    """Loads a JCAMP-DX spectrum exported from SDBS, ROD, or an instrument.
+
+    The label prefers the file's own ##TITLE over the filename, since SDBS
+    exports are named by record number. A non-Raman ##DATA TYPE (an FT-IR
+    trace, say) is kept but flagged in the label -- the axes are still
+    wavenumbers, and users do overlay IR deliberately.
+    """
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        text = f.read()
+    x, y, header = parse_jcamp_dx(text)
+
+    title = (header.get("TITLE") or "").strip()
+    label = title or base_id
+    dtype = (header.get("DATA TYPE") or "").strip().upper()
+    if dtype and "RAMAN" not in dtype:
+        label = f"{label} [{dtype.title()}]"
+    return [{'x': x, 'y': y, 'label': label}]
 
 
 def _load_labspec_xml(file_path, base_id):
@@ -431,22 +463,25 @@ def rod_url(rod_id):
 
 
 def load_rod_h5_library(path):
-    """Reads a baked ROD library .h5 (built by build_rod_library.py).
+    """Reads a baked reference library .h5 built by build_rod_library.py or
+    build_openspecy_library.py.
 
-    Same schema as the RRUFF/COD libraries: /spectra/<id> with x,y datasets and
-    precomputed peaks, so matching is instant. Peaks are read from the dataset
-    when present and fall back to the attribute. x/y stay on disk and are read
-    lazily when a reference is actually overlaid.
+    Both use the same schema as the RRUFF/COD libraries -- /spectra/<id> with
+    x,y datasets and precomputed peaks, so matching is instant -- and are
+    distinguished only by the `source` attribute, which drives labels and
+    links. Peaks come from the dataset when present, else the attribute. x/y
+    stay on disk and are read lazily when a reference is actually overlaid.
 
-    Returns {'path', 'entries': [{group, name, id, cod_id, formula, mineral,
-                                  laser, url, cod_url, peaks}]}.
+    Returns {'path', 'source', 'entries': [{group, name, id, source, cod_id,
+             formula, mineral, collection, laser, url, cod_url, peaks}]}.
     """
     if not H5_AVAILABLE:
         raise ImportError("Reading .h5 libraries requires 'h5py' (pip install h5py).")
     entries = []
     with h5py.File(path, 'r') as f:
         if 'spectra' not in f:
-            raise ValueError("Not a ROD library file ('spectra' group missing).")
+            raise ValueError("Not a reference library file ('spectra' group missing).")
+        file_source = _decode(f.attrs.get('source', '')) or 'ROD'
         sp = f['spectra']
         for gname in sp:
             g = sp[gname]
@@ -457,23 +492,30 @@ def load_rod_h5_library(path):
                 peaks = np.asarray(a['peaks'], dtype=float)
             else:
                 peaks = np.array([])
-            rid = _decode(a.get('rod_id', '')) or _decode(a.get('rruff_id', '')) or gname
+            source = _decode(a.get('source', '')) or file_source
+            rid = (_decode(a.get('rod_id', '')) or _decode(a.get('rruff_id', ''))
+                   or gname)
             cid = _decode(a.get('cod_id', ''))
+            url = _decode(a.get('url', ''))
+            if not url and source.upper() == 'ROD':
+                url = rod_url(rid)
             entries.append({
                 'group': gname,
                 'name': _decode(a.get('name', gname)),
                 'id': rid,
+                'source': source,
                 'cod_id': cid,
                 'formula': _decode(a.get('formula', '')),
                 'mineral': _decode(a.get('mineral', '')),
+                'collection': _decode(a.get('collection', '')),
                 'laser': _decode(a.get('laser_nm', '')),
-                'url': _decode(a.get('url', '')) or rod_url(rid),
+                'url': url,
                 'cod_url': _decode(a.get('cod_url', '')) or (COD_PAGE_URL.format(cid=cid) if cid else ''),
                 'peaks': peaks,
             })
     if not entries:
         raise ValueError("Library contains no spectra.")
-    return {'path': path, 'entries': entries}
+    return {'path': path, 'source': file_source, 'entries': entries}
 
 
 def _rod_http_get(url, timeout=45, retries=2):
@@ -941,7 +983,9 @@ class RamanPlotterGUI:
         self._refresh_rruff_status()
 
         # --- ROD Reference Database Panel (offline .h5 libraries + online REST) ---
-        panel_rod = ttk.LabelFrame(sidebar_frame, text=" 🔬 ROD (Raman Open Database) ", padding=(8, 6))
+        panel_rod = ttk.LabelFrame(sidebar_frame,
+                                   text=" 🔬 Reference Libraries (ROD / Open Specy) ",
+                                   padding=(8, 6))
         panel_rod.pack(side="top", fill="x", pady=5)
 
         self.rod_libs = []                 # [{name, path, entries, active, var}]
@@ -954,12 +998,12 @@ class RamanPlotterGUI:
         ttk.Label(mode_row, text="Source:", font=("Helvetica", 8, "bold")).pack(side="left")
         ttk.Radiobutton(mode_row, text="Offline .h5", value="h5", variable=self.rod_mode_var,
                         command=self._rod_update_status).pack(side="left", padx=(4, 0))
-        ttk.Radiobutton(mode_row, text="Online", value="online", variable=self.rod_mode_var,
+        ttk.Radiobutton(mode_row, text="Online (ROD)", value="online", variable=self.rod_mode_var,
                         command=self._rod_update_status).pack(side="left", padx=(4, 0))
 
         self.rod_libs_frame = ttk.Frame(panel_rod)
         self.rod_libs_frame.pack(fill="x", pady=(0, 2))
-        ttk.Button(panel_rod, text="📚 Add ROD .h5 Librar(ies)…",
+        ttk.Button(panel_rod, text="📚 Add .h5 Librar(ies)…",
                    command=self.rod_add_library).pack(fill="x", pady=2)
 
         ttk.Label(panel_rod, text="Search name / formula / ID:",
@@ -1011,6 +1055,25 @@ class RamanPlotterGUI:
                   foreground="#555555", wraplength=250).pack(anchor="w")
 
         self._rod_load_config()
+
+        # --- SDBS (external lookup only) ---
+        # SDBS prohibits automated retrieval, so there is no pull here by
+        # design: the button opens their search page, you download a spectrum
+        # by hand, and 📂 Load Spectra imports the .jdx like any other file.
+        panel_sdbs = ttk.LabelFrame(sidebar_frame, text=" 🔗 SDBS (organic compounds) ", padding=(8, 6))
+        panel_sdbs.pack(side="top", fill="x", pady=5)
+        ttk.Label(panel_sdbs,
+                  text="Opens SDBS in your browser. Download a Raman spectrum "
+                       "there, then load the .jdx normally.",
+                  font=("Helvetica", 8), foreground="#555555", wraplength=250).pack(anchor="w")
+        sdbs_row = ttk.Frame(panel_sdbs)
+        sdbs_row.pack(fill="x", pady=(4, 0))
+        self.ent_sdbs_query = ttk.Entry(sdbs_row)
+        self.ent_sdbs_query.pack(side="left", fill="x", expand=True)
+        self.ent_sdbs_query.bind("<Return>", lambda e: self.sdbs_lookup())
+        ttk.Button(sdbs_row, text="🔗", width=3, command=self.sdbs_lookup).pack(side="right", padx=(3, 0))
+        ttk.Button(panel_sdbs, text="🔗 Look up in SDBS",
+                   command=self.sdbs_lookup).pack(fill="x", pady=(3, 0))
 
         # --- Active Layers Control Panel ---
         self.panel_fit_targets = ttk.LabelFrame(sidebar_frame, text=" 📋 Plotted Spectra Layers ", padding=(8, 6))
@@ -1453,10 +1516,12 @@ class RamanPlotterGUI:
     def select_and_plot_files(self):
         files = filedialog.askopenfilenames(
             title="Select Raman Data Files",
-            filetypes=[("Raman Datasets", ("*.h5", "*.hdf5", "*.xml", "*.txt", "*.csv", "*.dat", "*.asc")),
+            filetypes=[("Raman Datasets", ("*.h5", "*.hdf5", "*.xml", "*.txt", "*.csv",
+                                           "*.dat", "*.asc", "*.jdx", "*.dx", "*.jcm")),
                        ("HORIBA LabSpec HDF5", ("*.h5", "*.hdf5")),
                        ("HORIBA LabSpec XML", "*.xml"),
                        ("Text / CSV / RRUFF", ("*.txt", "*.csv", "*.dat", "*.asc")),
+                       ("JCAMP-DX (SDBS / ROD / vendor)", ("*.jdx", "*.dx", "*.jcm")),
                        ("All Files", "*.*")]
         )
         if not files: return
@@ -2062,16 +2127,28 @@ class RamanPlotterGUI:
         active = [l for l in self.rod_libs if l['active']]
         total = sum(len(l['entries']) for l in active)
         if not self.rod_libs:
-            self.rod_status_var.set("ROD: add a baked .h5 library, or switch to Online.")
-        else:
             self.rod_status_var.set(
-                f"ROD: {len(active)}/{len(self.rod_libs)} librar(ies) active · "
+                "Add a baked .h5 library (ROD or Open Specy), or switch to Online.")
+        else:
+            sources = sorted({e.get('source', 'ROD') for l in active for e in l['entries']})
+            tag = "/".join(sources) if sources else "Libraries"
+            self.rod_status_var.set(
+                f"{tag}: {len(active)}/{len(self.rod_libs)} librar(ies) active · "
                 f"{total:,} spectra. Search / Overlay / Match.")
 
     @staticmethod
     def _rod_haystack(e):
         return (f"{e.get('name','')} {e.get('id','')} {e.get('formula','')} "
-                f"{e.get('mineral','')} {e.get('cod_id','')}").lower()
+                f"{e.get('mineral','')} {e.get('collection','')} "
+                f"{e.get('cod_id','')}").lower()
+
+    @staticmethod
+    def _rod_label(hit, name=None):
+        """'ROD: Quartz (1000076)' / 'OpenSpecy: Polyethylene (PE_01)'."""
+        src = hit.get('source') or 'ROD'
+        nm = name or hit.get('name') or f"{src} {hit.get('id','')}"
+        rid = hit.get('id')
+        return f"{src}: {nm}" + (f" ({rid})" if rid else "")
 
     def rod_run_search(self):
         query = self.ent_rod_query.get().strip()
@@ -2113,12 +2190,16 @@ class RamanPlotterGUI:
             self.rod_status_var.set("ROD: no matches.")
             return
         for h in hits:
-            bits = [h.get('name') or f"ROD {h.get('id')}", str(h.get('id', ''))]
+            src = h.get('source') or 'ROD'
+            bits = [h.get('name') or f"{src} {h.get('id')}", str(h.get('id', ''))]
             if h.get('formula'):
                 bits.append(h['formula'])
+            if h.get('collection'):
+                bits.append(h['collection'])
             if h.get('laser'):
                 bits.append(f"{h['laser']}nm")
-            self.rod_results_list.insert(tk.END, "  ·  ".join(b for b in bits if b))
+            prefix = "" if src.upper() == "ROD" else f"[{src}] "
+            self.rod_results_list.insert(tk.END, prefix + "  ·  ".join(b for b in bits if b))
         where = "online" if self.rod_mode_var.get() == "online" else "libraries"
         self.rod_status_var.set(
             f"ROD ({where}): {len(hits)} match(es). Select and overlay; double-click opens the ROD page.")
@@ -2145,12 +2226,13 @@ class RamanPlotterGUI:
                 g = f['spectra'][hit['group']]
                 x = np.array(g['x'][:], dtype=float)
                 y = np.array(g['y'][:], dtype=float)
-            label = f"ROD: {hit['name']} ({hit['id']})"
-            return x, y, label, (hit.get('url') or rod_url(hit.get('id')))
+            return x, y, self._rod_label(hit), hit.get('url')
 
+        # No group -> an online ROD hit; fetch it.
         x, y, meta = rod_fetch_spectrum(hit['id'])
         name = hit.get('name') or meta.get('name') or f"ROD {hit['id']}"
-        return x, y, f"ROD: {name} ({hit['id']})", (meta.get('url') or rod_url(hit['id']))
+        return (x, y, self._rod_label(dict(hit, source='ROD'), name),
+                (meta.get('url') or rod_url(hit['id'])))
 
     def rod_overlay_selected(self):
         hit = self._rod_selected_hit()
@@ -2230,10 +2312,58 @@ class RamanPlotterGUI:
             if matched > 0:
                 scored.append({'score': score, 'avg': avg, 'matched': matched,
                                'name': e['name'], 'id': e['id'], 'group': e['group'],
-                               'lib_path': e.get('lib_path'), 'formula': e.get('formula', ''),
+                               'source': e.get('source', 'ROD'),
+                               'lib_path': e.get('lib_path'),
+                               'formula': e.get('formula', '') or e.get('collection', ''),
                                'url': e.get('url'), 'cod_url': e.get('cod_url', '')})
         scored.sort(key=lambda t: (-t['score'], t['avg']))
         self._show_rod_match_results(scored[:100], len(exp_peaks), tolerance)
+
+    # ---------- SDBS (external lookup) ----------
+
+    def sdbs_lookup(self):
+        """Opens the SDBS search page in the user's browser.
+
+        No scraping and no automated download: SDBS's terms prohibit automated
+        retrieval and impose a daily access limit, so the user drives it. The
+        query falls back to the ROD search box, then to the selected layer's
+        name, so the common case is one click.
+        """
+        query = self.ent_sdbs_query.get().strip()
+        if not query:
+            query = self.ent_rod_query.get().strip()
+        if not query:
+            query = self._first_reference_name() or ""
+
+        webbrowser.open_new_tab(SDBS_SEARCH_URL)
+        if query:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(query)
+            messagebox.showinfo(
+                "SDBS Opened",
+                f"SDBS search page opened in your browser.\n\n"
+                f"'{query}' has been copied to your clipboard — paste it into the "
+                f"compound name field.\n\n"
+                f"SDBS does not permit automated downloads, so save the Raman "
+                f"spectrum yourself (JCAMP-DX), then bring it in with "
+                f"📂 Load Spectra.")
+        else:
+            messagebox.showinfo(
+                "SDBS Opened",
+                "SDBS search page opened in your browser. Search by compound "
+                "name, formula, CAS number or SDBS number.\n\n"
+                "Save the Raman spectrum as JCAMP-DX, then bring it in with "
+                "📂 Load Spectra.")
+
+    def _first_reference_name(self):
+        """Best-guess compound name from the current plot, for the SDBS box."""
+        for key, data in self.active_datasets.items():
+            if key.startswith("__ref_") and data.get('rruff_name'):
+                return data['rruff_name']
+        for key, data in self.active_datasets.items():
+            if not key.startswith("__fit_") and not key.startswith("__ref_"):
+                return data.get('label')
+        return None
 
     def _rod_stop_scan(self):
         self._rod_scan_cancel = True

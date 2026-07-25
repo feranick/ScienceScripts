@@ -249,8 +249,8 @@
         </div>
 
         <div class="rruff-panel" id="rod-panel" style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 6px;">
-            <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">🔬 ROD (Raman Open Database)</label>
-            <p class="info-text" id="rod-intro" style="margin: 0;">Open one or more ROD .h5 libraries (from build_rod_library.py) to search, overlay, and match — fully offline. ROD data are CC0.</p>
+            <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">🔬 Reference Libraries (ROD / Open Specy)</label>
+            <p class="info-text" id="rod-intro" style="margin: 0;">Open one or more .h5 libraries — from build_rod_library.py (minerals, CC0) or build_openspecy_library.py (polymers &amp; organics, CC-BY) — to search, overlay, and match, fully offline.</p>
             <div id="rod-loaded-note">✅ Library loaded</div>
             <div id="rod-libs" style="display:flex; flex-direction:column; gap:2px;"></div>
 
@@ -272,7 +272,7 @@
             </div>
 
             <div id="rod-load-group" style="display: flex; flex-direction: column; gap: 6px;">
-                <label class="btn-crop" for="rod-h5" style="text-align: center; cursor: pointer;">📚 Add ROD .h5 Library</label>
+                <label class="btn-crop" for="rod-h5" style="text-align: center; cursor: pointer;">📚 Add .h5 Library</label>
                 <input type="file" id="rod-h5" accept=".h5,.hdf5" multiple style="display:none;" onchange="addRodLibrary(event)">
             </div>
 
@@ -1245,7 +1245,10 @@
                 try {
                     f = new h5.File(fsName, "r");
                     const sp = f.get("spectra");
-                    if (!sp) throw new Error("Not a ROD library (no 'spectra' group).");
+                    if (!sp) throw new Error("Not a reference library (no 'spectra' group).");
+                    // build_rod_library.py and build_openspecy_library.py emit the
+                    // same schema; `source` is what distinguishes them.
+                    const fileSource = attrToString(f.attrs && f.attrs["source"]) || "ROD";
                     const names = sp.keys();
                     const tick = Math.max(1, Math.floor(names.length / 50));
                     for (let idx = 0; idx < names.length; idx++) {
@@ -1255,16 +1258,19 @@
                         const xds = f.get("spectra/" + gname + "/x");
                         const yds = f.get("spectra/" + gname + "/y");
                         const pkds = f.get("spectra/" + gname + "/peaks");
+                        const source = attrToString(g.attrs["source"]) || fileSource;
                         const rodId = attrToString(g.attrs["rod_id"]) || attrToString(g.attrs["rruff_id"]) || gname;
                         const codId = attrToString(g.attrs["cod_id"]);
                         out.push({
                             name: attrToString(g.attrs["name"]) || gname,
                             id: rodId,
+                            source: source,
                             codId: codId,
                             formula: attrToString(g.attrs["formula"]),
                             mineral: attrToString(g.attrs["mineral"]),
+                            collection: attrToString(g.attrs["collection"]),
                             laser: attrToString(g.attrs["laser_nm"]),
-                            url: attrToString(g.attrs["url"]) || rodUrl(rodId),
+                            url: attrToString(g.attrs["url"]) || (source === "ROD" ? rodUrl(rodId) : null),
                             codUrl: attrToString(g.attrs["cod_url"]),
                             peaks: pkds ? Array.from(pkds.value) : Array.from(attrToArray(g.attrs["peaks"])),
                             x: xds ? Array.from(xds.value) : [],
@@ -1346,7 +1352,13 @@
         }
 
         function rodHaystack(e) {
-            return `${e.name} ${e.id} ${e.formula || ''} ${e.mineral || ''} ${e.codId || ''}`.toLowerCase();
+            return `${e.name} ${e.id} ${e.formula || ''} ${e.mineral || ''} ${e.collection || ''} ${e.codId || ''}`.toLowerCase();
+        }
+
+        // 'ROD: Quartz (1000076)' / 'OpenSpecy: Polyethylene (PE_01)'
+        function rodLabel(rec) {
+            const src = rec.source || 'ROD';
+            return `${src}: ${rec.name}` + (rec.id ? ` (${rec.id})` : '');
         }
 
         function rodSearch() {
@@ -1363,7 +1375,9 @@
             hits.forEach((h, i) => {
                 const opt = document.createElement('option');
                 opt.value = String(i);
-                opt.innerText = `${h.name} · ${h.id}${h.formula ? ' · ' + h.formula : ''}${h.laser ? ' · ' + h.laser + 'nm' : ''}`;
+                const prefix = (h.source && h.source !== 'ROD') ? `[${h.source}] ` : '';
+                const extra = h.formula || h.collection || '';
+                opt.innerText = `${prefix}${h.name} · ${h.id}${extra ? ' · ' + extra : ''}${h.laser ? ' · ' + h.laser + 'nm' : ''}`;
                 resultsEl.appendChild(opt);
             });
             statusEl.innerText = `${hits.length} match(es)${hits.length === 300 ? ' (first 300)' : ''}. Select and overlay.`;
@@ -1373,9 +1387,9 @@
         function rodRecordToParsed(rec) {
             return {
                 angles: rec.x.slice(), intensities: rec.y.slice(),
-                label: `ROD: ${rec.name} (${rec.id})`,
+                label: rodLabel(rec),
                 rruffName: rec.name, rruffId: rec.id,
-                rruffUrl: rec.url || rodUrl(rec.id)
+                rruffUrl: rec.url || ((rec.source || 'ROD') === 'ROD' ? rodUrl(rec.id) : null)
             };
         }
 
@@ -1409,7 +1423,8 @@
                 if (q && !rodHaystack(e).includes(q)) return;
                 if (!e.peaks || !e.peaks.length) return;
                 const s = peakMatchScore(e.peaks, exp, tol);
-                if (s.matched > 0) scored.push({ ...s, name: e.name, id: e.id, formula: e.formula, rec: e });
+                if (s.matched > 0) scored.push({ ...s, name: e.name, id: e.id,
+                    source: e.source, formula: e.formula || e.collection, rec: e });
             });
             scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
             statusEl.innerText = `Matched ${scored.length}/${pool.length} references (tol ±${tol} cm⁻¹).`;
@@ -1426,10 +1441,11 @@
                 const row = document.createElement('div'); row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px'; row.style.padding = '2px 0';
                 const cb = document.createElement('input'); cb.type = 'checkbox'; cb.className = 'rod-match-cb'; cb.value = String(i); cb.id = `rmatch-${i}`;
                 const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.style.flex = '1'; lbl.style.cursor = 'pointer'; lbl.style.fontFamily = "'Consolas', monospace"; lbl.style.fontSize = '0.82rem';
-                lbl.innerText = `${String(Math.round(s.score)).padStart(3, ' ')}%  ${s.matched}/${nExp}  ${s.name} · ${s.id}${s.formula ? '  ' + s.formula : ''}`;
+                const srcTag = (s.source && s.source !== 'ROD') ? `[${s.source}] ` : '';
+                lbl.innerText = `${String(Math.round(s.score)).padStart(3, ' ')}%  ${s.matched}/${nExp}  ${srcTag}${s.name} · ${s.id}${s.formula ? '  ' + s.formula : ''}`;
                 row.appendChild(cb); row.appendChild(lbl);
-                const url = (s.rec && s.rec.url) || rodUrl(s.id);
-                if (url) { const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener'; a.innerText = '↗'; a.title = 'Open ROD page'; a.style.textDecoration = 'none'; a.style.fontSize = '1rem'; a.style.padding = '0 4px'; row.appendChild(a); }
+                const url = (s.rec && s.rec.url) || ((s.source || 'ROD') === 'ROD' ? rodUrl(s.id) : null);
+                if (url) { const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener'; a.innerText = '↗'; a.title = 'Open database page'; a.style.textDecoration = 'none'; a.style.fontSize = '1rem'; a.style.padding = '0 4px'; row.appendChild(a); }
                 const cu = s.rec && s.rec.codUrl;
                 if (cu) { const a = document.createElement('a'); a.href = cu; a.target = '_blank'; a.rel = 'noopener'; a.innerText = '⬡'; a.title = 'Open the cross-linked COD structure'; a.style.textDecoration = 'none'; a.style.fontSize = '1rem'; a.style.padding = '0 4px'; row.appendChild(a); }
                 listEl.appendChild(row);
