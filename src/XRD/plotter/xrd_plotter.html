@@ -289,7 +289,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "v2026.07.25.1";
+        const VERSION_TAG = "v2026.07.25.2";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -1249,26 +1249,6 @@
             } finally { clearTimeout(timer); }
         }
 
-        async function tryAutoLoadLibrary() {
-            const statusEl = document.getElementById('db-status');
-            const params = new URLSearchParams(location.search);
-            const url = params.get('lib') || HOST_LIBRARY_URL;
-            showInitBanner('⏳ Loading RRUFF library from server…');
-            if (statusEl) statusEl.innerText = "Checking for a library on the server…";
-            try {
-                const res = await fetchArrayBufferWithProgress(url, function (recv, total) {
-                    showInitBanner(`⏳ Downloading RRUFF library… ${Math.round(recv / total * 100)}% (${(recv / 1e6).toFixed(1)}/${(total / 1e6).toFixed(1)} MB)`, recv / total);
-                }, 60000);
-                if (res.ok) {
-                    const sig = new Uint8Array(res.buffer.slice(0, 4));
-                    if (sig[0] === 0x89 && sig[1] === 0x48 && sig[2] === 0x44 && sig[3] === 0x46) { await ingestLibraryBytes(res.buffer, 'from server'); return; }
-                    console.warn(`'${url}' served but is not an HDF5 file; ignoring.`);
-                }
-            } catch (e) { /* not hosted / blocked */ }
-            try { const saved = await idbLoadLibrary(); if (saved) { await ingestLibraryBytes(saved, 'restored'); return; } } catch (e) {}
-            hideInitBanner();
-            if (statusEl) statusEl.innerText = "No server library found. Open a library below, or place rruff_powder_library.h5 next to this page.";
-        }
 
         function updateRruffPanelState() {
             const panel = document.getElementById('rruff-panel'); if (!panel) return;
@@ -1562,6 +1542,213 @@
             "cod_library.h5", "xrd_library.h5"
         ];
 
+
+        let codServerOffers = [];
+        let rruffServerOffer = null;
+
+        function renderCodOffers() {
+            // The RRUFF offer shares this box, so only clear our own rows —
+            // clearing wholesale used to delete the RRUFF row the moment the
+            // library offers resolved, making an unloaded RRUFF powder library vanish.
+            const host = document.getElementById('db-offers'); if (!host) return;
+            const pending = codServerOffers.filter(o => !o.loaded);
+            Array.from(host.querySelectorAll('[data-lib-offer]')).forEach(n => n.remove());
+            if (!pending.length) { renderRruffOffer(); dbSyncOffersVisibility(); return; }
+            host.style.display = 'flex';
+
+            const hdr = document.createElement('div');
+            hdr.setAttribute('data-lib-offer', '1');
+            hdr.style.fontSize = '0.78rem'; hdr.style.fontWeight = 'bold'; hdr.style.color = '#084298';
+            hdr.innerText = `📦 ${pending.length} librar${pending.length === 1 ? 'y' : 'ies'} available on the server`;
+            host.appendChild(hdr);
+
+            codServerOffers.forEach((o, idx) => {
+                if (o.loaded) return;
+                const row = document.createElement('div');
+                row.setAttribute('data-lib-offer', '1');
+                row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px';
+                const lbl = document.createElement('span');
+                lbl.style.flex = '1'; lbl.style.fontSize = '0.78rem'; lbl.style.overflow = 'hidden';
+                lbl.style.textOverflow = 'ellipsis'; lbl.style.whiteSpace = 'nowrap';
+                lbl.title = o.url;
+                lbl.innerText = o.name + (o.size ? ` (${fmtBytes(o.size)})` : '');
+                const btn = document.createElement('button');
+                btn.className = 'btn-crop';
+                btn.style.width = 'auto'; btn.style.padding = '3px 10px'; btn.style.fontSize = '0.75rem';
+                btn.innerText = o.busy ? '…' : 'Load';
+                btn.disabled = !!o.busy;
+                btn.onclick = () => loadCodServerLibrary(idx);
+                row.appendChild(lbl); row.appendChild(btn);
+                host.appendChild(row);
+            });
+
+            if (pending.length > 1) {
+                const all = document.createElement('button');
+                all.setAttribute('data-lib-offer', '1');
+                all.className = 'btn-crop';
+                all.style.padding = '4px'; all.style.fontSize = '0.75rem';
+                all.innerText = `⬇ Load all (${fmtBytes(pending.reduce((s, o) => s + (o.size || 0), 0)) || 'unknown size'})`;
+                all.onclick = async () => {
+                    for (let i = 0; i < codServerOffers.length; i++) {
+                        if (!codServerOffers[i].loaded) await loadCodServerLibrary(i);
+                    }
+                };
+                host.appendChild(all);
+            }
+            renderRruffOffer();
+            dbSyncOffersVisibility();
+        }
+
+        // The offer box holds rows from two independent sources; it is visible
+        // whenever either has something pending.
+        function dbSyncOffersVisibility() {
+            const host = document.getElementById('db-offers'); if (!host) return;
+            host.style.display = host.children.length ? 'flex' : 'none';
+        }
+
+        async function loadCodServerLibrary(idx) {
+            const o = codServerOffers[idx];
+            if (!o || o.loaded || o.busy) return;
+            const statusEl = document.getElementById('db-status');
+            o.busy = true; renderCodOffers();
+            try {
+                const res = await fetchArrayBufferWithProgress(o.url, function (recv, total) {
+                    if (statusEl && total) statusEl.innerText =
+                        `Downloading ${o.name} … ${Math.round(recv / total * 100)}%`;
+                }, 120000);
+                if (!res.ok || !isHdf5(res.buffer)) throw new Error("not an HDF5 library");
+                const entries = await codIngestBytes(res.buffer);
+                const key = "rod_lib_server_" + o.name;
+                codLibraries.push({ name: o.name, key, entries, active: true });
+                try { await idbSaveKey(key, res.buffer); } catch (e) {}
+                await codSaveIndex();
+                o.loaded = true;
+                refreshCodLibsPanel(); updateCodPanelState();
+                if (typeof dbRefresh === 'function') dbRefresh();
+            } catch (err) {
+                if (statusEl) statusEl.innerText = `Could not load ${o.name}: ${err.message}`;
+            } finally {
+                o.busy = false; renderCodOffers();
+            }
+        }
+
+        function renderRruffOffer() {
+            // Shares the unified panel's offer box with the library offers, so
+            // append rather than clobber.
+            const host = document.getElementById('db-offers'); if (!host) return;
+            Array.from(host.querySelectorAll('[data-rruff-offer]')).forEach(n => n.remove());
+            if (!rruffServerOffer || rruffServerOffer.loaded) { dbSyncOffersVisibility(); return; }
+            host.style.display = 'flex';
+            const o = rruffServerOffer;
+            const wrap = document.createElement('div');
+            wrap.setAttribute('data-rruff-offer', '1');
+            wrap.style.display = 'flex'; wrap.style.alignItems = 'center'; wrap.style.gap = '6px';
+            const lbl = document.createElement('span');
+            lbl.style.flex = '1'; lbl.style.fontSize = '0.78rem'; lbl.style.overflow = 'hidden';
+            lbl.style.textOverflow = 'ellipsis'; lbl.style.whiteSpace = 'nowrap';
+            lbl.title = o.url;
+            lbl.innerText = `\uD83D\uDCE6 ${o.name}` + (o.size ? ` (${fmtBytes(o.size)})` : '');
+            const btn = document.createElement('button');
+            btn.className = 'btn-crop';
+            btn.style.width = 'auto'; btn.style.padding = '3px 10px'; btn.style.fontSize = '0.75rem';
+            btn.innerText = o.busy ? '\u2026' : 'Load';
+            btn.disabled = !!o.busy;
+            btn.onclick = loadRruffServerLibrary;
+            wrap.appendChild(lbl); wrap.appendChild(btn); host.appendChild(wrap);
+            dbSyncOffersVisibility();
+        }
+
+        async function loadRruffServerLibrary() {
+            const o = rruffServerOffer;
+            if (!o || o.loaded || o.busy) return;
+            const statusEl = document.getElementById('db-status');
+            o.busy = true; renderRruffOffer();
+            showInitBanner('\u23F3 Downloading RRUFF powder library\u2026');
+            try {
+                const res = await fetchArrayBufferWithProgress(o.url, function (recv, total) {
+                    if (total) showInitBanner(
+                        `\u23F3 Downloading RRUFF powder library\u2026 ${Math.round(recv / total * 100)}% ` +
+                        `(${(recv / 1e6).toFixed(1)}/${(total / 1e6).toFixed(1)} MB)`);
+                }, 120000);
+                if (!res.ok || !isHdf5(res.buffer)) throw new Error("not an HDF5 library");
+                await ingestLibraryBytes(res.buffer, 'from server');
+                try { await idbSaveLibrary(res.buffer); } catch (e) { /* persistence optional */ }
+                o.loaded = true;
+                if (typeof dbRefresh === 'function') dbRefresh();
+            } catch (err) {
+                if (statusEl) statusEl.innerText = `Could not load ${o.name}: ${err.message}`;
+            } finally {
+                hideInitBanner();
+                o.busy = false; renderRruffOffer();
+            }
+        }
+
+        async function tryAutoLoadCodLibrary() {
+            // 1) Restore libraries you previously chose — those were an explicit
+            //    decision, and they come from IndexedDB rather than the network.
+            try {
+                const index = await idbLoadKey(COD_IDB_INDEX_KEY);
+                if (index && index.length) {
+                    for (const meta of index) {
+                        try {
+                            const buf = await idbLoadKey(meta.key);
+                            if (!buf) continue;
+                            const entries = await codIngestBytes(buf);
+                            codLibraries.push({ name: meta.name, key: meta.key, entries, active: meta.active !== false });
+                        } catch (e) {}
+                    }
+                    refreshCodLibsPanel(); updateCodPanelState();
+                }
+            } catch (e) {}
+
+            // 2) See what else the server has, but do not download it. Not an
+            //    early return above: a library added to the folder after your
+            //    first visit should still be offered.
+            let urls = [];
+            try {
+                urls = excludeOwnedByOtherPanels(
+                    await discoverLibraryUrls('codlib', 'libraries.json', COD_HOST_LIBRARY_URL));
+            } catch (e) { return; }
+
+            codServerOffers = [];
+            for (const url of urls) {
+                const name = url.split('/').pop();
+                if (codLibraries.some(l => l.name === name || l.name === "(server) " + name)) continue;
+                const size = await headSize(url);
+                if (size === null) continue;                  // not actually there
+                codServerOffers.push({ url, name, size, loaded: false, busy: false });
+            }
+            renderCodOffers();
+            if (codServerOffers.length) {
+                const statusEl = document.getElementById('db-status');
+                if (statusEl && !codLibraries.length) statusEl.innerText =
+                    `${codServerOffers.length} librar(ies) available on the server — load one to search and match.`;
+            }
+        }
+
+        async function tryAutoLoadLibrary() {
+            const statusEl = document.getElementById('db-status');
+            // 1) Restore a library you opened before.
+            try {
+                const saved = await idbLoadLibrary();
+                if (saved) { await ingestLibraryBytes(saved, 'restored'); return; }
+            } catch (e) { /* no saved library */ }
+
+            // 2) Otherwise see whether one is served next to the page, and offer it.
+            const params = new URLSearchParams(location.search);
+            const url = params.get('lib') || HOST_LIBRARY_URL;
+            const size = await headSize(url);
+            if (size === null) {
+                if (statusEl) statusEl.innerText =
+                    "No server library found. Load a library below, or place rruff_powder_library.h5 next to this page.";
+                return;
+            }
+            rruffServerOffer = { url, name: url.split('/').pop(), size, loaded: false, busy: false };
+            renderRruffOffer();
+            if (statusEl) statusEl.innerText =
+                "A RRUFF powder library is available on the server \u2014 load it above, or open one below.";
+        }
+
         function dbSourceList() {
             const out = [];
             if (rruffLibrary && rruffLibrary.length)
@@ -1834,41 +2021,6 @@
         function closeCodMatchModal() { document.getElementById('cod-match-modal').style.display = 'none'; }
 
 
-        async function tryAutoLoadCodLibrary() {
-            // 1) Restore the remembered set of libraries.
-            try {
-                const index = await idbLoadKey(COD_IDB_INDEX_KEY);
-                if (index && index.length) {
-                    for (const meta of index) {
-                        try {
-                            const buf = await idbLoadKey(meta.key);
-                            if (!buf) continue;
-                            const entries = await codIngestBytes(buf);
-                            codLibraries.push({ name: meta.name, key: meta.key, entries, active: meta.active !== false });
-                        } catch (e) {}
-                    }
-                    refreshCodLibsPanel(); updateCodPanelState();
-                    return;
-                }
-            } catch (e) {}
-            // 2) First-run convenience: a library served next to the page (or ?codlib=URL).
-            const params = new URLSearchParams(location.search);
-            const url = params.get('codlib') || COD_HOST_LIBRARY_URL;
-            try {
-                const res = await fetchArrayBufferWithProgress(url, function () {}, 60000);
-                if (res.ok) {
-                    const sig = new Uint8Array(res.buffer.slice(0, 4));
-                    if (sig[0] === 0x89 && sig[1] === 0x48 && sig[2] === 0x44 && sig[3] === 0x46) {
-                        const entries = await codIngestBytes(res.buffer);
-                        const key = "cod_lib_server";
-                        codLibraries.push({ name: "(server) " + url.split('/').pop(), key, entries, active: true });
-                        try { await idbSaveKey(key, res.buffer); } catch (e) {}
-                        await codSaveIndex();
-                        refreshCodLibsPanel(); updateCodPanelState();
-                    }
-                }
-            } catch (e) { /* not hosted / blocked */ }
-        }
 
         // Auto-load a host-provided / previously-saved library (independent of Plotly).
         window.addEventListener('load', function () {
