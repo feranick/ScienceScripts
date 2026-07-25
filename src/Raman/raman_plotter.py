@@ -29,7 +29,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "raman-v2026.07.25.1"
+VERSION_TAG = "raman-v2026.07.25.2"
 
 # RRUFF reference database (open Raman spectra of minerals).
 # Data are distributed as per-quality zip archives of two-column .txt files.
@@ -934,147 +934,123 @@ class RamanPlotterGUI:
         lbl_status.pack(side="top", fill="x", pady=2)
 
         # --- RRUFF Reference Database Panel ---
-        panel_rruff = ttk.LabelFrame(sidebar_frame, text=" 🌐 RRUFF Reference Database ", padding=(8, 6))
-        panel_rruff.pack(side="top", fill="x", pady=5)
+        # --- Unified Reference Databases panel -------------------------------
+        # One search box over every enabled source: the RRUFF folder/dataset or
+        # .h5 library, plus any number of baked .h5 libraries (ROD, Open Specy,
+        # COD -- one schema, told apart by their `source` attribute). Results
+        # merge into one list with a source tag, and Match ranks across all
+        # enabled sources in a single pass. The per-source loaders below are
+        # unchanged; this is a front end over them.
+        panel_db = ttk.LabelFrame(sidebar_frame, text=" 🔬 Reference Databases ", padding=(8, 6))
+        panel_db.pack(side="top", fill="x", pady=5)
 
-        ds_row = ttk.Frame(panel_rruff)
-        ds_row.pack(fill="x", pady=(0, 4))
-        ttk.Label(ds_row, text="Set:", font=("Helvetica", 8, "bold")).pack(side="left")
-        self.combo_rruff_dataset = ttk.Combobox(ds_row, state="readonly", width=18, values=RRUFF_DATASETS)
+        db_search_row = ttk.Frame(panel_db)
+        db_search_row.pack(fill="x", pady=(0, 3))
+        self.ent_db_query = ttk.Entry(db_search_row)
+        self.ent_db_query.pack(side="left", fill="x", expand=True)
+        self.ent_db_query.bind("<Return>", lambda e: self.db_run_search())
+        ttk.Button(db_search_row, text="🔍", width=3, command=self.db_run_search).pack(side="right", padx=(3, 0))
+
+        self.db_sources_frame = ttk.Frame(panel_db)
+        self.db_sources_frame.pack(fill="x", pady=(0, 3))
+
+        self.db_results_list = tk.Listbox(panel_db, height=5, exportselection=False)
+        self.db_results_list.pack(fill="x", pady=(0, 3))
+        self.db_results_list.bind("<Double-1>", lambda e: self.db_overlay_selected())
+
+        db_act = ttk.Frame(panel_db)
+        db_act.pack(fill="x", pady=(0, 2))
+        ttk.Button(db_act, text="➕ Overlay", command=self.db_overlay_selected).pack(side="left", fill="x", expand=True)
+        self.btn_db_match = ttk.Button(db_act, text="🎯 Match", command=self.db_match_by_peaks)
+        self.btn_db_match.pack(side="left", fill="x", expand=True, padx=(4, 4))
+        self.ent_db_match_tol = ttk.Entry(db_act, width=5, justify="center")
+        self.ent_db_match_tol.insert(0, "12")
+        self.ent_db_match_tol.pack(side="left")
+
+        self.db_status_var = tk.StringVar(value="Add a library under Manage sources, then search.")
+        ttk.Label(panel_db, textvariable=self.db_status_var, font=("Helvetica", 8),
+                  foreground="#555555", wraplength=250).pack(anchor="w")
+
+        # --- collapsible: everything that is setup rather than day-to-day use --
+        db_toggle_row = ttk.Frame(panel_db)
+        db_toggle_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(db_toggle_row, text="Manage sources", font=("Helvetica", 8),
+                  foreground="#6c757d").pack(side="left")
+        self.btn_db_manage = ttk.Button(db_toggle_row, text="▾", width=3, command=self.db_toggle_manage)
+        self.btn_db_manage.pack(side="right")
+
+        self.db_manage_frame = ttk.Frame(panel_db)
+        self._db_manage_open = False
+
+        mf = self.db_manage_frame
+        ttk.Button(mf, text="📚 Add .h5 librar(ies)…", command=self.rod_add_library).pack(fill="x", pady=2)
+
+        ttk.Separator(mf, orient="horizontal").pack(fill="x", pady=4)
+        ttk.Label(mf, text="RRUFF", font=("Helvetica", 8, "bold")).pack(anchor="w")
+        ds_row = ttk.Frame(mf)
+        ds_row.pack(fill="x", pady=2)
+        ttk.Label(ds_row, text="Set:", font=("Helvetica", 8)).pack(side="left")
+        self.combo_rruff_dataset = ttk.Combobox(ds_row, state="readonly", width=16, values=RRUFF_DATASETS)
         self.combo_rruff_dataset.current(0)
         self.combo_rruff_dataset.pack(side="left", fill="x", expand=True, padx=(3, 0))
-
-        self.btn_rruff_download = ttk.Button(panel_rruff, text="⬇️ Download / Update Set", command=self.rruff_download_selected)
+        self.btn_rruff_download = ttk.Button(mf, text="⬇️ Download / Update Set", command=self.rruff_download_selected)
         self.btn_rruff_download.pack(fill="x", pady=2)
-        ttk.Button(panel_rruff, text="📂 Use Local RRUFF Folder", command=self.rruff_pick_local_folder).pack(fill="x", pady=2)
-        ttk.Button(panel_rruff, text="📚 Open RRUFF .h5 Library", command=self.rruff_open_library).pack(fill="x", pady=2)
+        ttk.Button(mf, text="📂 Use Local RRUFF Folder", command=self.rruff_pick_local_folder).pack(fill="x", pady=2)
+        ttk.Button(mf, text="📚 Open RRUFF .h5 Library", command=self.rruff_open_library).pack(fill="x", pady=2)
 
-        ttk.Label(panel_rruff, text="Search mineral / ID:", font=("Helvetica", 8, "bold")).pack(anchor="w", pady=(4, 0))
-        search_row = ttk.Frame(panel_rruff)
-        search_row.pack(fill="x", pady=(0, 4))
-        self.ent_rruff_query = ttk.Entry(search_row)
-        self.ent_rruff_query.pack(side="left", fill="x", expand=True)
-        self.ent_rruff_query.bind("<Return>", lambda e: self.rruff_run_search())
-        ttk.Button(search_row, text="🔍", width=3, command=self.rruff_run_search).pack(side="right", padx=(3, 0))
-
-        self.rruff_results_list = tk.Listbox(panel_rruff, height=4, exportselection=False)
-        self.rruff_results_list.pack(fill="x", pady=(0, 3))
-        self.rruff_results_list.bind("<Double-1>", self._rruff_open_selected_page)
-        self.rruff_search_hits = []
-
-        ttk.Button(panel_rruff, text="➕ Overlay Selected Reference", command=self.rruff_overlay_selected).pack(fill="x", pady=(0, 2))
-
-        ttk.Separator(panel_rruff, orient="horizontal").pack(fill="x", pady=4)
-        tol_row = ttk.Frame(panel_rruff)
-        tol_row.pack(fill="x", pady=(0, 2))
-        ttk.Label(tol_row, text="Match tol. ±", font=("Helvetica", 8, "bold")).pack(side="left")
-        self.ent_match_tol = ttk.Entry(tol_row, width=5)
-        self.ent_match_tol.insert(0, "12")
-        self.ent_match_tol.pack(side="left", padx=(2, 1))
-        ttk.Label(tol_row, text="cm⁻¹", font=("Helvetica", 8)).pack(side="left")
-        self.btn_rruff_match = ttk.Button(panel_rruff, text="🎯 Match by Selected Peaks", command=self.rruff_match_by_peaks)
-        self.btn_rruff_match.pack(fill="x", pady=(0, 2))
-
-        self.rruff_status_var = tk.StringVar(value="RRUFF: no set cached.")
-        ttk.Label(panel_rruff, textvariable=self.rruff_status_var, font=("Helvetica", 8), foreground="#555555", wraplength=250).pack(anchor="w")
-
-        self.rruff_local_dir = None
-        self.rruff_lib = None
-        self._refresh_rruff_status()
-
-        # --- ROD Reference Database Panel (offline .h5 libraries + online REST) ---
-        panel_rod = ttk.LabelFrame(sidebar_frame,
-                                   text=" 🔬 Reference Libraries (ROD / Open Specy) ",
-                                   padding=(8, 6))
-        panel_rod.pack(side="top", fill="x", pady=5)
-
-        self.rod_libs = []                 # [{name, path, entries, active, var}]
-        self.rod_search_hits = []
-        self.rod_cfg_path = os.path.join(os.path.expanduser("~"), ".raman_plotter_rod_libraries.json")
+        ttk.Separator(mf, orient="horizontal").pack(fill="x", pady=4)
+        ttk.Label(mf, text="ROD online", font=("Helvetica", 8, "bold")).pack(anchor="w")
+        rod_mode_row = ttk.Frame(mf)
+        rod_mode_row.pack(fill="x", pady=2)
         self.rod_mode_var = tk.StringVar(value="h5")
-
-        mode_row = ttk.Frame(panel_rod)
-        mode_row.pack(fill="x", pady=(0, 3))
-        ttk.Label(mode_row, text="Source:", font=("Helvetica", 8, "bold")).pack(side="left")
-        ttk.Radiobutton(mode_row, text="Offline .h5", value="h5", variable=self.rod_mode_var,
-                        command=self._rod_update_status).pack(side="left", padx=(4, 0))
-        ttk.Radiobutton(mode_row, text="Online (ROD)", value="online", variable=self.rod_mode_var,
-                        command=self._rod_update_status).pack(side="left", padx=(4, 0))
-
-        self.rod_libs_frame = ttk.Frame(panel_rod)
-        self.rod_libs_frame.pack(fill="x", pady=(0, 2))
-        ttk.Button(panel_rod, text="📚 Add .h5 Librar(ies)…",
-                   command=self.rod_add_library).pack(fill="x", pady=2)
-
-        ttk.Label(panel_rod, text="Search name / formula / ID:",
-                  font=("Helvetica", 8, "bold")).pack(anchor="w", pady=(4, 0))
-        rod_search_row = ttk.Frame(panel_rod)
-        rod_search_row.pack(fill="x", pady=(0, 3))
-        self.ent_rod_query = ttk.Entry(rod_search_row)
-        self.ent_rod_query.pack(side="left", fill="x", expand=True)
-        self.ent_rod_query.bind("<Return>", lambda e: self.rod_run_search())
-        ttk.Button(rod_search_row, text="🔍", width=3, command=self.rod_run_search).pack(side="right", padx=(3, 0))
-
-        # How the query is interpreted. Offline libraries always substring-match;
-        # online this picks which ROD search key is used (text / el1..el8 /
-        # formula / id), which is what makes a bounded online match possible.
-        rod_field_row = ttk.Frame(panel_rod)
-        rod_field_row.pack(fill="x", pady=(0, 3))
+        ttk.Radiobutton(rod_mode_row, text="Offline only", value="h5", variable=self.rod_mode_var,
+                        command=self.db_refresh).pack(side="left")
+        ttk.Radiobutton(rod_mode_row, text="Query ROD", value="online", variable=self.rod_mode_var,
+                        command=self.db_refresh).pack(side="left", padx=(6, 0))
+        rod_field_row = ttk.Frame(mf)
+        rod_field_row.pack(fill="x", pady=2)
         ttk.Label(rod_field_row, text="as", font=("Helvetica", 8)).pack(side="left")
         self.combo_rod_field = ttk.Combobox(rod_field_row, state="readonly", width=9,
                                             values=("auto", "text", "elements", "formula", "id"))
         self.combo_rod_field.current(0)
         self.combo_rod_field.pack(side="left", padx=(3, 0))
-        ttk.Label(rod_field_row, text="max online:", font=("Helvetica", 8)).pack(side="left", padx=(8, 0))
+        ttk.Label(rod_field_row, text="max:", font=("Helvetica", 8)).pack(side="left", padx=(8, 0))
         self.ent_rod_scan_cap = ttk.Entry(rod_field_row, width=5)
         self.ent_rod_scan_cap.insert(0, "100")
         self.ent_rod_scan_cap.pack(side="left", padx=(3, 0))
 
-        self.rod_results_list = tk.Listbox(panel_rod, height=4, exportselection=False)
-        self.rod_results_list.pack(fill="x", pady=(0, 3))
-        self.rod_results_list.bind("<Double-1>", self._rod_open_selected_page)
+        ttk.Separator(mf, orient="horizontal").pack(fill="x", pady=4)
+        ttk.Label(mf, text="SDBS (organic compounds)", font=("Helvetica", 8, "bold")).pack(anchor="w")
+        ttk.Label(mf, text="Opens SDBS in your browser; download a spectrum there, then "
+                           "load the .jdx normally. SDBS does not permit automated downloads.",
+                  font=("Helvetica", 8), foreground="#555555", wraplength=240).pack(anchor="w")
+        ttk.Button(mf, text="🔗 Look up in SDBS", command=self.sdbs_lookup).pack(fill="x", pady=2)
 
-        ttk.Button(panel_rod, text="➕ Overlay Selected Reference",
-                   command=self.rod_overlay_selected).pack(fill="x", pady=(0, 2))
-
-        ttk.Separator(panel_rod, orient="horizontal").pack(fill="x", pady=4)
-        rod_tol_row = ttk.Frame(panel_rod)
-        rod_tol_row.pack(fill="x")
-        ttk.Label(rod_tol_row, text="Match tol (cm⁻¹):", font=("Helvetica", 8)).pack(side="left")
-        self.ent_rod_match_tol = ttk.Entry(rod_tol_row, width=6)
-        self.ent_rod_match_tol.insert(0, "12")
-        self.ent_rod_match_tol.pack(side="left", padx=(4, 0))
-
-        self.btn_rod_match = ttk.Button(panel_rod, text="🎯 Match by Selected Peaks (ROD)",
-                                        command=self.rod_match_by_peaks)
-        self.btn_rod_match.pack(fill="x", pady=(2, 2))
-
-        self._rod_scan_cancel = False      # set by the Stop button mid online scan
-        self.rod_status_var = tk.StringVar(value="ROD: add a baked .h5 library, or switch to Online.")
-        ttk.Label(panel_rod, textvariable=self.rod_status_var, font=("Helvetica", 8),
-                  foreground="#555555", wraplength=250).pack(anchor="w")
-
+        # Aliases so the retained per-source code keeps working against the
+        # shared widgets of the unified panel.
+        self.ent_rruff_query = self.ent_db_query
+        self.ent_rod_query = self.ent_db_query
+        self.ent_rod_match_tol = self.ent_db_match_tol
+        self.ent_match_tol = self.ent_db_match_tol
+        self.rruff_status_var = self.db_status_var
+        self.rod_status_var = self.db_status_var
+        self.btn_rod_match = self.btn_db_match
+        self.btn_rruff_match = self.btn_db_match
+        self.ent_sdbs_query = self.ent_db_query
+        self.rruff_results_list = self.db_results_list
+        self.rod_results_list = self.db_results_list
+        self.rruff_search_hits = []
+        self.rod_search_hits = []
+        self.db_hits = []
+        self.db_disabled = set()
+        self.rod_libs = []
+        self.rod_libs_frame = self.db_sources_frame
+        self.rod_cfg_path = os.path.join(os.path.expanduser("~"), ".raman_plotter_rod_libraries.json")
+        self._rod_scan_cancel = False
+        self.rruff_local_dir = None
+        self.rruff_lib = None
         self._rod_load_config()
-
-        # --- SDBS (external lookup only) ---
-        # SDBS prohibits automated retrieval, so there is no pull here by
-        # design: the button opens their search page, you download a spectrum
-        # by hand, and 📂 Load Spectra imports the .jdx like any other file.
-        panel_sdbs = ttk.LabelFrame(sidebar_frame, text=" 🔗 SDBS (organic compounds) ", padding=(8, 6))
-        panel_sdbs.pack(side="top", fill="x", pady=5)
-        ttk.Label(panel_sdbs,
-                  text="Opens SDBS in your browser. Download a Raman spectrum "
-                       "there, then load the .jdx normally.",
-                  font=("Helvetica", 8), foreground="#555555", wraplength=250).pack(anchor="w")
-        sdbs_row = ttk.Frame(panel_sdbs)
-        sdbs_row.pack(fill="x", pady=(4, 0))
-        self.ent_sdbs_query = ttk.Entry(sdbs_row)
-        self.ent_sdbs_query.pack(side="left", fill="x", expand=True)
-        self.ent_sdbs_query.bind("<Return>", lambda e: self.sdbs_lookup())
-        ttk.Button(sdbs_row, text="🔗", width=3, command=self.sdbs_lookup).pack(side="right", padx=(3, 0))
-        ttk.Button(panel_sdbs, text="🔗 Look up in SDBS",
-                   command=self.sdbs_lookup).pack(fill="x", pady=(3, 0))
-
+        self.db_refresh()
         # --- Active Layers Control Panel ---
         self.panel_fit_targets = ttk.LabelFrame(sidebar_frame, text=" 📋 Plotted Spectra Layers ", padding=(8, 6))
         self.panel_fit_targets.pack(side="top", fill="x", pady=8, expand=True)
@@ -1689,18 +1665,8 @@ class RamanPlotterGUI:
 
     # ---------- RRUFF reference database ----------
     def _refresh_rruff_status(self):
-        ds = self.combo_rruff_dataset.get()
-        if self.rruff_lib:
-            self.rruff_status_var.set(f"RRUFF library: {len(self.rruff_lib['entries'])} spectra (precomputed peaks).")
-            return
-        if self.rruff_local_dir:
-            n = len([f for f in os.listdir(self.rruff_local_dir) if f.lower().endswith('.txt')])
-            self.rruff_status_var.set(f"RRUFF: local folder ({n} spectra).")
-        elif rruff_is_cached(ds):
-            n = len([f for f in os.listdir(rruff_dataset_dir(ds)) if f.lower().endswith('.txt')])
-            self.rruff_status_var.set(f"RRUFF: '{ds}' cached ({n} spectra).")
-        else:
-            self.rruff_status_var.set(f"RRUFF: '{ds}' not downloaded yet.")
+        """Superseded by db_update_status; also picks up new RRUFF sources."""
+        self.db_refresh()
 
     def rruff_download_selected(self):
         ds = self.combo_rruff_dataset.get()
@@ -2019,6 +1985,395 @@ class RamanPlotterGUI:
         ttk.Button(btn_row, text="🔗 Open RRUFF Page(s)", command=open_pages).pack(side="left", padx=4)
         ttk.Button(btn_row, text="➕ Overlay Selected Match(es)", command=overlay_chosen).pack(side="left", padx=4)
 
+    # ---------- Unified reference-database panel ----------
+    # Dispatches over the per-source machinery below. A "source" is the RRUFF
+    # library / folder / cached set, or one baked .h5 library.
+
+    def db_toggle_manage(self):
+        if self._db_manage_open:
+            self.db_manage_frame.pack_forget()
+            self.btn_db_manage.config(text="▾")
+        else:
+            self.db_manage_frame.pack(fill="x", pady=(4, 0))
+            self.btn_db_manage.config(text="▴")
+        self._db_manage_open = not self._db_manage_open
+
+    def db_source_list(self):
+        """[{key, label, kind, count, entries}] for every loaded source."""
+        out = []
+        if self.rruff_lib:
+            out.append({'key': 'rruff-lib', 'label': 'RRUFF library', 'kind': 'rruff',
+                        'count': len(self.rruff_lib['entries']),
+                        'entries': self.rruff_lib['entries']})
+        elif self.rruff_local_dir:
+            files = [f for f in os.listdir(self.rruff_local_dir) if f.lower().endswith('.txt')]
+            out.append({'key': 'rruff-folder', 'label': 'RRUFF folder', 'kind': 'folder',
+                        'count': len(files), 'entries': None})
+        else:
+            ds = self.combo_rruff_dataset.get()
+            if rruff_is_cached(ds):
+                n = len([f for f in os.listdir(rruff_dataset_dir(ds)) if f.lower().endswith('.txt')])
+                out.append({'key': 'rruff-set', 'label': f'RRUFF {ds}', 'kind': 'folder',
+                            'count': n, 'entries': None})
+        for i, lib in enumerate(self.rod_libs):
+            src = (lib['entries'][0].get('source') if lib['entries'] else '') or 'Library'
+            out.append({'key': f'lib-{i}', 'label': f"{src} — {lib['name']}", 'kind': 'lib',
+                        'count': len(lib['entries']), 'entries': lib['entries'], 'lib_index': i})
+        if self.rod_mode_var.get() == 'online':
+            out.append({'key': 'rod-online', 'label': 'ROD (online)', 'kind': 'online',
+                        'count': 0, 'entries': None})
+        return out
+
+    def db_enabled_sources(self):
+        return [s for s in self.db_source_list() if s['key'] not in self.db_disabled]
+
+    def db_refresh(self):
+        for child in self.db_sources_frame.winfo_children():
+            child.destroy()
+        sources = self.db_source_list()
+        if not sources:
+            ttk.Label(self.db_sources_frame, text="No sources loaded — see Manage sources.",
+                      font=("Helvetica", 8, "italic"), foreground="#888888").pack(anchor="w")
+        for s in sources:
+            row = ttk.Frame(self.db_sources_frame)
+            row.pack(fill="x", pady=1)
+            var = tk.BooleanVar(value=s['key'] not in self.db_disabled)
+            label = s['label'] + (f" · {s['count']:,}" if s['count'] else "")
+            ttk.Checkbutton(row, text=label, variable=var,
+                            command=lambda k=s['key'], v=var, s=s: self._db_toggle_source(k, v, s)
+                            ).pack(side="left", anchor="w")
+            if s['kind'] == 'lib':
+                ttk.Button(row, text="❌", width=2,
+                           command=lambda i=s['lib_index']: (self._rod_remove_library(i),
+                                                             self.db_refresh())).pack(side="right")
+            row._db_var = var          # keep a reference so Tk does not GC it
+        self.db_update_status()
+
+    def _db_toggle_source(self, key, var, source):
+        if var.get():
+            self.db_disabled.discard(key)
+        else:
+            self.db_disabled.add(key)
+        if source['kind'] == 'lib':
+            self.rod_libs[source['lib_index']]['active'] = var.get()
+            self._rod_save_config()
+        self.db_update_status()
+
+    def db_update_status(self, msg=None):
+        if msg:
+            self.db_status_var.set(msg)
+            return
+        all_s = self.db_source_list()
+        if not all_s:
+            self.db_status_var.set("Add a library under Manage sources, then search.")
+            return
+        on = self.db_enabled_sources()
+        total = sum(s['count'] for s in on)
+        self.db_status_var.set(
+            f"{len(on)}/{len(all_s)} source(s) enabled · {total:,} spectra. "
+            f"Search, or mark peaks and Match.")
+
+    @staticmethod
+    def _db_haystack(kind, e):
+        if kind == 'lib':
+            return (f"{e.get('name','')} {e.get('id','')} {e.get('formula','')} "
+                    f"{e.get('mineral','')} {e.get('collection','')}").lower()
+        return f"{e.get('name','')} {e.get('id','')}".lower()
+
+    @staticmethod
+    def _db_tag(kind, e):
+        if kind in ('rruff', 'folder'):
+            return 'RRUFF'
+        src = (e.get('source') if isinstance(e, dict) else None) or 'LIB'
+        return 'SPECY' if src == 'OpenSpecy' else src.upper()[:6]
+
+    def db_run_search(self):
+        query = self.ent_db_query.get().strip()
+        self.db_results_list.delete(0, tk.END)
+        self.db_hits = []
+        sources = self.db_enabled_sources()
+        if not sources:
+            messagebox.showinfo("No Sources",
+                                "Enable a source, or add an .h5 library under Manage sources.")
+            return
+        q = query.lower()
+
+        for s in sources:
+            if s['kind'] == 'online':
+                continue                      # handled asynchronously below
+            if s['kind'] == 'folder':
+                for name, rid, path in self._rruff_candidate_files(query):
+                    self.db_hits.append({'kind': 'folder', 'tag': 'RRUFF',
+                                         'rec': {'name': name, 'id': rid, 'path': path}})
+                continue
+            for e in s['entries']:
+                if q and q not in self._db_haystack(s['kind'], e):
+                    continue
+                self.db_hits.append({'kind': s['kind'], 'tag': self._db_tag(s['kind'], e),
+                                     'rec': e})
+            if len(self.db_hits) >= 400:
+                break
+
+        self._db_render_hits()
+
+        online = [s for s in sources if s['kind'] == 'online']
+        if online and query:
+            self.db_update_status("ROD online: searching …")
+            field = self.combo_rod_field.get() or "auto"
+
+            def worker():
+                try:
+                    hits = rod_search_online(query, field=field)
+                except Exception:                            # noqa: BLE001
+                    hits = []
+                self.root.after(0, lambda: self._db_append_online(hits))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+    def _db_append_online(self, hits):
+        for h in hits:
+            self.db_hits.append({'kind': 'online', 'tag': 'ROD·web', 'rec': h})
+        self._db_render_hits()
+
+    def _db_render_hits(self):
+        self.db_results_list.delete(0, tk.END)
+        for h in self.db_hits:
+            e = h['rec']
+            extra = e.get('formula') or e.get('collection') or ''
+            bits = [f"[{h['tag']}]", e.get('name', '')]
+            if e.get('id'):
+                bits.append(str(e['id']))
+            if extra:
+                bits.append(extra)
+            self.db_results_list.insert(tk.END, "  ".join(b for b in bits if b))
+        if self.db_hits:
+            self.db_results_list.selection_set(0)
+            self.db_update_status(f"{len(self.db_hits)} match(es). Select and overlay.")
+        else:
+            self.db_update_status("No matches.")
+
+    def _db_selected(self):
+        sel = self.db_results_list.curselection()
+        if not sel or sel[0] >= len(self.db_hits):
+            return None
+        return self.db_hits[sel[0]]
+
+    def db_overlay_selected(self):
+        h = self._db_selected()
+        if not h:
+            self.db_update_status("Select a search result first.")
+            return
+        rec, kind = h['rec'], h['kind']
+        if kind == 'lib':
+            hit = dict(rec)
+            hit.setdefault('lib_path', rec.get('lib_path'))
+            self.rod_search_hits = [hit]
+            self.rod_results_list_index = 0
+            try:
+                x, y, label, url = self._rod_read_xy(hit)
+            except Exception as e:                           # noqa: BLE001
+                self.db_update_status(f"Could not read that reference — {e}")
+                return
+            self.save_to_history()
+            self._add_reference(x, y, label, f"__ref_lib_{rec.get('id')}",
+                                rruff_name=rec.get('name'), rruff_id=rec.get('id'), ref_url=url)
+            self.replot_and_refresh_canvas()
+            self.db_update_status(f"Overlaid {rec.get('name')}.")
+            return
+        if kind == 'online':
+            self.rod_search_hits = [rec]
+            self.rod_results_list.selection_clear(0, tk.END)
+            self._db_overlay_online(rec)
+            return
+        # RRUFF library entry or folder file
+        try:
+            x, y, label = self._read_reference_xy(rec)
+        except Exception as e:                               # noqa: BLE001
+            self.db_update_status(f"Could not read that reference — {e}")
+            return
+        self.save_to_history()
+        self._add_reference(x, y, label, f"__ref_rruff_{rec.get('name')}_{rec.get('id')}",
+                            rruff_name=rec.get('name'), rruff_id=rec.get('id'))
+        self.replot_and_refresh_canvas()
+        self.db_update_status(f"Overlaid {rec.get('name')}.")
+
+    def _db_overlay_online(self, rec):
+        self.db_update_status(f"ROD: downloading {rec['id']} …")
+
+        def worker():
+            try:
+                x, y, meta = rod_fetch_spectrum(rec['id'])
+                err = None
+            except Exception as e:                           # noqa: BLE001
+                x = y = meta = None
+                err = e
+
+            def done():
+                if err is not None:
+                    self.db_update_status(f"ROD: could not fetch — {err}")
+                    return
+                name = rec.get('name') or meta.get('name')
+                self.save_to_history()
+                self._add_reference(x, y, f"ROD: {name} ({rec['id']})",
+                                    f"__ref_rod_{rec['id']}",
+                                    rruff_name=name, rruff_id=rec['id'],
+                                    ref_url=meta.get('url'))
+                self.replot_and_refresh_canvas()
+                self.db_update_status(f"Overlaid {name}.")
+            self.root.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def db_match_by_peaks(self):
+        """Rank every enabled source against the marked peaks in one pass."""
+        if not self.peak_guesses:
+            messagebox.showinfo(
+                "Mark Peaks First",
+                "Turn on '🎯 Peak Selection', then right-click on the plot to mark the "
+                "peaks you want to match.")
+            return
+        sources = self.db_enabled_sources()
+        if not sources:
+            messagebox.showinfo("No Sources", "Enable or add at least one source first.")
+            return
+        try:
+            tolerance = float(self.ent_db_match_tol.get().strip())
+        except ValueError:
+            tolerance = 12.0
+        exp_peaks = list(self.peak_guesses)
+        q = self.ent_db_query.get().strip().lower()
+
+        scored, scanned = [], 0
+        for s in sources:
+            if s['kind'] == 'online':
+                continue                       # bounded online scan stays separate
+            if s['kind'] == 'folder':
+                for name, rid, path in self._rruff_candidate_files(self.ent_db_query.get()):
+                    try:
+                        with open(path, 'r', encoding='utf-8', errors='ignore') as fh:
+                            x, y, _ = _parse_two_column_text(fh.read(), name)
+                        if len(x) < 5:
+                            continue
+                        peaks = detect_reference_peaks(x, y)
+                    except Exception:                        # noqa: BLE001
+                        continue
+                    scanned += 1
+                    score, avg, matched = peak_match_score(peaks, exp_peaks, tolerance)
+                    if matched > 0:
+                        scored.append({'score': score, 'avg': avg, 'matched': matched,
+                                       'name': name, 'id': rid, 'tag': 'RRUFF',
+                                       'kind': 'folder', 'path': path, 'detail': ''})
+                continue
+            for e in s['entries']:
+                if q and q not in self._db_haystack(s['kind'], e):
+                    continue
+                peaks = e.get('peaks')
+                if peaks is None or len(peaks) == 0:
+                    continue
+                scanned += 1
+                score, avg, matched = peak_match_score(peaks, exp_peaks, tolerance)
+                if matched > 0:
+                    scored.append({'score': score, 'avg': avg, 'matched': matched,
+                                   'name': e.get('name'), 'id': e.get('id'),
+                                   'tag': self._db_tag(s['kind'], e), 'kind': s['kind'],
+                                   'group': e.get('group'), 'lib_path': e.get('lib_path'),
+                                   'url': e.get('url'), 'cod_url': e.get('cod_url', ''),
+                                   'detail': e.get('formula') or e.get('collection') or ''})
+        scored.sort(key=lambda t: (-t['score'], t['avg']))
+        self.db_update_status(
+            f"Matched {len(scored)}/{scanned} references across "
+            f"{len([s for s in sources if s['kind'] != 'online'])} source(s) (tol ±{tolerance:g}).")
+        self._db_show_match_results(scored[:100], len(exp_peaks), tolerance)
+
+    def _db_show_match_results(self, scored, n_exp, tolerance):
+        if not scored:
+            messagebox.showinfo("No Matches",
+                                "No reference had bands near your marked peaks.\n"
+                                "Try a larger match tolerance or different peaks.")
+            return
+        pop = tk.Toplevel(self.root)
+        pop.title("Reference Databases — Candidate Ranking")
+        pop.geometry("780x380")
+        pop.transient(self.root)
+        pop.grab_set()
+        ttk.Label(pop, text=f"Ranked across every enabled source by alignment with your "
+                            f"{n_exp} marked peak(s) (±{tolerance:g} cm⁻¹). "
+                            f"Double-click a row to open its database page.",
+                  font=("Helvetica", 9, "bold")).pack(pady=6, padx=8, anchor="w")
+
+        frame = ttk.Frame(pop)
+        frame.pack(fill="both", expand=True, padx=8, pady=4)
+        scroll = ttk.Scrollbar(frame)
+        scroll.pack(side="right", fill="y")
+        tree = ttk.Treeview(frame, columns=("Score", "Src", "Name", "ID", "Detail", "Matched"),
+                            show="headings", yscrollcommand=scroll.set, height=11,
+                            selectmode="extended")
+        for col, head, w, anchor in (("Score", "Match", 70, "center"),
+                                     ("Src", "Source", 70, "center"),
+                                     ("Name", "Name", 210, "w"),
+                                     ("ID", "ID", 95, "center"),
+                                     ("Detail", "Formula / Collection", 190, "w"),
+                                     ("Matched", "Peaks", 70, "center")):
+            tree.heading(col, text=head)
+            tree.column(col, width=w, anchor=anchor)
+        tree.pack(fill="both", expand=True)
+        scroll.config(command=tree.yview)
+
+        row_map = {}
+        for rec in scored:
+            iid = tree.insert("", "end", values=(f"{rec['score']:.0f}%", rec['tag'], rec['name'],
+                                                 rec.get('id', ''), rec.get('detail', ''),
+                                                 f"{rec['matched']}/{n_exp}"))
+            row_map[iid] = rec
+
+        def open_pages(event=None):
+            opened = 0
+            for iid in tree.selection():
+                rec = row_map.get(iid)
+                if not rec:
+                    continue
+                url = rec.get('url') or (rruff_url(rec['name'], rec.get('id'))
+                                         if rec['tag'] == 'RRUFF' else None)
+                if url:
+                    webbrowser.open_new_tab(url)
+                    opened += 1
+            if opened == 0:
+                messagebox.showinfo("Nothing Selected", "Select a row, then open its page.")
+        tree.bind("<Double-1>", open_pages)
+
+        def overlay_chosen():
+            sel = tree.selection()
+            if not sel:
+                return
+            pop.destroy()
+            self.save_to_history()
+            added = 0
+            for iid in sel:
+                hit = row_map[iid]
+                try:
+                    if hit['kind'] == 'lib':
+                        x, y, label, url = self._rod_read_xy(hit)
+                    else:
+                        x, y, label = self._read_reference_xy(hit)
+                        url = None
+                    if len(x) == 0:
+                        continue
+                except Exception:                            # noqa: BLE001
+                    continue
+                self._add_reference(x, y, label,
+                                    f"__ref_match_{hit['tag']}_{hit.get('id')}_{added}",
+                                    rruff_name=hit['name'], rruff_id=hit.get('id'), ref_url=url)
+                added += 1
+            if added:
+                self.replot_and_refresh_canvas()
+                self.db_update_status(f"Overlaid {added} matched reference(s).")
+
+        btn_row = ttk.Frame(pop)
+        btn_row.pack(pady=8)
+        ttk.Button(btn_row, text="🔗 Open Page(s)", command=open_pages).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="➕ Overlay Selected Match(es)",
+                   command=overlay_chosen).pack(side="left", padx=4)
+
     # ---------- ROD reference database ----------
     # Two modes, chosen by the Source radio:
     #   'h5'     one or more baked libraries, searched and matched in memory
@@ -2074,18 +2429,8 @@ class RamanPlotterGUI:
             self._rod_update_status()
 
     def _rod_refresh_libs_panel(self):
-        for child in self.rod_libs_frame.winfo_children():
-            child.destroy()
-        for idx, lib in enumerate(self.rod_libs):
-            row = ttk.Frame(self.rod_libs_frame)
-            row.pack(fill="x", pady=1)
-            lib.setdefault('var', tk.BooleanVar(value=lib['active']))
-            lib['var'].set(lib['active'])
-            ttk.Checkbutton(row, text=f"{lib['name']} ({len(lib['entries'])})",
-                            variable=lib['var'],
-                            command=lambda i=idx: self._rod_toggle_library(i)).pack(side="left", anchor="w")
-            ttk.Button(row, text="❌", width=2,
-                       command=lambda i=idx: self._rod_remove_library(i)).pack(side="right")
+        """The unified panel owns the source list now, so defer to it."""
+        self.db_refresh()
 
     def _rod_save_config(self):
         try:
@@ -2118,23 +2463,8 @@ class RamanPlotterGUI:
         return out
 
     def _rod_update_status(self):
-        if self.rod_mode_var.get() == "online":
-            self.rod_status_var.set(
-                "ROD online: queries solsa.crystallography.net. Matching needs a "
-                "narrowing query (name / formula / elements) and downloads up to "
-                "'max online' spectra.")
-            return
-        active = [l for l in self.rod_libs if l['active']]
-        total = sum(len(l['entries']) for l in active)
-        if not self.rod_libs:
-            self.rod_status_var.set(
-                "Add a baked .h5 library (ROD or Open Specy), or switch to Online.")
-        else:
-            sources = sorted({e.get('source', 'ROD') for l in active for e in l['entries']})
-            tag = "/".join(sources) if sources else "Libraries"
-            self.rod_status_var.set(
-                f"{tag}: {len(active)}/{len(self.rod_libs)} librar(ies) active · "
-                f"{total:,} spectra. Search / Overlay / Match.")
+        """Superseded by db_update_status, which counts every source."""
+        self.db_update_status()
 
     @staticmethod
     def _rod_haystack(e):

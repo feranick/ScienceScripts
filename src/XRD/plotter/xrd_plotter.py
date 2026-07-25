@@ -47,7 +47,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.07.25.1"
+VERSION_TAG = "v2026.07.25.3"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 # RRUFF powder reference library (patterns calculated for Cu radiation, i.e. the
@@ -696,94 +696,101 @@ class XRDPlotterGUI:
         lbl_status.pack(side="top", fill="x", pady=2)
         
         # --- Materials Genome API Search Control Panel ---
-        panel_search = ttk.LabelFrame(sidebar_frame, text=" 🌐 Materials Genome API Search ", padding=(8, 6))
-        panel_search.pack(side="top", fill="x", pady=5)
-        
-        key_header_frame = ttk.Frame(panel_search)
+        # --- Unified Reference Databases panel -------------------------------
+        # One search box over every enabled source: the RRUFF powder folder /
+        # .h5 library, any number of baked COD .h5 libraries, and -- when their
+        # online modes are on -- the COD db3 index and the Materials Project.
+        # Results merge into one list with a source tag, and Match ranks across
+        # all enabled offline sources in a single pass.
+        panel_db = ttk.LabelFrame(sidebar_frame, text=" 🔬 Reference Databases ", padding=(8, 6))
+        panel_db.pack(side="top", fill="x", pady=5)
+
+        db_search_row = ttk.Frame(panel_db)
+        db_search_row.pack(fill="x", pady=(0, 3))
+        self.ent_db_query = ttk.Entry(db_search_row)
+        self.ent_db_query.pack(side="left", fill="x", expand=True)
+        self.ent_db_query.bind("<Return>", lambda e: self.db_run_search())
+        ttk.Button(db_search_row, text="🔍", width=3, command=self.db_run_search).pack(side="right", padx=(3, 0))
+
+        self.db_sources_frame = ttk.Frame(panel_db)
+        self.db_sources_frame.pack(fill="x", pady=(0, 3))
+
+        self.db_results_list = tk.Listbox(panel_db, height=5, exportselection=False)
+        self.db_results_list.pack(fill="x", pady=(0, 3))
+        self.db_results_list.bind("<Double-1>", lambda e: self.db_overlay_selected())
+
+        db_act = ttk.Frame(panel_db)
+        db_act.pack(fill="x", pady=(0, 2))
+        ttk.Button(db_act, text="➕ Overlay", command=self.db_overlay_selected).pack(side="left", fill="x", expand=True)
+        self.btn_db_match = ttk.Button(db_act, text="🎯 Match", command=self.db_match_by_peaks)
+        self.btn_db_match.pack(side="left", fill="x", expand=True, padx=(4, 4))
+        self.ent_db_match_tol = ttk.Entry(db_act, width=5, justify="center")
+        self.ent_db_match_tol.insert(0, "0.2")
+        self.ent_db_match_tol.pack(side="left")
+
+        self.db_status_var = tk.StringVar(value="Add a library under Manage sources, then search.")
+        ttk.Label(panel_db, textvariable=self.db_status_var, font=("Helvetica", 8),
+                  foreground="#555555", wraplength=250).pack(anchor="w")
+
+        db_toggle_row = ttk.Frame(panel_db)
+        db_toggle_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(db_toggle_row, text="Manage sources", font=("Helvetica", 8),
+                  foreground="#6c757d").pack(side="left")
+        self.btn_db_manage = ttk.Button(db_toggle_row, text="▾", width=3, command=self.db_toggle_manage)
+        self.btn_db_manage.pack(side="right")
+
+        self.db_manage_frame = ttk.Frame(panel_db)
+        self._db_manage_open = False
+        mf = self.db_manage_frame
+
+        ttk.Button(mf, text="🗂️ Open COD Source…", command=self.cod_open).pack(fill="x", pady=2)
+
+        ttk.Separator(mf, orient="horizontal").pack(fill="x", pady=4)
+        ttk.Label(mf, text="RRUFF (powder)", font=("Helvetica", 8, "bold")).pack(anchor="w")
+        ttk.Button(mf, text="📂 Use Local RRUFF Folder", command=self.rruff_pick_local_folder).pack(fill="x", pady=2)
+        ttk.Button(mf, text="📚 Open RRUFF .h5 Library", command=self.rruff_open_library).pack(fill="x", pady=2)
+
+        ttk.Separator(mf, orient="horizontal").pack(fill="x", pady=4)
+        ttk.Label(mf, text="Materials Project (online)", font=("Helvetica", 8, "bold")).pack(anchor="w")
+        key_header_frame = ttk.Frame(mf)
         key_header_frame.pack(fill="x", pady=(0, 2))
-        
         ttk.Label(key_header_frame, text="API Key:", font=("Helvetica", 8, "bold")).pack(side="left", anchor="w")
-        
-        lbl_hyperlink = ttk.Label(key_header_frame, text="Get Key ↗", foreground="#0d6efd", cursor="hand2", font=("Helvetica", 8, "underline"))
+        lbl_hyperlink = ttk.Label(key_header_frame, text="Get Key ↗", foreground="#0d6efd",
+                                  cursor="hand2", font=("Helvetica", 8, "underline"))
         lbl_hyperlink.pack(side="right", anchor="e")
         lbl_hyperlink.bind("<Button-1>", lambda e: webbrowser.open_new("https://next-gen.materialsproject.org/api"))
-        
-        key_entry_row = ttk.Frame(panel_search)
+        key_entry_row = ttk.Frame(mf)
         key_entry_row.pack(fill="x", pady=(0, 4))
-        
         self.ent_api_key = ttk.Entry(key_entry_row, show="*")
         self.ent_api_key.pack(side="left", fill="x", expand=True)
-        
-        btn_save_key = ttk.Button(key_entry_row, text="💾", width=3, command=self.save_api_key_locally)
-        btn_save_key.pack(side="right", padx=(3, 0))
-        
-        ttk.Label(panel_search, text="Formula or System (e.g. TiO2 or W-O):", font=("Helvetica", 8, "bold")).pack(anchor="w")
-        self.ent_formula = ttk.Entry(panel_search)
-        self.ent_formula.pack(fill="x", pady=(0, 6))
-        
-        btn_search_text = ttk.Button(panel_search, text="🔍 Search by Formula", command=lambda: self.execute_database_search(mode="text"))
-        btn_search_text.pack(fill="x", pady=2)
-        
-        btn_search_match = ttk.Button(panel_search, text="🎯 Search/Match by Peaks", command=lambda: self.execute_database_search(mode="peaks"))
-        btn_search_match.pack(fill="x", pady=2)
+        ttk.Button(key_entry_row, text="💾", width=3, command=self.save_api_key_locally).pack(side="right", padx=(3, 0))
+        mp_mode_row = ttk.Frame(mf)
+        mp_mode_row.pack(fill="x", pady=2)
+        self.mp_mode_var = tk.StringVar(value="off")
+        ttk.Radiobutton(mp_mode_row, text="Off", value="off", variable=self.mp_mode_var,
+                        command=self.db_refresh).pack(side="left")
+        ttk.Radiobutton(mp_mode_row, text="Include in search", value="on", variable=self.mp_mode_var,
+                        command=self.db_refresh).pack(side="left", padx=(6, 0))
+        ttk.Button(mf, text="🎯 MP Search/Match by Peaks",
+                   command=lambda: self.execute_database_search(mode="peaks")).pack(fill="x", pady=2)
 
-        # --- COD (Crystallography Open Database) Panel ---
-        panel_cod = ttk.LabelFrame(sidebar_frame, text=" 🌐 COD (Crystallography Open DB) ", padding=(8, 6))
-        panel_cod.pack(side="top", fill="x", pady=5)
-        ttk.Button(panel_cod, text="🗂️ Open COD Source…", command=self.cod_open).pack(fill="x")
-        # Loaded libraries manager (activate/deactivate/remove); remembered across launches.
-        self.cod_libs_frame = ttk.Frame(panel_cod)
-        self.cod_libs_frame.pack(fill="x", pady=(4, 0))
-        cod_search = ttk.Frame(panel_cod)
-        cod_search.pack(fill="x", pady=(4, 2))
-        self.ent_cod_query = ttk.Entry(cod_search)
-        self.ent_cod_query.pack(side="left", fill="x", expand=True)
-        self.ent_cod_query.bind("<Return>", lambda e: self.cod_run_search())
-        ttk.Button(cod_search, text="🔍", width=3, command=self.cod_run_search).pack(side="right", padx=(3, 0))
-        self.cod_results_list = tk.Listbox(panel_cod, height=3, exportselection=False)
-        self.cod_results_list.pack(fill="x", pady=(0, 3))
-        self.cod_results_list.bind("<Double-1>", self._cod_open_selected_page)
-        ttk.Button(panel_cod, text="➕ Overlay Selected", command=self.cod_overlay_selected).pack(fill="x", pady=(0, 2))
-        cod_tol = ttk.Frame(panel_cod)
-        cod_tol.pack(fill="x")
-        ttk.Label(cod_tol, text="Match tol. ±", font=("Helvetica", 8, "bold")).pack(side="left")
-        self.ent_cod_tol = ttk.Entry(cod_tol, width=5)
-        self.ent_cod_tol.insert(0, "0.2")
-        self.ent_cod_tol.pack(side="left", padx=(2, 1))
-        ttk.Label(cod_tol, text="°2θ", font=("Helvetica", 8)).pack(side="left")
-        ttk.Button(panel_cod, text="🎯 Match by Selected Peaks (COD)", command=self.cod_match_by_peaks).pack(fill="x", pady=(2, 2))
-        self.cod_status_var = tk.StringVar(value="COD: open a baked .h5 library, or load a Profex db3 for live search.")
-        ttk.Label(panel_cod, textvariable=self.cod_status_var, font=("Helvetica", 8), foreground="#555555", wraplength=250).pack(anchor="w")
-
-        # --- RRUFF (powder) Reference Database Panel ---
-        panel_rruff = ttk.LabelFrame(sidebar_frame, text=" 💎 RRUFF (powder) ", padding=(8, 6))
-        panel_rruff.pack(side="top", fill="x", pady=5)
-        rr_btns = ttk.Frame(panel_rruff)
-        rr_btns.pack(fill="x")
-        ttk.Button(rr_btns, text="📚 Open .h5 Library", command=self.rruff_open_library).pack(side="left", fill="x", expand=True)
-        ttk.Button(rr_btns, text="📂 Folder", command=self.rruff_pick_local_folder).pack(side="left", fill="x", expand=True, padx=(3, 0))
-        rr_search = ttk.Frame(panel_rruff)
-        rr_search.pack(fill="x", pady=(4, 2))
-        self.ent_rruff_query = ttk.Entry(rr_search)
-        self.ent_rruff_query.pack(side="left", fill="x", expand=True)
-        self.ent_rruff_query.bind("<Return>", lambda e: self.rruff_run_search())
-        ttk.Button(rr_search, text="🔍", width=3, command=self.rruff_run_search).pack(side="right", padx=(3, 0))
-        self.rruff_results_list = tk.Listbox(panel_rruff, height=3, exportselection=False)
-        self.rruff_results_list.pack(fill="x", pady=(0, 3))
-        self.rruff_results_list.bind("<Double-1>", self._rruff_open_selected_page)
-        ttk.Button(panel_rruff, text="➕ Overlay Selected", command=self.rruff_overlay_selected).pack(fill="x", pady=(0, 2))
-        rr_tol = ttk.Frame(panel_rruff)
-        rr_tol.pack(fill="x")
-        ttk.Label(rr_tol, text="Match tol. ±", font=("Helvetica", 8, "bold")).pack(side="left")
-        self.ent_rruff_tol = ttk.Entry(rr_tol, width=5)
-        self.ent_rruff_tol.insert(0, "0.2")
-        self.ent_rruff_tol.pack(side="left", padx=(2, 1))
-        ttk.Label(rr_tol, text="°2θ", font=("Helvetica", 8)).pack(side="left")
-        ttk.Button(panel_rruff, text="🎯 Match by Selected Peaks (RRUFF)", command=self.rruff_match_by_peaks).pack(fill="x", pady=(2, 2))
-        self.rruff_status_var = tk.StringVar(value="RRUFF: open an .h5 library or a folder of powder files.")
-        ttk.Label(panel_rruff, textvariable=self.rruff_status_var, font=("Helvetica", 8), foreground="#555555", wraplength=250).pack(anchor="w")
-
-        # --- Active Layers Control Panel Frame Container ---
+        # Aliases so the retained per-source code keeps working against the
+        # shared widgets of the unified panel.
+        self.ent_formula = self.ent_db_query
+        self.ent_rruff_query = self.ent_db_query
+        self.ent_cod_query = self.ent_db_query
+        self.ent_rruff_tol = self.ent_db_match_tol
+        self.ent_cod_match_tol = self.ent_db_match_tol
+        self.ent_cod_tol = self.ent_db_match_tol
+        self.rruff_status_var = self.db_status_var
+        self.cod_status_var = self.db_status_var
+        self.rruff_results_list = self.db_results_list
+        self.cod_results_list = self.db_results_list
+        self.rruff_search_hits = []
+        self.cod_search_hits = []
+        self.db_hits = []
+        self.db_disabled = set()
+        self.cod_libs_frame = self.db_sources_frame
         self.panel_fit_targets = ttk.LabelFrame(sidebar_frame, text=" 📋 Plotted Canvas Layers ", padding=(8, 6))
         self.panel_fit_targets.pack(side="top", fill="x", pady=8, expand=True)
         self.lbl_no_targets = ttk.Label(self.panel_fit_targets, text="No Scans Loaded", font=("Helvetica", 9, "italic"), foreground="#888888")
@@ -838,6 +845,7 @@ class XRDPlotterGUI:
 
         self.load_api_key_on_launch()
         self._cod_load_config()   # re-load any remembered COD libraries
+        self.db_refresh()          # initial paint of the unified source list
 
     def configure_axis_labels(self):
         self.ax.set_xlabel(r"2$\theta$ Angle (degrees)", fontsize=10, fontweight='bold')
@@ -1765,6 +1773,349 @@ class XRDPlotterGUI:
     # ==========================================
     # COD (Crystallography Open Database) methods
     # ==========================================
+    # ---------- Unified reference-database panel ----------
+    # Dispatches over the per-source machinery below. A "source" is the RRUFF
+    # library / folder / cached set, or one baked .h5 library.
+
+    def db_toggle_manage(self):
+        if self._db_manage_open:
+            self.db_manage_frame.pack_forget()
+            self.btn_db_manage.config(text="▾")
+        else:
+            self.db_manage_frame.pack(fill="x", pady=(4, 0))
+            self.btn_db_manage.config(text="▴")
+        self._db_manage_open = not self._db_manage_open
+
+    def db_source_list(self):
+        """[{key, label, kind, count, entries}] for every loaded source."""
+        out = []
+        if self.rruff_lib:
+            out.append({'key': 'rruff-lib', 'label': 'RRUFF library', 'kind': 'rruff',
+                        'count': len(self.rruff_lib['entries']),
+                        'entries': self.rruff_lib['entries']})
+        elif self.rruff_local_dir:
+            files = [f for f in os.listdir(self.rruff_local_dir) if f.lower().endswith('.txt')]
+            out.append({'key': 'rruff-folder', 'label': 'RRUFF folder', 'kind': 'folder',
+                        'count': len(files), 'entries': None})
+        for i, lib in enumerate(self.cod_libs):
+            src = (lib['entries'][0].get('source') if lib['entries'] else '') or 'Library'
+            out.append({'key': f'lib-{i}', 'label': f"{src} — {lib['name']}", 'kind': 'lib',
+                        'count': len(lib['entries']), 'entries': lib['entries'], 'lib_index': i})
+        if self.mp_mode_var.get() == 'online':
+            out.append({'key': 'mp-online', 'label': 'Materials Project (online)', 'kind': 'online',
+                        'count': 0, 'entries': None})
+        return out
+
+    def db_enabled_sources(self):
+        return [s for s in self.db_source_list() if s['key'] not in self.db_disabled]
+
+    def db_refresh(self):
+        for child in self.db_sources_frame.winfo_children():
+            child.destroy()
+        sources = self.db_source_list()
+        if not sources:
+            ttk.Label(self.db_sources_frame, text="No sources loaded — see Manage sources.",
+                      font=("Helvetica", 8, "italic"), foreground="#888888").pack(anchor="w")
+        for s in sources:
+            row = ttk.Frame(self.db_sources_frame)
+            row.pack(fill="x", pady=1)
+            var = tk.BooleanVar(value=s['key'] not in self.db_disabled)
+            label = s['label'] + (f" · {s['count']:,}" if s['count'] else "")
+            ttk.Checkbutton(row, text=label, variable=var,
+                            command=lambda k=s['key'], v=var, s=s: self._db_toggle_source(k, v, s)
+                            ).pack(side="left", anchor="w")
+            if s['kind'] == 'lib':
+                ttk.Button(row, text="❌", width=2,
+                           command=lambda i=s['lib_index']: (self._cod_remove_library(i),
+                                                             self.db_refresh())).pack(side="right")
+            row._db_var = var          # keep a reference so Tk does not GC it
+        self.db_update_status()
+
+    def _db_toggle_source(self, key, var, source):
+        if var.get():
+            self.db_disabled.discard(key)
+        else:
+            self.db_disabled.add(key)
+        if source['kind'] == 'lib':
+            self.cod_libs[source['lib_index']]['active'] = var.get()
+            self._cod_save_config()
+        self.db_update_status()
+
+    def db_update_status(self, msg=None):
+        if msg:
+            self.db_status_var.set(msg)
+            return
+        all_s = self.db_source_list()
+        if not all_s:
+            self.db_status_var.set("Add a library under Manage sources, then search.")
+            return
+        on = self.db_enabled_sources()
+        total = sum(s['count'] for s in on)
+        self.db_status_var.set(
+            f"{len(on)}/{len(all_s)} source(s) enabled · {total:,} spectra. "
+            f"Search, or mark peaks and Match.")
+
+    @staticmethod
+    def _db_haystack(kind, e):
+        if kind == 'lib':
+            return (f"{e.get('name','')} {e.get('id','')} {e.get('formula','')} "
+                    f"{e.get('mineral','')} {e.get('collection','')}").lower()
+        return f"{e.get('name','')} {e.get('id','')}".lower()
+
+    @staticmethod
+    def _db_tag(kind, e):
+        if kind in ('rruff', 'folder'):
+            return 'RRUFF'
+        src = (e.get('source') if isinstance(e, dict) else None) or 'LIB'
+        return 'SPECY' if src == 'OpenSpecy' else src.upper()[:6]
+
+    def db_run_search(self):
+        query = self.ent_db_query.get().strip()
+        self.db_results_list.delete(0, tk.END)
+        self.db_hits = []
+        sources = self.db_enabled_sources()
+        if not sources:
+            messagebox.showinfo("No Sources",
+                                "Enable a source, or add an .h5 library under Manage sources.")
+            return
+        q = query.lower()
+
+        for s in sources:
+            if s['kind'] == 'online':
+                continue                      # handled asynchronously below
+            if s['kind'] == 'folder':
+                for name, rid, path in self._rruff_candidates(query):
+                    self.db_hits.append({'kind': 'folder', 'tag': 'RRUFF',
+                                         'rec': {'name': name, 'id': rid, 'path': path}})
+                continue
+            for e in s['entries']:
+                if q and q not in self._db_haystack(s['kind'], e):
+                    continue
+                self.db_hits.append({'kind': s['kind'], 'tag': self._db_tag(s['kind'], e),
+                                     'rec': e})
+            if len(self.db_hits) >= 400:
+                break
+
+        self._db_render_hits()
+
+        # Materials Project search stays on its own button: it needs an API key
+        # and returns simulated patterns, so it is not merged into this list.
+        if any(s['kind'] == 'online' for s in sources) and query:
+            self.db_update_status(
+                f"{len(self.db_hits)} offline match(es). For Materials Project, "
+                f"use 'MP Search/Match by Peaks' under Manage sources.")
+
+    def _db_render_hits(self):
+        self.db_results_list.delete(0, tk.END)
+        for h in self.db_hits:
+            e = h['rec']
+            extra = e.get('formula') or e.get('collection') or ''
+            bits = [f"[{h['tag']}]", e.get('name', '')]
+            if e.get('id'):
+                bits.append(str(e['id']))
+            if extra:
+                bits.append(extra)
+            self.db_results_list.insert(tk.END, "  ".join(b for b in bits if b))
+        if self.db_hits:
+            self.db_results_list.selection_set(0)
+            self.db_update_status(f"{len(self.db_hits)} match(es). Select and overlay.")
+        else:
+            self.db_update_status("No matches.")
+
+    def _db_selected(self):
+        sel = self.db_results_list.curselection()
+        if not sel or sel[0] >= len(self.db_hits):
+            return None
+        return self.db_hits[sel[0]]
+
+    def db_overlay_selected(self):
+        h = self._db_selected()
+        if not h:
+            self.db_update_status("Select a search result first.")
+            return
+        rec, kind = h['rec'], h['kind']
+        if kind == 'lib':
+            hit = dict(rec)
+            hit.setdefault('lib_path', rec.get('lib_path'))
+            self.cod_search_hits = [hit]
+            self.rod_results_list_index = 0
+            try:
+                x, y = self._cod_entry_xy(hit)
+                label = f"COD: {rec.get('name')} ({rec.get('id')})"
+                url = rec.get('url') or cod_url(rec.get('id'))
+            except Exception as e:                           # noqa: BLE001
+                self.db_update_status(f"Could not read that reference — {e}")
+                return
+            self.save_to_history()
+            self._rruff_add_reference(x, y, label, f"__ref_lib_{rec.get('id')}",
+                                name=rec.get('name'), rid=rec.get('id'), url=url)
+            self.replot_and_refresh_canvas()
+            self.db_update_status(f"Overlaid {rec.get('name')}.")
+            return
+        # RRUFF library entry or folder file
+        try:
+            x, y, label = self._rruff_read_reference(rec)
+        except Exception as e:                               # noqa: BLE001
+            self.db_update_status(f"Could not read that reference — {e}")
+            return
+        self.save_to_history()
+        self._rruff_add_reference(x, y, label, f"__ref_rruff_{rec.get('name')}_{rec.get('id')}",
+                            name=rec.get('name'), rid=rec.get('id'))
+        self.replot_and_refresh_canvas()
+        self.db_update_status(f"Overlaid {rec.get('name')}.")
+
+    def db_match_by_peaks(self):
+        """Rank every enabled source against the marked peaks in one pass."""
+        if not self.peak_guesses:
+            messagebox.showinfo(
+                "Mark Peaks First",
+                "Turn on '🎯 Peak Selection', then right-click on the plot to mark the "
+                "peaks you want to match.")
+            return
+        sources = self.db_enabled_sources()
+        if not sources:
+            messagebox.showinfo("No Sources", "Enable or add at least one source first.")
+            return
+        try:
+            tolerance = float(self.ent_db_match_tol.get().strip())
+        except ValueError:
+            tolerance = 0.2
+        exp_peaks = list(self.peak_guesses)
+        q = self.ent_db_query.get().strip().lower()
+
+        scored, scanned = [], 0
+        for s in sources:
+            if s['kind'] == 'online':
+                continue                       # bounded online scan stays separate
+            if s['kind'] == 'folder':
+                for name, rid, path in self._rruff_candidates(self.ent_db_query.get()):
+                    try:
+                        with open(path, 'r', encoding='utf-8', errors='ignore') as fh:
+                            x, y, _ = _parse_two_column_text(fh.read(), name)
+                        if len(x) < 5:
+                            continue
+                        peaks = detect_reference_peaks(x, y)
+                    except Exception:                        # noqa: BLE001
+                        continue
+                    scanned += 1
+                    score, avg, matched = peak_match_score(peaks, exp_peaks, tolerance)
+                    if matched > 0:
+                        scored.append({'score': score, 'avg': avg, 'matched': matched,
+                                       'name': name, 'id': rid, 'tag': 'RRUFF',
+                                       'kind': 'folder', 'path': path, 'detail': ''})
+                continue
+            for e in s['entries']:
+                if q and q not in self._db_haystack(s['kind'], e):
+                    continue
+                peaks = e.get('peaks')
+                if peaks is None or len(peaks) == 0:
+                    continue
+                scanned += 1
+                score, avg, matched = peak_match_score(peaks, exp_peaks, tolerance)
+                if matched > 0:
+                    scored.append({'score': score, 'avg': avg, 'matched': matched,
+                                   'name': e.get('name'), 'id': e.get('id'),
+                                   'tag': self._db_tag(s['kind'], e), 'kind': s['kind'],
+                                   'group': e.get('group'), 'lib_path': e.get('lib_path'),
+                                   'url': e.get('url'), 'cod_url': e.get('cod_url', ''),
+                                   'detail': e.get('formula') or e.get('collection') or ''})
+        scored.sort(key=lambda t: (-t['score'], t['avg']))
+        self.db_update_status(
+            f"Matched {len(scored)}/{scanned} references across "
+            f"{len([s for s in sources if s['kind'] != 'online'])} source(s) (tol ±{tolerance:g}).")
+        self._db_show_match_results(scored[:100], len(exp_peaks), tolerance)
+
+    def _db_show_match_results(self, scored, n_exp, tolerance):
+        if not scored:
+            messagebox.showinfo("No Matches",
+                                "No reference had bands near your marked peaks.\n"
+                                "Try a larger match tolerance or different peaks.")
+            return
+        pop = tk.Toplevel(self.root)
+        pop.title("Reference Databases — Candidate Ranking")
+        pop.geometry("780x380")
+        pop.transient(self.root)
+        pop.grab_set()
+        ttk.Label(pop, text=f"Ranked across every enabled source by alignment with your "
+                            f"{n_exp} marked peak(s) (±{tolerance:g} ° 2θ). "
+                            f"Double-click a row to open its database page.",
+                  font=("Helvetica", 9, "bold")).pack(pady=6, padx=8, anchor="w")
+
+        frame = ttk.Frame(pop)
+        frame.pack(fill="both", expand=True, padx=8, pady=4)
+        scroll = ttk.Scrollbar(frame)
+        scroll.pack(side="right", fill="y")
+        tree = ttk.Treeview(frame, columns=("Score", "Src", "Name", "ID", "Detail", "Matched"),
+                            show="headings", yscrollcommand=scroll.set, height=11,
+                            selectmode="extended")
+        for col, head, w, anchor in (("Score", "Match", 70, "center"),
+                                     ("Src", "Source", 70, "center"),
+                                     ("Name", "Name", 210, "w"),
+                                     ("ID", "ID", 95, "center"),
+                                     ("Detail", "Formula / Collection", 190, "w"),
+                                     ("Matched", "Peaks", 70, "center")):
+            tree.heading(col, text=head)
+            tree.column(col, width=w, anchor=anchor)
+        tree.pack(fill="both", expand=True)
+        scroll.config(command=tree.yview)
+
+        row_map = {}
+        for rec in scored:
+            iid = tree.insert("", "end", values=(f"{rec['score']:.0f}%", rec['tag'], rec['name'],
+                                                 rec.get('id', ''), rec.get('detail', ''),
+                                                 f"{rec['matched']}/{n_exp}"))
+            row_map[iid] = rec
+
+        def open_pages(event=None):
+            opened = 0
+            for iid in tree.selection():
+                rec = row_map.get(iid)
+                if not rec:
+                    continue
+                url = rec.get('url') or (rruff_url(rec['name'], rec.get('id'))
+                                         if rec['tag'] == 'RRUFF' else None)
+                if url:
+                    webbrowser.open_new_tab(url)
+                    opened += 1
+            if opened == 0:
+                messagebox.showinfo("Nothing Selected", "Select a row, then open its page.")
+        tree.bind("<Double-1>", open_pages)
+
+        def overlay_chosen():
+            sel = tree.selection()
+            if not sel:
+                return
+            pop.destroy()
+            self.save_to_history()
+            added = 0
+            for iid in sel:
+                hit = row_map[iid]
+                try:
+                    if hit['kind'] == 'lib':
+                        x, y = self._cod_entry_xy(hit)
+                        label = f"COD: {hit['name']} ({hit.get('id')})"
+                        url = hit.get('url') or cod_url(hit.get('id'))
+                    else:
+                        x, y, label = self._rruff_read_reference(hit)
+                        url = None
+                    if len(x) == 0:
+                        continue
+                except Exception:                            # noqa: BLE001
+                    continue
+                self._rruff_add_reference(x, y, label,
+                                    f"__ref_match_{hit['tag']}_{hit.get('id')}_{added}",
+                                    name=hit['name'], rid=hit.get('id'), url=url)
+                added += 1
+            if added:
+                self.replot_and_refresh_canvas()
+                self.db_update_status(f"Overlaid {added} matched reference(s).")
+
+        btn_row = ttk.Frame(pop)
+        btn_row.pack(pady=8)
+        ttk.Button(btn_row, text="🔗 Open Page(s)", command=open_pages).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="➕ Overlay Selected Match(es)",
+                   command=overlay_chosen).pack(side="left", padx=4)
+
     def cod_open(self):
         """Single COD entry point. Choose the working mode:
           • Browse all of COD via the Profex db3 index, fetching + simulating
@@ -1843,29 +2194,12 @@ class XRDPlotterGUI:
             self._cod_update_lib_status()
 
     def _cod_update_lib_status(self):
-        active = [l for l in self.cod_libs if l['active']]
-        total = sum(len(l['entries']) for l in active)
-        if not self.cod_libs:
-            self.cod_status_var.set("COD: open a baked .h5 library, or load a Profex db3 for live search.")
-        else:
-            self.cod_status_var.set(
-                f"COD: {len(active)}/{len(self.cod_libs)} librar(ies) active · {total:,} patterns. Search / Overlay / Match.")
+        """Superseded by db_update_status, which counts every source."""
+        self.db_update_status()
 
     def _cod_refresh_libs_panel(self):
-        for child in self.cod_libs_frame.winfo_children():
-            child.destroy()
-        if not self.cod_libs:
-            return
-        for idx, lib in enumerate(self.cod_libs):
-            row = ttk.Frame(self.cod_libs_frame)
-            row.pack(fill="x", pady=1)
-            lib.setdefault('var', tk.BooleanVar(value=lib['active']))
-            lib['var'].set(lib['active'])
-            cb = ttk.Checkbutton(row, text=f"{lib['name']} ({len(lib['entries'])})",
-                                 variable=lib['var'], command=lambda i=idx: self._cod_toggle_library(i))
-            cb.pack(side="left", anchor="w")
-            ttk.Button(row, text="❌", width=2,
-                       command=lambda i=idx: self._cod_remove_library(i)).pack(side="right")
+        """The unified panel owns the source list now, so defer to it."""
+        self.db_refresh()
 
     def _cod_save_config(self):
         try:
