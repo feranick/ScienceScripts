@@ -217,6 +217,7 @@
             <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">💎 RRUFF (infrared)</label>
             <p class="info-text" id="rruff-intro" style="margin: 0;">Open a RRUFF infrared .h5 library or a local folder to search, overlay, and match — fully offline.</p>
             <div id="rruff-loaded-note">✅ Library loaded</div>
+            <div id="rruff-offer" style="display:none; align-items:center; gap:6px; border:1px dashed #badbcc; border-radius:6px; padding:6px; background:#f6fbf8;"></div>
 
             <div id="rruff-search-group" style="display: flex; flex-direction: column; gap: 6px;">
                 <div style="display: flex; gap: 4px; align-items: center;">
@@ -252,6 +253,7 @@
             <p class="info-text" id="lib-intro" style="margin: 0;">Open one or more .h5 libraries built by <code>build_openspecy_library.py --only ftir</code> (polymers &amp; organics, CC-BY) to search, overlay, and match &mdash; fully offline.</p>
             <div id="lib-loaded-note">&#9989; Library loaded</div>
             <div id="lib-libs" style="display:flex; flex-direction:column; gap:2px;"></div>
+            <div id="lib-offers" style="display:none; flex-direction:column; gap:3px; border:1px dashed #b6d4fe; border-radius:6px; padding:6px; background:#f8fbff;"></div>
 
             <div id="lib-match-group" style="display: flex; flex-direction: column; gap: 6px;">
                 <div style="display: flex; align-items: center; gap: 6px;">
@@ -1097,35 +1099,78 @@
         }
 
         // On startup: prefer a host-provided library, else restore the saved one.
+        // The RRUFF panel holds one library at a time. Discovery is cheap; the
+        // download and h5wasm ingest are not, so a server-hosted library is
+        // offered rather than pulled on load. A library you previously opened
+        // is still restored automatically — that was an explicit choice, and it
+        // comes from IndexedDB rather than the network.
+        let rruffServerOffer = null;
+
+        function renderRruffOffer() {
+            const host = document.getElementById('rruff-offer'); if (!host) return;
+            host.innerHTML = "";
+            if (!rruffServerOffer || rruffServerOffer.loaded) { host.style.display = 'none'; return; }
+            host.style.display = 'flex';
+            const o = rruffServerOffer;
+            const lbl = document.createElement('span');
+            lbl.style.flex = '1'; lbl.style.fontSize = '0.78rem'; lbl.style.overflow = 'hidden';
+            lbl.style.textOverflow = 'ellipsis'; lbl.style.whiteSpace = 'nowrap';
+            lbl.title = o.url;
+            lbl.innerText = `\uD83D\uDCE6 ${o.name}` + (o.size ? ` (${fmtBytes(o.size)})` : '');
+            const btn = document.createElement('button');
+            btn.className = 'btn-crop';
+            btn.style.width = 'auto'; btn.style.padding = '3px 10px'; btn.style.fontSize = '0.75rem';
+            btn.innerText = o.busy ? '\u2026' : 'Load';
+            btn.disabled = !!o.busy;
+            btn.onclick = loadRruffServerLibrary;
+            host.appendChild(lbl); host.appendChild(btn);
+        }
+
+        async function loadRruffServerLibrary() {
+            const o = rruffServerOffer;
+            if (!o || o.loaded || o.busy) return;
+            const statusEl = document.getElementById('rruff-status');
+            o.busy = true; renderRruffOffer();
+            showInitBanner('\u23F3 Downloading RRUFF library\u2026');
+            try {
+                const res = await fetchArrayBufferWithProgress(o.url, function (recv, total) {
+                    if (total) showInitBanner(
+                        `\u23F3 Downloading RRUFF library\u2026 ${Math.round(recv / total * 100)}% ` +
+                        `(${(recv / 1e6).toFixed(1)}/${(total / 1e6).toFixed(1)} MB)`);
+                }, 120000);
+                if (!res.ok || !isHdf5(res.buffer)) throw new Error("not an HDF5 library");
+                await ingestLibraryBytes(res.buffer, 'from server');
+                try { await idbSaveLibrary(res.buffer); } catch (e) { /* persistence optional */ }
+                o.loaded = true;
+            } catch (err) {
+                if (statusEl) statusEl.innerText = `Could not load ${o.name}: ${err.message}`;
+            } finally {
+                hideInitBanner();
+                o.busy = false; renderRruffOffer();
+            }
+        }
+
         async function tryAutoLoadLibrary() {
             const statusEl = document.getElementById('rruff-status');
-            const params = new URLSearchParams(location.search);
-            const url = params.get('lib') || HOST_LIBRARY_URL;
-            showInitBanner('⏳ Loading RRUFF library from server…');
-            if (statusEl) statusEl.innerText = "Checking for a library on the server…";
-            try {
-                // Normal caching (no 'no-store') so repeat visits are fast.
-                const res = await fetchArrayBufferWithProgress(url, function (recv, total) {
-                    const mb = (recv / 1e6).toFixed(1), tot = (total / 1e6).toFixed(1);
-                    showInitBanner(`⏳ Downloading RRUFF library… ${Math.round(recv / total * 100)}% (${mb}/${tot} MB)`);
-                }, 60000);
-                if (res.ok) {
-                    const sig = new Uint8Array(res.buffer.slice(0, 4));  // HDF5 magic: 0x89 'H' 'D' 'F'
-                    if (sig[0] === 0x89 && sig[1] === 0x48 && sig[2] === 0x44 && sig[3] === 0x46) {
-                        await ingestLibraryBytes(res.buffer, 'from server');
-                        return;
-                    }
-                    console.warn(`'${url}' was served but is not an HDF5 file; ignoring.`);
-                }
-            } catch (e) { /* not hosted / blocked / timed out — fall through */ }
-            // No server library; try a previously saved one.
+            // 1) Restore a library you opened before.
             try {
                 const saved = await idbLoadLibrary();
                 if (saved) { await ingestLibraryBytes(saved, 'restored'); return; }
             } catch (e) { /* no saved library */ }
-            hideInitBanner();
+
+            // 2) Otherwise see whether one is served next to the page, and offer it.
+            const params = new URLSearchParams(location.search);
+            const url = params.get('lib') || HOST_LIBRARY_URL;
+            const size = await headSize(url);
+            if (size === null) {
+                if (statusEl) statusEl.innerText =
+                    "No server library found. Load a library below, or place rruff_ir_library.h5 next to this page.";
+                return;
+            }
+            rruffServerOffer = { url, name: url.split('/').pop(), size, loaded: false, busy: false };
+            renderRruffOffer();
             if (statusEl) statusEl.innerText =
-                "No server library found. Load a library below, or place rruff_ir_library.h5 next to this page.";
+                "A RRUFF library is available on the server \u2014 load it above, or open one below.";
         }
 
         // ============================================================
@@ -1379,7 +1424,160 @@
             }
         }
 
+        // Work out which .h5 libraries the server is offering, in order of how
+        // explicit the instruction is. A browser cannot list a directory, so
+        // "everything in the folder" needs one of these to stand in for `ls`:
+        //   1. ?speclib=a.h5,b.h5     — explicit, always wins
+        //   2. libraries.json         — a manifest you control, most reliable
+        //   3. the directory index    — works with `python -m http.server`,
+        //                               Apache/nginx autoindex, etc.
+        //   4. the conventional name  — openspecy_ftir.h5
+        // Under file:// none of these work (no directory listing, and fetch is
+        // blocked), so the panel just waits for you to add libraries by hand.
+        async function discoverLibraryUrls(paramName, manifestName, defaultName) {
+            const params = new URLSearchParams(location.search);
+            const explicit = params.get(paramName);
+            if (explicit) return explicit.split(',').map(s => s.trim()).filter(Boolean);
+
+            const found = [];
+            try {                                    // 2) manifest
+                const r = await fetch(manifestName, { cache: 'no-cache' });
+                if (r.ok) {
+                    const list = await r.json();
+                    for (const item of (Array.isArray(list) ? list : (list.libraries || []))) {
+                        const f = (typeof item === 'string') ? item : (item && (item.file || item.url || item.name));
+                        if (f) found.push(f);
+                    }
+                }
+            } catch (e) { /* no manifest */ }
+            if (found.length) return found;
+
+            try {                                    // 3) directory index
+                const r = await fetch('./', { cache: 'no-cache' });
+                if (r.ok && (r.headers.get('content-type') || '').includes('html')) {
+                    const html = await r.text();
+                    const seen = new Set();
+                    for (const m of html.matchAll(/href="([^"?#]+\.(?:h5|hdf5))"/gi)) {
+                        let href = m[1];
+                        try { href = decodeURIComponent(href); } catch (e) {}
+                        if (href.startsWith('http') && !href.startsWith(location.origin)) continue;
+                        const name = href.split('/').pop();
+                        if (name && !seen.has(name)) { seen.add(name); found.push(name); }
+                    }
+                }
+            } catch (e) { /* no index / blocked */ }
+            if (found.length) return found;
+
+            return [defaultName];                    // 4) convention
+        }
+
+        // The single-library RRUFF panel owns its own file; discovering it here
+        // too would load the same spectra twice under the wrong source label.
+        function excludeOwnedByOtherPanels(urls) {
+            const owned = new Set([HOST_LIBRARY_URL.split('/').pop().toLowerCase()]);
+            return urls.filter(u => !owned.has(u.split('/').pop().toLowerCase()));
+        }
+
+        function isHdf5(buffer) {                    // magic: 0x89 'H' 'D' 'F'
+            const sig = new Uint8Array(buffer.slice(0, 4));
+            return sig[0] === 0x89 && sig[1] === 0x48 && sig[2] === 0x44 && sig[3] === 0x46;
+        }
+
+        // Libraries the server has but we have not loaded. Discovery is cheap
+        // (a manifest or directory listing); the download and h5wasm ingest are
+        // not — a full Open Specy build runs to tens of MB — so these are
+        // *offered*, not loaded.
+        let libServerOffers = [];
+
+        function fmtBytes(n) {
+            if (!n || n < 0) return '';
+            return n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`;
+        }
+
+        async function headSize(url) {
+            try {
+                const r = await fetch(url, { method: 'HEAD' });
+                if (!r.ok) return null;
+                const ct = (r.headers.get('content-type') || '').toLowerCase();
+                if (ct.includes('text/html')) return null;      // a 404 page, not a file
+                const len = r.headers.get('content-length');
+                return len ? parseInt(len, 10) : 0;             // 0 = exists, size unknown
+            } catch (e) { return null; }
+        }
+
+        function renderLibOffers() {
+            const host = document.getElementById('lib-offers'); if (!host) return;
+            const pending = libServerOffers.filter(o => !o.loaded);
+            host.innerHTML = "";
+            if (!pending.length) { host.style.display = 'none'; return; }
+            host.style.display = 'flex';
+
+            const hdr = document.createElement('div');
+            hdr.style.fontSize = '0.78rem'; hdr.style.fontWeight = 'bold'; hdr.style.color = '#084298';
+            hdr.innerText = `📦 ${pending.length} librar${pending.length === 1 ? 'y' : 'ies'} available on the server`;
+            host.appendChild(hdr);
+
+            libServerOffers.forEach((o, idx) => {
+                if (o.loaded) return;
+                const row = document.createElement('div');
+                row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px';
+                const lbl = document.createElement('span');
+                lbl.style.flex = '1'; lbl.style.fontSize = '0.78rem'; lbl.style.overflow = 'hidden';
+                lbl.style.textOverflow = 'ellipsis'; lbl.style.whiteSpace = 'nowrap';
+                lbl.title = o.url;
+                lbl.innerText = o.name + (o.size ? ` (${fmtBytes(o.size)})` : '');
+                const btn = document.createElement('button');
+                btn.className = 'btn-crop';
+                btn.style.width = 'auto'; btn.style.padding = '3px 10px'; btn.style.fontSize = '0.75rem';
+                btn.innerText = o.busy ? '…' : 'Load';
+                btn.disabled = !!o.busy;
+                btn.onclick = () => loadSpecServerLibrary(idx);
+                row.appendChild(lbl); row.appendChild(btn);
+                host.appendChild(row);
+            });
+
+            if (pending.length > 1) {
+                const all = document.createElement('button');
+                all.className = 'btn-crop';
+                all.style.padding = '4px'; all.style.fontSize = '0.75rem';
+                all.innerText = `⬇ Load all (${fmtBytes(pending.reduce((s, o) => s + (o.size || 0), 0)) || 'unknown size'})`;
+                all.onclick = async () => {
+                    for (let i = 0; i < libServerOffers.length; i++) {
+                        if (!libServerOffers[i].loaded) await loadSpecServerLibrary(i);
+                    }
+                };
+                host.appendChild(all);
+            }
+        }
+
+        async function loadSpecServerLibrary(idx) {
+            const o = libServerOffers[idx];
+            if (!o || o.loaded || o.busy) return;
+            const statusEl = document.getElementById('lib-status');
+            o.busy = true; renderLibOffers();
+            try {
+                const res = await fetchArrayBufferWithProgress(o.url, function (recv, total) {
+                    if (statusEl && total) statusEl.innerText =
+                        `Downloading ${o.name} … ${Math.round(recv / total * 100)}%`;
+                }, 120000);
+                if (!res.ok || !isHdf5(res.buffer)) throw new Error("not an HDF5 library");
+                const entries = await libIngestBytes(res.buffer);
+                const key = "spec_lib_server_" + o.name;
+                specLibraries.push({ name: o.name, key, entries, active: true });
+                try { await idbSaveKey(key, res.buffer); } catch (e) {}
+                await libSaveIndex();
+                o.loaded = true;
+                refreshLibsPanel(); updateLibPanelState();
+            } catch (err) {
+                if (statusEl) statusEl.innerText = `Could not load ${o.name}: ${err.message}`;
+            } finally {
+                o.busy = false; renderLibOffers();
+            }
+        }
+
         async function tryAutoLoadSpecLibraries() {
+            // 1) Restore libraries you previously chose — those were an explicit
+            //    decision, and they come from IndexedDB rather than the network.
             try {
                 const index = await idbLoadKey(LIB_IDB_INDEX_KEY);
                 if (index && index.length) {
@@ -1392,25 +1590,32 @@
                         } catch (e) {}
                     }
                     refreshLibsPanel(); updateLibPanelState();
-                    return;
                 }
             } catch (e) {}
-            const params = new URLSearchParams(location.search);
-            const url = params.get('speclib') || LIB_HOST_URL;
+
+            // 2) See what else the server has, but do not download it. Not an
+            //    early return above: a library added to the folder after your
+            //    first visit should still be offered.
+            let urls = [];
             try {
-                const res = await fetchArrayBufferWithProgress(url, function () {}, 60000);
-                if (res.ok) {
-                    const sig = new Uint8Array(res.buffer.slice(0, 4));   // HDF5 magic
-                    if (sig[0] === 0x89 && sig[1] === 0x48 && sig[2] === 0x44 && sig[3] === 0x46) {
-                        const entries = await libIngestBytes(res.buffer);
-                        const key = "spec_lib_server";
-                        specLibraries.push({ name: "(server) " + url.split('/').pop(), key, entries, active: true });
-                        try { await idbSaveKey(key, res.buffer); } catch (e) {}
-                        await libSaveIndex();
-                        refreshLibsPanel(); updateLibPanelState();
-                    }
-                }
-            } catch (e) { /* not hosted / blocked */ }
+                urls = excludeOwnedByOtherPanels(
+                    await discoverLibraryUrls('speclib', 'libraries.json', LIB_HOST_URL));
+            } catch (e) { return; }
+
+            libServerOffers = [];
+            for (const url of urls) {
+                const name = url.split('/').pop();
+                if (specLibraries.some(l => l.name === name || l.name === "(server) " + name)) continue;
+                const size = await headSize(url);
+                if (size === null) continue;                  // not actually there
+                libServerOffers.push({ url, name, size, loaded: false, busy: false });
+            }
+            renderLibOffers();
+            if (libServerOffers.length) {
+                const statusEl = document.getElementById('lib-status');
+                if (statusEl && !specLibraries.length) statusEl.innerText =
+                    `${libServerOffers.length} librar(ies) available on the server — load one to search and match.`;
+            }
         }
 
         // ---- SDBS: link-out only. Their terms prohibit automated retrieval,
