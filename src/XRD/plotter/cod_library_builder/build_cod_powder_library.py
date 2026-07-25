@@ -379,8 +379,10 @@ def build_library(rows, args):
                 g.attrs["cod_id"] = str(cid)
                 g.attrs["rruff_id"] = ""               # loader compatibility
                 g.attrs["url"] = COD_PAGE_URL.format(cid=cid)
-                g.attrs["peaks"] = px                  # reflection 2-theta (float32)
-                g.attrs["intensities"] = py            # reflection intensities (float32)
+                # peaks/intensities as DATASETS (attributes are capped at 64 KB by
+                # HDF5; low-symmetry cells can exceed that with many reflections).
+                g.create_dataset("peaks", data=px, compression="gzip")
+                g.create_dataset("intensities", data=py, compression="gzip")
                 g.attrs["formula"] = meta["formula"]
                 g.attrs["sg"] = meta["sg"]
                 g.attrs["wavelength"] = args.wavelength

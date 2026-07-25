@@ -333,7 +333,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "v2026.07.24.5";
+        const VERSION_TAG = "v2026.07.24.6";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -1483,14 +1483,16 @@
                         if (!g || !g.attrs) continue;
                         const xds = f.get("spectra/" + names[idx] + "/x");
                         const yds = f.get("spectra/" + names[idx] + "/y");
+                        const pkds = f.get("spectra/" + names[idx] + "/peaks");          // dataset (new) …
+                        const inds = f.get("spectra/" + names[idx] + "/intensities");
                         const codId = attrToString(g.attrs["cod_id"]) || names[idx];
                         out.push({
                             name: attrToString(g.attrs["name"]) || names[idx],
                             id: codId,
                             formula: attrToString(g.attrs["formula"]),
                             url: attrToString(g.attrs["url"]) || codUrl(codId),
-                            peaks: Array.from(attrToArray(g.attrs["peaks"])),
-                            intensities: Array.from(attrToArray(g.attrs["intensities"])),
+                            peaks: pkds ? Array.from(pkds.value) : Array.from(attrToArray(g.attrs["peaks"])),        // … or attr (older)
+                            intensities: inds ? Array.from(inds.value) : Array.from(attrToArray(g.attrs["intensities"])),
                             x: xds ? Array.from(xds.value) : [],
                             y: yds ? Array.from(yds.value) : []
                         });

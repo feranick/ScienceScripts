@@ -47,7 +47,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.07.24.5"
+VERSION_TAG = "v2026.07.24.6"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 # RRUFF powder reference library (patterns calculated for Cu radiation, i.e. the
@@ -342,8 +342,19 @@ def load_cod_powder_h5_library(path):
         for gname in sp:
             grp = sp[gname]
             a = grp.attrs
-            peaks = np.asarray(a['peaks'], dtype=float) if 'peaks' in a else np.array([])
-            inten = np.asarray(a['intensities'], dtype=float) if 'intensities' in a else np.array([])
+            # peaks/intensities may be datasets (new) or attributes (older files)
+            if 'peaks' in grp:
+                peaks = np.asarray(grp['peaks'][:], dtype=float)
+            elif 'peaks' in a:
+                peaks = np.asarray(a['peaks'], dtype=float)
+            else:
+                peaks = np.array([])
+            if 'intensities' in grp:
+                inten = np.asarray(grp['intensities'][:], dtype=float)
+            elif 'intensities' in a:
+                inten = np.asarray(a['intensities'], dtype=float)
+            else:
+                inten = np.array([])
             cod_id = dec(a.get('cod_id', gname))
             if 'x' in grp and 'y' in grp:
                 has_curve = True
