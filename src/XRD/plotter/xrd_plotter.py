@@ -2,6 +2,10 @@ import os
 import io
 import re
 import zipfile
+import sqlite3
+import urllib.request
+import urllib.error
+import warnings
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import xml.etree.ElementTree as ET
@@ -16,11 +20,19 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from scipy.optimize import curve_fit
 from scipy.signal import savgol_filter, find_peaks
 
-# Conditional Imports to ensure app stability if packages are absent on launch
+# Conditional Imports to ensure app stability if packages are absent on launch.
+# pymatgen alone powers pattern simulation (Materials Project AND live COD);
+# mp_api is only needed for the Materials Project online search.
 try:
     from pymatgen.analysis.diffraction.xrd import XRDCalculator
+    from pymatgen.core import Structure
+    PYMATGEN_AVAILABLE = True
+except ImportError:
+    PYMATGEN_AVAILABLE = False
+
+try:
     from mp_api.client import MPRester
-    MP_LIBRARIES_AVAILABLE = True
+    MP_LIBRARIES_AVAILABLE = PYMATGEN_AVAILABLE
 except ImportError:
     MP_LIBRARIES_AVAILABLE = False
 
@@ -34,7 +46,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.07.24.1"
+VERSION_TAG = "v2026.07.24.4"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 # RRUFF powder reference library (patterns calculated for Cu radiation, i.e. the
@@ -288,6 +300,159 @@ def load_rruff_powder_h5_library(path):
 
 
 # ==========================================
+# CRYSTALLOGRAPHY OPEN DATABASE (COD) SUPPORT
+# ==========================================
+# Three ways to bring COD reference patterns into the app:
+#   1. A baked .h5 library built by build_cod_powder_library.py  (fully offline).
+#   2. Live search of a local Profex COD SQLite index (cod-*.db3), then fetch
+#      the selected CIF from COD and simulate its pattern with pymatgen.
+#   3. Direct CIF id fetch + simulation.
+# The .h5 uses the same schema as the RRUFF library, so overlays (x/y datasets)
+# and peak-matching (peaks attr) both work with real reflection intensities.
+
+COD_CIF_URL = "https://www.crystallography.net/cod/{cid}.cif"
+COD_PAGE_URL = "https://www.crystallography.net/cod/{cid}.html"
+COD_UA = ("Mozilla/5.0 (compatible; XRD-Toolkit-COD/1.0; "
+          "+https://www.crystallography.net/)")
+
+
+def cod_url(cod_id):
+    """Public COD page for an entry id."""
+    if cod_id in (None, "", "\\N"):
+        return None
+    return COD_PAGE_URL.format(cid=cod_id)
+
+
+def load_cod_powder_h5_library(path):
+    """Read a COD powder .h5 built by build_cod_powder_library.py.
+    Returns {'path', 'entries': [{group, name, id(cod), url, peaks, formula, sg}]}."""
+    if not H5_AVAILABLE:
+        raise ImportError("Reading .h5 libraries requires 'h5py' (pip install h5py).")
+    entries = []
+    with h5py.File(path, 'r') as f:
+        if 'spectra' not in f:
+            raise ValueError("Not a COD powder library ('spectra' group missing).")
+        sp = f['spectra']
+
+        def dec(v):
+            return v.decode('latin1') if isinstance(v, bytes) else str(v)
+
+        for gname in sp:
+            a = sp[gname].attrs
+            peaks = np.asarray(a['peaks'], dtype=float) if 'peaks' in a else np.array([])
+            cod_id = dec(a.get('cod_id', gname))
+            entries.append({
+                'group': gname,
+                'name': dec(a.get('name', gname)),
+                'id': cod_id,
+                'url': dec(a.get('url', cod_url(cod_id) or '')),
+                'formula': dec(a.get('formula', '')),
+                'sg': dec(a.get('sg', '')),
+                'peaks': peaks,
+            })
+    if not entries:
+        raise ValueError("Library contains no patterns.")
+    return {'path': path, 'entries': entries}
+
+
+def cod_fetch_cif(cod_id, timeout=30, retries=3, ua=COD_UA):
+    """Download CIF text for a COD id from crystallography.net."""
+    url = COD_CIF_URL.format(cid=cod_id)
+    last = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": ua})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8", errors="ignore")
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+            last = e
+    raise RuntimeError(f"Could not fetch COD {cod_id}: {last}")
+
+
+def _cod_structure_from_cif(cif_text):
+    """Parse a CIF string tolerantly and quietly. Many COD entries are
+    disordered / partially occupied; the default parser rejects them
+    (occupancy > tolerance). A generous occupancy tolerance salvages most,
+    and warnings are suppressed so they don't flood the console."""
+    from pymatgen.io.cif import CifParser
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            parser = CifParser.from_str(cif_text, occupancy_tolerance=100.0, site_tolerance=1e-4)
+        except AttributeError:  # older pymatgen
+            parser = CifParser.from_string(cif_text, occupancy_tolerance=100.0)
+        structures = parser.parse_structures(primitive=False)
+    if not structures:
+        raise ValueError("no parseable structure in CIF")
+    return structures[0]
+
+
+def cod_pattern_from_cif(cif_text, wavelength="CuKa", xmin=5.0, xmax=90.0,
+                         step=SYNTH_STEP, sigma=SYNTH_SIGMA):
+    """CIF text -> (x, y, peaks): a broadened profile plus reflection 2-theta list."""
+    if not PYMATGEN_AVAILABLE:
+        raise ImportError("Live COD simulation needs pymatgen (pip install pymatgen).")
+    structure = _cod_structure_from_cif(cif_text)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        calc = XRDCalculator(wavelength=wavelength)
+        pat = calc.get_pattern(structure, two_theta_range=(xmin, xmax))
+    px = np.asarray(pat.x, dtype=float)
+    py = np.asarray(pat.y, dtype=float)
+    x = np.arange(xmin, xmax + step, step)
+    y = np.zeros_like(x)
+    for c, h in zip(px, py):
+        y += h * np.exp(-((x - c) / sigma) ** 2)
+    if y.max() > 0:
+        y = y / y.max() * 100.0
+    return x, y, px
+
+
+def cod_db3_search(db3_path, query, limit=500):
+    """Search a Profex COD SQLite index. Returns candidate rows (dicts).
+    Matches the query across mineral / chemical / common names and formula."""
+    if not os.path.exists(db3_path):
+        raise FileNotFoundError(db3_path)
+    con = sqlite3.connect(db3_path)
+    con.row_factory = sqlite3.Row
+    q = (query or "").strip()
+    cols = ("file, sg, sgNumber, formula, calcformula, mineral, "
+            "chemname, commonname, Z")
+    if q:
+        like = f"%{q}%"
+        sql = (f"SELECT {cols} FROM data WHERE mineral LIKE ? OR chemname LIKE ? "
+               f"OR commonname LIKE ? OR formula LIKE ? OR calcformula LIKE ? "
+               f"ORDER BY file LIMIT ?")
+        rows = con.execute(sql, (like, like, like, like, like, limit)).fetchall()
+    else:
+        rows = con.execute(f"SELECT {cols} FROM data ORDER BY file LIMIT ?",
+                           (limit,)).fetchall()
+    con.close()
+
+    def dispname(r):
+        for k in ("mineral", "commonname", "chemname"):
+            v = r[k]
+            if v and str(v) not in ("\\N", ""):
+                return str(v)
+        f = r["calcformula"] or r["formula"]
+        return (str(f).replace("-", " ").strip() if f else f"COD {r['file']}")
+
+    out = []
+    for r in rows:
+        out.append({
+            'source': 'db3',
+            'file': r['file'],
+            'id': str(r['file']),
+            'name': dispname(r),
+            'formula': (str(r['calcformula'] or r['formula'] or '')
+                        .replace('-', ' ').strip()),
+            'sg': str(r['sg'] or ''),
+            'url': cod_url(r['file']),
+        })
+    return out
+
+
+# ==========================================
 # PARSING ENGINE CORE LOGIC
 # ==========================================
 
@@ -395,6 +560,11 @@ class XRDPlotterGUI:
         self.rruff_lib = None
         self.rruff_local_dir = None
         self.rruff_search_hits = []
+        # COD (Crystallography Open Database) sources
+        self.cod_lib = None            # loaded baked .h5 library
+        self.cod_db3_path = None       # loaded Profex db3 search index
+        self.cod_source = None         # 'h5' or 'db3' (most recent source)
+        self.cod_search_hits = []
         self.guess_lines_artists = []
         self.fitted_curves_artists = []
         self.target_checkbox_vars = {} 
@@ -404,10 +574,49 @@ class XRDPlotterGUI:
         self.normalization_mode_active = False
         self.cursor_line = None  
         
-        # --- Left Sidebar Panel Layout ---
-        sidebar_frame = ttk.Frame(root, padding=12, relief="flat")
-        sidebar_frame.pack(side="left", fill="y", padx=5, pady=5)
-        
+        # --- Left Sidebar Panel Layout (scrollable) ---
+        # The sidebar hosts many panels (tools, Materials Project, COD, RRUFF,
+        # layers). Wrap it in a Canvas + Scrollbar so it scrolls when the window
+        # is shorter than the controls, instead of clipping the bottom items.
+        sidebar_container = ttk.Frame(root)
+        sidebar_container.pack(side="left", fill="y", padx=5, pady=5)
+        sidebar_canvas = tk.Canvas(sidebar_container, borderwidth=0, highlightthickness=0, width=300)
+        sidebar_vscroll = ttk.Scrollbar(sidebar_container, orient="vertical", command=sidebar_canvas.yview)
+        sidebar_canvas.configure(yscrollcommand=sidebar_vscroll.set)
+        sidebar_vscroll.pack(side="right", fill="y")
+        sidebar_canvas.pack(side="left", fill="both", expand=True)
+
+        sidebar_frame = ttk.Frame(sidebar_canvas, padding=12, relief="flat")
+        _sb_window = sidebar_canvas.create_window((0, 0), window=sidebar_frame, anchor="nw")
+
+        def _sb_on_frame_config(event):
+            sidebar_canvas.configure(scrollregion=sidebar_canvas.bbox("all"))
+        sidebar_frame.bind("<Configure>", _sb_on_frame_config)
+
+        def _sb_on_canvas_config(event):
+            sidebar_canvas.itemconfigure(_sb_window, width=event.width)
+        sidebar_canvas.bind("<Configure>", _sb_on_canvas_config)
+
+        def _sb_on_mousewheel(event):
+            if event.num == 4:
+                sidebar_canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                sidebar_canvas.yview_scroll(1, "units")
+            else:
+                sidebar_canvas.yview_scroll(int(-1 * (event.delta / 120)) or (-1 if event.delta > 0 else 1), "units")
+
+        def _sb_bind_wheel(_):
+            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                sidebar_canvas.bind_all(seq, _sb_on_mousewheel)
+
+        def _sb_unbind_wheel(_):
+            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                sidebar_canvas.unbind_all(seq)
+        # Only capture the wheel while the pointer is over the sidebar, so it
+        # doesn't interfere with the plot area.
+        sidebar_container.bind("<Enter>", _sb_bind_wheel)
+        sidebar_container.bind("<Leave>", _sb_unbind_wheel)
+
         ttk.Label(sidebar_frame, text="🔬 XRD Data Analyzer", font=("Helvetica", 12, "bold")).pack(side="top", anchor="w", pady=(0, 10))
         
         ttk.Button(sidebar_frame, text="📁 Select File(s)", command=self.select_and_plot_files).pack(side="top", fill="x", pady=3)
@@ -498,6 +707,31 @@ class XRDPlotterGUI:
         
         btn_search_match = ttk.Button(panel_search, text="🎯 Search/Match by Peaks", command=lambda: self.execute_database_search(mode="peaks"))
         btn_search_match.pack(fill="x", pady=2)
+
+        # --- COD (Crystallography Open Database) Panel ---
+        panel_cod = ttk.LabelFrame(sidebar_frame, text=" 🌐 COD (Crystallography Open DB) ", padding=(8, 6))
+        panel_cod.pack(side="top", fill="x", pady=5)
+        ttk.Button(panel_cod, text="🗂️ Open COD Source…", command=self.cod_open).pack(fill="x")
+        cod_search = ttk.Frame(panel_cod)
+        cod_search.pack(fill="x", pady=(4, 2))
+        self.ent_cod_query = ttk.Entry(cod_search)
+        self.ent_cod_query.pack(side="left", fill="x", expand=True)
+        self.ent_cod_query.bind("<Return>", lambda e: self.cod_run_search())
+        ttk.Button(cod_search, text="🔍", width=3, command=self.cod_run_search).pack(side="right", padx=(3, 0))
+        self.cod_results_list = tk.Listbox(panel_cod, height=3, exportselection=False)
+        self.cod_results_list.pack(fill="x", pady=(0, 3))
+        self.cod_results_list.bind("<Double-1>", self._cod_open_selected_page)
+        ttk.Button(panel_cod, text="➕ Overlay Selected", command=self.cod_overlay_selected).pack(fill="x", pady=(0, 2))
+        cod_tol = ttk.Frame(panel_cod)
+        cod_tol.pack(fill="x")
+        ttk.Label(cod_tol, text="Match tol. ±", font=("Helvetica", 8, "bold")).pack(side="left")
+        self.ent_cod_tol = ttk.Entry(cod_tol, width=5)
+        self.ent_cod_tol.insert(0, "0.2")
+        self.ent_cod_tol.pack(side="left", padx=(2, 1))
+        ttk.Label(cod_tol, text="°2θ", font=("Helvetica", 8)).pack(side="left")
+        ttk.Button(panel_cod, text="🎯 Match by Selected Peaks (COD)", command=self.cod_match_by_peaks).pack(fill="x", pady=(2, 2))
+        self.cod_status_var = tk.StringVar(value="COD: open a baked .h5 library, or load a Profex db3 for live search.")
+        ttk.Label(panel_cod, textvariable=self.cod_status_var, font=("Helvetica", 8), foreground="#555555", wraplength=250).pack(anchor="w")
 
         # --- RRUFF (powder) Reference Database Panel ---
         panel_rruff = ttk.LabelFrame(sidebar_frame, text=" 💎 RRUFF (powder) ", padding=(8, 6))
@@ -686,7 +920,12 @@ class XRDPlotterGUI:
                 cb = ttk.Checkbutton(row_frame, text=data['label'], variable=self.target_checkbox_vars[key])
                 cb.pack(side="left", anchor="w")
             else:
-                url = rruff_url(data.get('rruff_name'), data.get('rruff_id'), data.get('rruff_url')) if key.startswith("__ref_rruff_") else None
+                if key.startswith("__ref_rruff_"):
+                    url = rruff_url(data.get('rruff_name'), data.get('rruff_id'), data.get('rruff_url'))
+                elif key.startswith("__ref_cod_"):
+                    url = data.get('rruff_url')  # COD page URL stored here
+                else:
+                    url = None
                 if url:
                     lbl = ttk.Label(row_frame, text=data['label'], font=("Helvetica", 9, "underline"),
                                     foreground="#0d6efd", cursor="hand2")
@@ -1498,6 +1737,378 @@ class XRDPlotterGUI:
 
         btn_row = ttk.Frame(pop); btn_row.pack(pady=8)
         ttk.Button(btn_row, text="🔗 Open RRUFF Page(s)", command=open_pages).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="➕ Overlay Selected Match(es)", command=overlay_chosen).pack(side="left", padx=4)
+
+    # ==========================================
+    # COD (Crystallography Open Database) methods
+    # ==========================================
+    def cod_open(self):
+        """Single COD entry point. Choose the working mode:
+          • Browse all of COD via the Profex db3 index, fetching + simulating
+            patterns online (needs pymatgen + network); or
+          • Load a local baked .h5 library and work fully offline.
+        The .h5 upload is offered right here when that mode is chosen."""
+        pop = tk.Toplevel(self.root)
+        pop.title("Open COD Reference Source")
+        pop.geometry("460x250")
+        pop.transient(self.root); pop.grab_set()
+        ttk.Label(pop, text="How would you like to use the Crystallography Open Database?",
+                  font=("Helvetica", 10, "bold"), wraplength=420).pack(padx=14, pady=(14, 8), anchor="w")
+
+        f1 = ttk.Frame(pop, padding=10, relief="groove"); f1.pack(fill="x", padx=12, pady=6)
+        ttk.Label(f1, text="🌐  Search all of COD (db3 index) — fetch & simulate patterns online",
+                  font=("Helvetica", 9, "bold"), wraplength=410).pack(anchor="w")
+        note = "" if PYMATGEN_AVAILABLE else "   (install pymatgen first)"
+        ttk.Button(f1, text="Choose db3 index…" + note,
+                   command=lambda: (pop.destroy(), self.cod_open_db3())).pack(fill="x", pady=(6, 0))
+
+        f2 = ttk.Frame(pop, padding=10, relief="groove"); f2.pack(fill="x", padx=12, pady=6)
+        ttk.Label(f2, text="📚  Use a local baked .h5 library — fully offline",
+                  font=("Helvetica", 9, "bold"), wraplength=410).pack(anchor="w")
+        ttk.Button(f2, text="Choose .h5 library…",
+                   command=lambda: (pop.destroy(), self.cod_open_library())).pack(fill="x", pady=(6, 0))
+
+    def cod_open_library(self):
+        """Load a baked COD powder .h5 (offline; overlays with real intensities)."""
+        path = filedialog.askopenfilename(
+            title="Open a COD powder .h5 library (from build_cod_powder_library.py)",
+            filetypes=[("COD powder library", ("*.h5", "*.hdf5")), ("All Files", "*.*")])
+        if not path:
+            return
+        try:
+            self.cod_lib = load_cod_powder_h5_library(path)
+        except Exception as e:
+            messagebox.showerror("Library Error", f"Could not open COD library:\n{e}")
+            return
+        self.cod_source = 'h5'
+        self.cod_status_var.set(
+            f"COD .h5: {len(self.cod_lib['entries'])} pattern(s) loaded (offline). Search / Overlay / Match.")
+
+    def cod_open_db3(self):
+        """Load a Profex COD SQLite index for live search + on-demand simulation."""
+        path = filedialog.askopenfilename(
+            title="Load a Profex COD SQLite index (cod-*.db3)",
+            filetypes=[("COD SQLite index", ("*.db3", "*.db", "*.sqlite")), ("All Files", "*.*")])
+        if not path:
+            return
+        try:
+            con = sqlite3.connect(path)
+            n = con.execute("SELECT COUNT(*) FROM data").fetchone()[0]
+            con.close()
+        except Exception as e:
+            messagebox.showerror("db3 Error", f"Not a readable COD index:\n{e}")
+            return
+        self.cod_db3_path = path
+        self.cod_source = 'db3'
+        note = "" if PYMATGEN_AVAILABLE else "  (install pymatgen to overlay live patterns)"
+        self.cod_status_var.set(f"COD db3: {n:,} entries. Search, then Overlay to fetch + simulate.{note}")
+
+    def _cod_candidates(self, query=""):
+        """Return candidate hit dicts from the active COD source."""
+        if self.cod_source == 'h5' and self.cod_lib:
+            q = (query or "").strip().lower()
+            out = []
+            for e in self.cod_lib['entries']:
+                hay = f"{e['name']} {e['id']} {e.get('formula','')}".lower()
+                if not q or q in hay:
+                    rec = dict(e); rec['source'] = 'h5'
+                    out.append(rec)
+            return out
+        if self.cod_source == 'db3' and self.cod_db3_path:
+            return cod_db3_search(self.cod_db3_path, query, limit=500)
+        return []
+
+    def cod_run_search(self):
+        self.cod_results_list.delete(0, tk.END)
+        self.cod_search_hits = []
+        if not self.cod_lib and not self.cod_db3_path:
+            messagebox.showinfo("No COD Source", "Open a COD .h5 library or load a Profex db3 first.")
+            return
+        try:
+            hits = self._cod_candidates(self.ent_cod_query.get())
+        except Exception as e:
+            messagebox.showerror("Search Error", str(e))
+            return
+        if not hits:
+            self.cod_status_var.set("COD: no matches.")
+            return
+        self.cod_search_hits = hits[:500]
+        for h in self.cod_search_hits:
+            extra = h.get('formula') or h.get('sg') or ''
+            self.cod_results_list.insert(tk.END, f"{h['name']} · {h['id']}" + (f" · {extra}" if extra else ""))
+        src = "db3 (live)" if self.cod_source == 'db3' else ".h5 (offline)"
+        self.cod_status_var.set(f"COD {src}: {len(hits)} match(es)" + (" (first 500)." if len(hits) > 500 else "."))
+
+    def _cod_open_selected_page(self, event=None):
+        for idx in self.cod_results_list.curselection():
+            if idx < len(self.cod_search_hits):
+                url = self.cod_search_hits[idx].get('url') or cod_url(self.cod_search_hits[idx].get('id'))
+                if url:
+                    webbrowser.open_new_tab(url)
+
+    def _cod_add_overlay(self, x, y, name, cod_id, url, idx):
+        label = f"COD: {name} ({cod_id})"
+        key = f"__ref_cod_{cod_id}_{idx}"
+        self._rruff_add_reference(x, y, label, key, name=name, rid=cod_id, url=url)
+
+    # ---- lightweight progress dialog for network/simulation work ----
+    def _busy_open(self, title, total):
+        self._busy = tk.Toplevel(self.root)
+        self._busy.title(title)
+        self._busy.geometry("380x120")
+        self._busy.transient(self.root)
+        self._busy.resizable(False, False)
+        try:
+            self._busy.grab_set()
+        except Exception:
+            pass
+        self._busy_lbl = ttk.Label(self._busy, text="Starting…", font=("Helvetica", 9), wraplength=350)
+        self._busy_lbl.pack(padx=16, pady=(18, 8), anchor="w")
+        self._busy_bar = ttk.Progressbar(self._busy, orient="horizontal", mode="determinate",
+                                         maximum=max(1, total), length=348)
+        self._busy_bar.pack(padx=16, pady=(0, 12))
+        self._busy.update_idletasks()
+
+    def _busy_update(self, done, total, msg):
+        if getattr(self, "_busy", None) is None:
+            return
+        try:
+            self._busy_bar['value'] = done
+            self._busy_lbl.config(text=msg)
+        except Exception:
+            pass
+
+    def _busy_close(self):
+        b = getattr(self, "_busy", None)
+        if b is not None:
+            try:
+                b.grab_release()
+            except Exception:
+                pass
+            try:
+                b.destroy()
+            except Exception:
+                pass
+            self._busy = None
+
+    def cod_overlay_selected(self):
+        sel = self.cod_results_list.curselection()
+        if not sel or not self.cod_search_hits:
+            messagebox.showinfo("Nothing Selected", "Search, then select a COD entry to overlay.")
+            return
+        chosen = [self.cod_search_hits[i] for i in sel if i < len(self.cod_search_hits)]
+
+        # Offline .h5 entries -> read stored profile directly.
+        if self.cod_source == 'h5':
+            self.save_to_history()
+            added = 0
+            for idx, hit in zip(sel, chosen):
+                try:
+                    with h5py.File(self.cod_lib['path'], 'r') as f:
+                        g = f['spectra'][hit['group']]
+                        x = np.array(g['x'][:], dtype=float)
+                        y = np.array(g['y'][:], dtype=float)
+                    if len(x) == 0:
+                        continue
+                    self._cod_add_overlay(x, y, hit['name'], hit['id'], hit.get('url'), idx)
+                    added += 1
+                except Exception:
+                    continue
+            if added:
+                self.replot_and_refresh_canvas()
+                self.cod_status_var.set(f"COD: overlaid {added} reference(s) from .h5.")
+            return
+
+        # Live db3 entries -> fetch CIF + simulate with pymatgen (in a worker thread).
+        if not PYMATGEN_AVAILABLE:
+            messagebox.showinfo("pymatgen Required",
+                                "Live COD overlays simulate the pattern from the CIF.\n"
+                                "Install it with:\n\npip install pymatgen")
+            return
+        xmin, xmax = self.ax.get_xlim()
+        if xmin >= xmax or xmin < 0:
+            xmin, xmax = 5.0, 90.0
+        total = len(chosen)
+        self.cod_status_var.set(f"COD: fetching + simulating {total} pattern(s)...")
+        self._busy_open("Fetching COD patterns", total)
+
+        def worker():
+            results = []
+            for n, (idx, hit) in enumerate(zip(sel, chosen), 1):
+                self.root.after(0, lambda n=n, hit=hit: self._busy_update(
+                    n - 1, total, f"Fetching + simulating {hit['name']} ({hit['id']}) — {n}/{total}"))
+                try:
+                    cif = cod_fetch_cif(hit['id'])
+                    x, y, _pk = cod_pattern_from_cif(cif, "CuKa", xmin, xmax)
+                    results.append((idx, hit, x, y))
+                except Exception as e:
+                    results.append((idx, hit, None, str(e)))
+            self.root.after(0, lambda: (self._busy_close(), self._cod_finish_live_overlay(results)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _cod_finish_live_overlay(self, results):
+        good = [r for r in results if r[2] is not None]
+        if good:
+            self.save_to_history()
+        added = 0
+        errors = []
+        for idx, hit, x, y in results:
+            if x is None:
+                errors.append(f"{hit['name']} ({hit['id']}): {y}")
+                continue
+            self._cod_add_overlay(x, y, hit['name'], hit['id'], hit.get('url'), idx)
+            added += 1
+        if added:
+            self.replot_and_refresh_canvas()
+        self.cod_status_var.set(f"COD: overlaid {added} simulated pattern(s)."
+                                + (f" {len(errors)} failed." if errors else ""))
+        if errors:
+            messagebox.showwarning("Some COD Entries Failed", "\n".join(errors[:10]))
+
+    def cod_match_by_peaks(self):
+        """Rank COD references by alignment with the marked peaks.
+        Offline (.h5): matches against the whole library instantly.
+        Online (db3): first run a search to narrow candidates, then this fetches
+        those CIFs, simulates them, and ranks — so db3 mode needs no .h5."""
+        if not self.peak_guesses:
+            messagebox.showinfo("Mark Peaks First",
+                                "Turn on '🎯 Peak Selection', right-click on the plot to mark peaks, then Match.")
+            return
+        try:
+            tolerance = float(self.ent_cod_tol.get().strip())
+        except ValueError:
+            tolerance = 0.2
+        exp = list(self.peak_guesses)
+
+        # ---- Offline .h5 library: match all entries by their stored peaks ----
+        if self.cod_source == 'h5' and self.cod_lib:
+            candidates = self._cod_candidates(self.ent_cod_query.get())
+            if not candidates:
+                messagebox.showinfo("No Candidates", "No COD references to match (check the search filter).")
+                return
+            scored = []
+            for hit in candidates:
+                peaks = hit.get('peaks')
+                if peaks is None or len(peaks) == 0:
+                    continue
+                score, avg, matched = peak_match_score(peaks, exp, tolerance)
+                if matched > 0:
+                    rec = dict(hit); rec.update({'score': score, 'avg': avg, 'matched': matched})
+                    scored.append(rec)
+            scored.sort(key=lambda t: (-t['score'], t['avg']))
+            self._show_cod_match_results(scored[:100], len(exp), tolerance)
+            return
+
+        # ---- Online db3 mode: fetch + simulate the current search hits ----
+        if self.cod_source == 'db3' and self.cod_db3_path:
+            if not PYMATGEN_AVAILABLE:
+                messagebox.showinfo("pymatgen Required",
+                                    "Matching COD online simulates each candidate's pattern.\n\npip install pymatgen")
+                return
+            hits = list(self.cod_search_hits)
+            if not hits:
+                messagebox.showinfo("Search First",
+                                    "For online (db3) matching, run a search first to narrow the\n"
+                                    "candidates. Match then fetches those CIFs and ranks them.\n\n"
+                                    "(Load a baked .h5 to match a whole library offline instead.)")
+                return
+            cap = 60
+            hits = hits[:cap]
+            total = len(hits)
+            self.cod_status_var.set(f"COD: fetching + simulating {total} candidate(s) to match...")
+            self._busy_open("Matching COD candidates", total)
+
+            def worker():
+                scored = []
+                for i, hit in enumerate(hits, 1):
+                    self.root.after(0, lambda i=i, hit=hit: self._busy_update(
+                        i - 1, total, f"Fetching + simulating {hit['name']} ({hit['id']}) — {i}/{total}"))
+                    try:
+                        cif = cod_fetch_cif(hit['id'])
+                        x, y, peaks = cod_pattern_from_cif(cif, "CuKa", 5, 90)
+                        score, avg, matched = peak_match_score(peaks, exp, tolerance)
+                        if matched > 0:
+                            rec = dict(hit)
+                            rec.update({'score': score, 'avg': avg, 'matched': matched,
+                                        'x': x, 'y': y, 'peaks': peaks})
+                            scored.append(rec)
+                    except Exception:
+                        pass
+                scored.sort(key=lambda t: (-t['score'], t['avg']))
+                self.root.after(0, lambda: (self._busy_close(),
+                                            self._show_cod_match_results(scored[:100], len(exp), tolerance)))
+
+            threading.Thread(target=worker, daemon=True).start()
+            return
+
+        messagebox.showinfo("No COD Source",
+                            "Open a COD source first (🗂️ Open COD Source…):\n"
+                            "a db3 index for online matching, or a baked .h5 for offline.")
+
+    def _show_cod_match_results(self, scored, n_exp, tolerance):
+        if not scored:
+            self.cod_status_var.set("COD: no references matched the marked peaks.")
+            messagebox.showinfo("No Matches", "No COD reference had reflections near your marked peaks.\nTry a larger tolerance.")
+            return
+        self.cod_status_var.set(f"COD: {len(scored)} candidate(s) ranked (tol ±{tolerance:g}°).")
+        pop = tk.Toplevel(self.root)
+        pop.title("COD Powder — Search & Match")
+        pop.geometry("680x340")
+        pop.transient(self.root); pop.grab_set()
+        ttk.Label(pop, text=f"Ranked by alignment of COD reflections with your {n_exp} marked peak(s) "
+                            f"(±{tolerance:g}°). Double-click a row to open its COD page.",
+                  font=("Helvetica", 9, "bold")).pack(pady=6, padx=8, anchor="w")
+        frame = ttk.Frame(pop)
+        frame.pack(fill="both", expand=True, padx=8, pady=4)
+        scroll = ttk.Scrollbar(frame); scroll.pack(side="right", fill="y")
+        tree = ttk.Treeview(frame, columns=("Score", "Name", "Formula", "ID", "Matched"), show="headings",
+                            yscrollcommand=scroll.set, height=10, selectmode="extended")
+        for c, t, w in (("Score", "Match Score", 90), ("Name", "Name", 210), ("Formula", "Formula", 120),
+                        ("ID", "COD ID", 90), ("Matched", "Peaks Matched", 110)):
+            tree.heading(c, text=t); tree.column(c, width=w, anchor=("w" if c in ("Name", "Formula") else "center"))
+        tree.pack(fill="both", expand=True); scroll.config(command=tree.yview)
+        row_map = {}
+        for rec in scored:
+            iid = tree.insert("", "end", values=(f"{rec['score']:.0f}%", rec['name'], rec.get('formula', ''),
+                                                 rec['id'], f"{rec['matched']}/{n_exp}"))
+            row_map[iid] = rec
+
+        def open_pages(event=None):
+            for iid in tree.selection():
+                rec = row_map.get(iid)
+                if rec and (rec.get('url') or cod_url(rec.get('id'))):
+                    webbrowser.open_new_tab(rec.get('url') or cod_url(rec.get('id')))
+        tree.bind("<Double-1>", open_pages)
+
+        def overlay_chosen():
+            sel = tree.selection()
+            if not sel:
+                return
+            pop.destroy(); self.save_to_history(); added = 0
+            for n, iid in enumerate(sel):
+                hit = row_map[iid]
+                try:
+                    if hit.get('x') is not None:          # online match carries the simulated pattern
+                        x = np.asarray(hit['x'], dtype=float)
+                        y = np.asarray(hit['y'], dtype=float)
+                    else:                                  # offline .h5 match: read stored profile
+                        with h5py.File(self.cod_lib['path'], 'r') as f:
+                            g = f['spectra'][hit['group']]
+                            x = np.array(g['x'][:], dtype=float)
+                            y = np.array(g['y'][:], dtype=float)
+                    if len(x) == 0:
+                        continue
+                    self._cod_add_overlay(x, y, hit['name'], hit['id'], hit.get('url'), f"m{n}")
+                    added += 1
+                except Exception:
+                    continue
+            if added:
+                self.replot_and_refresh_canvas()
+                self.cod_status_var.set(f"COD: overlaid {added} matched reference(s).")
+
+        btn_row = ttk.Frame(pop); btn_row.pack(pady=8)
+        ttk.Button(btn_row, text="🔗 Open COD Page(s)", command=open_pages).pack(side="left", padx=4)
         ttk.Button(btn_row, text="➕ Overlay Selected Match(es)", command=overlay_chosen).pack(side="left", padx=4)
 
     def clear_canvas(self):

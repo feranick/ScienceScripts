@@ -10,6 +10,7 @@ Collection of Scripts for Handling Scientific Data
     - Curve normalization to peak
     - Cropping to view
     - Search of theoretical xrd based on formula or peak selection via Materials Genome (python version only).
+    - Search of theoretical xrd based on formula or peak selection via [Chrystallographic Open Database](https://www.crystallography.net/cod/).
     - Search of experimental xrd minerals based on peak selection [Rruff](https://www.rruff.net/zipped_data_files/powder/).
     - Smoothing curves
     - Background subtraction (via regularization or through reference diffractogram).

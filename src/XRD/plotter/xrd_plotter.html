@@ -67,6 +67,20 @@
         #rruff-panel.lib-loaded #rruff-search-group { order: 2; }
         #rruff-panel.lib-loaded #rruff-load-group { order: 3; }
         #rruff-panel.lib-loaded #rruff-status { order: 4; }
+        /* COD panel: same reorder behaviour when a library is loaded. */
+        #cod-panel > label { order: -1; }
+        #cod-intro { order: 0; }
+        #cod-loaded-note { display: none; order: 0; font-size: 0.82rem; font-weight: bold; color: #084298; background: #cfe2ff; border: 1px solid #b6d4fe; border-radius: 6px; padding: 6px 8px; }
+        #cod-load-group { order: 1; }
+        #cod-search-group { order: 2; }
+        #cod-match-group { order: 3; }
+        #cod-status { order: 4; }
+        #cod-panel.lib-loaded #cod-intro { display: none; }
+        #cod-panel.lib-loaded #cod-loaded-note { display: block; }
+        #cod-panel.lib-loaded #cod-match-group { order: 1; }
+        #cod-panel.lib-loaded #cod-search-group { order: 2; }
+        #cod-panel.lib-loaded #cod-load-group { order: 3; }
+        #cod-panel.lib-loaded #cod-status { order: 4; }
         h2 { margin-top: 0; font-size: 1.15rem; color: #212529; border-bottom: 2px solid #0d6efd; padding-bottom: 8px; margin-bottom: 2px; }
         .info-text { font-size: 0.85rem; color: #6c757d; line-height: 1.4; margin-bottom: 2px; }
         .upload-btn-wrapper { position: relative; overflow: hidden; display: inline-block; width: 100%; }
@@ -125,7 +139,12 @@
 </head>
 <body>
 
-    <div id="init-banner" style="display:none; position:fixed; top:14px; left:50%; transform:translateX(-50%); z-index:2000; background:#0d6efd; color:#fff; padding:10px 18px; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.25); font-size:0.9rem; font-weight:bold;">⏳ Initializing RRUFF library…</div>
+    <div id="init-banner" style="display:none; position:fixed; top:14px; left:50%; transform:translateX(-50%); z-index:2000; background:#0d6efd; color:#fff; padding:10px 18px; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.25); font-size:0.9rem; font-weight:bold; min-width:260px; text-align:center;">
+        <span id="init-banner-msg">⏳ Working…</span>
+        <div id="init-banner-track" style="display:none; margin-top:8px; height:6px; background:rgba(255,255,255,0.3); border-radius:4px; overflow:hidden;">
+            <div id="init-banner-fill" style="height:100%; width:0%; background:#fff; border-radius:4px; transition:width 0.15s ease;"></div>
+        </div>
+    </div>
 
     <div id="sidebar">
         <h2>🔬 XRD Data Analyzer</h2>
@@ -173,6 +192,38 @@
         </div>
         
         <div class="status-badge" id="status-display">Active profiles loaded: 0</div>
+
+        <div class="rruff-panel" id="cod-panel" style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 6px;">
+            <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">🌐 COD (Crystallography Open DB)</label>
+            <p class="info-text" id="cod-intro" style="margin: 0;">Open a baked COD powder .h5 library (from build_cod_powder_library.py) to search, overlay, and match — fully offline.</p>
+            <div id="cod-loaded-note">✅ Library loaded</div>
+
+            <div id="cod-match-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <div style="display: flex; align-items: center; gap: 6px;">
+                    <span style="font-size: 0.8rem; font-weight: bold; color:#495057;">Match tol. ±</span>
+                    <input type="number" id="cod-match-tol" value="0.2" step="0.05" min="0.01" style="width: 56px; padding: 6px; border: 1px solid #ced4da; border-radius: 6px;">
+                    <span style="font-size: 0.8rem; color:#495057;">°2θ</span>
+                </div>
+                <button class="btn-fit-toggle" style="background-color:#0d6efd;" onclick="codMatchByPeaks()">🎯 Match by Selected Peaks (COD)</button>
+            </div>
+
+            <div id="cod-search-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <div style="display: flex; gap: 6px;">
+                    <input type="text" id="cod-query" placeholder="name or formula (e.g. Quartz, TiO2)" style="flex-grow: 1; padding: 8px; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.82rem;">
+                    <button class="btn-crop" style="width: auto; padding: 8px 10px;" onclick="codSearch()">🔍</button>
+                </div>
+                <select id="cod-results" size="4" style="width: 100%; border: 1px solid #ced4da; border-radius: 6px; font-size: 0.8rem; padding: 4px;"></select>
+                <button class="btn-ref-sub" onclick="codOverlaySelected()">➕ Overlay Selected Reference</button>
+            </div>
+
+            <div id="cod-load-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <label class="btn-crop" for="cod-h5" style="text-align: center; cursor: pointer;">📚 Open COD .h5 Library</label>
+                <input type="file" id="cod-h5" accept=".h5,.hdf5" style="display:none;" onchange="loadCodLibrary(event)">
+                <button class="btn-crop" style="font-size: 0.72rem; padding: 5px;" onclick="forgetSavedCodLibrary()">🗑 Forget saved COD library</button>
+            </div>
+
+            <div id="cod-status" style="font-size: 0.78rem; color: #6c757d;">Open a COD .h5 library. To match: turn on Peak Selection, right-click to mark peaks, then Match.</div>
+        </div>
 
         <div class="rruff-panel" id="rruff-panel" style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 6px;">
             <label style="font-weight: bold; font-size: 0.88rem; color:#495057;">💎 RRUFF (powder)</label>
@@ -236,6 +287,18 @@
         </div>
     </div>
 
+    <div id="cod-match-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+        <div style="background: white; padding: 22px; border-radius: 8px; width: 620px; max-height: 82vh; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
+            <h3 style="margin: 0; color: #0d6efd; font-size: 1.1rem;">🌐 COD Powder — Search &amp; Match</h3>
+            <p class="info-text" id="cod-match-subtitle" style="margin: 0;"></p>
+            <div id="cod-match-list" style="width: 100%; max-height: 320px; overflow-y: auto; padding: 6px; border: 1px solid #ced4da; border-radius: 6px; box-sizing: border-box;"></div>
+            <div style="display: flex; justify-content: flex-end; gap: 8px;">
+                <button class="btn-crop" style="width: auto; padding: 8px 14px; margin: 0;" onclick="closeCodMatchModal()">Close</button>
+                <button class="btn-ref-sub" style="width: auto; padding: 8px 14px; margin: 0;" onclick="codOverlayMatches()">➕ Overlay Selected Match(es)</button>
+            </div>
+        </div>
+    </div>
+
     <div id="rruff-match-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
         <div style="background: white; padding: 22px; border-radius: 8px; width: 560px; max-height: 82vh; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
             <h3 style="margin: 0; color: #6f42c1; font-size: 1.1rem;">💎 RRUFF Powder — Search &amp; Match</h3>
@@ -270,7 +333,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "v2026.07.24.1";
+        const VERSION_TAG = "v2026.07.24.4";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -481,11 +544,16 @@
                     leftDiv.appendChild(cb); leftDiv.appendChild(label);
                 } else {
                     const data = persistentDatasets[key];
-                    const url = key.startsWith("__ref_rruff_") ? rruffUrl(data.rruffName, data.rruffId, data.rruffUrl) : null;
+                    let url = null, urlTitle = 'Open reference page';
+                    if (key.startsWith("__ref_rruff_")) {
+                        url = rruffUrl(data.rruffName, data.rruffId, data.rruffUrl); urlTitle = 'Open RRUFF page';
+                    } else if (key.startsWith("__ref_cod_")) {
+                        url = data.rruffUrl || (typeof codUrl === 'function' ? codUrl(data.rruffId) : null); urlTitle = 'Open COD page';
+                    }
                     let el;
                     if (url) {
                         el = document.createElement('a'); el.href = url; el.target = '_blank'; el.rel = 'noopener';
-                        el.title = 'Open RRUFF page'; el.style.color = '#0d6efd'; el.style.textDecoration = 'underline';
+                        el.title = urlTitle; el.style.color = '#0d6efd'; el.style.textDecoration = 'underline';
                     } else {
                         el = document.createElement('span'); el.style.fontStyle = 'italic'; el.style.color = '#555555';
                     }
@@ -1100,11 +1168,29 @@
         }
         function attrToArray(a) { const v = _attrRaw(a); if (v == null) return []; if (ArrayBuffer.isView(v)) return v; if (Array.isArray(v)) return v; return [v]; }
 
-        function showInitBanner(msg) { const b = document.getElementById('init-banner'); if (b) { b.innerText = msg; b.style.display = 'block'; } }
+        // showInitBanner(msg[, frac]) — frac in [0,1] shows a determinate bar;
+        // omit frac for a message-only banner (bar hidden).
+        function showInitBanner(msg, frac) {
+            const b = document.getElementById('init-banner');
+            if (!b) return;
+            const m = document.getElementById('init-banner-msg');
+            const track = document.getElementById('init-banner-track');
+            const fill = document.getElementById('init-banner-fill');
+            if (m) m.innerText = msg;
+            if (track && fill) {
+                if (typeof frac === 'number' && isFinite(frac)) {
+                    track.style.display = 'block';
+                    fill.style.width = Math.max(0, Math.min(100, frac * 100)).toFixed(1) + '%';
+                } else {
+                    track.style.display = 'none';
+                }
+            }
+            b.style.display = 'block';
+        }
         function hideInitBanner() { const b = document.getElementById('init-banner'); if (b) b.style.display = 'none'; }
 
         async function ingestLibraryBytes(arrayBuffer, sourceLabel) {
-            showInitBanner('⏳ Initializing RRUFF library…');
+            showInitBanner('⏳ Initializing RRUFF library…', 0);
             await new Promise(r => setTimeout(r, 0));
             try {
                 const lib = await window.loadH5Wasm();
@@ -1117,6 +1203,7 @@
                     const sp = f.get("spectra");
                     if (!sp) throw new Error("Not a RRUFF powder library (no 'spectra' group).");
                     const names = sp.keys();
+                    const rruffStep = Math.max(1, Math.floor(names.length / 50));  // ~50 progress ticks
                     for (let idx = 0; idx < names.length; idx++) {
                         const g = f.get("spectra/" + names[idx]);
                         if (!g || !g.attrs) continue;
@@ -1130,7 +1217,7 @@
                             x: xds ? Array.from(xds.value) : [],
                             y: yds ? Array.from(yds.value) : []
                         });
-                        if (idx % 300 === 0) { showInitBanner(`⏳ Initializing RRUFF library… (${idx}/${names.length})`); await new Promise(r => setTimeout(r, 0)); }
+                        if (idx % rruffStep === 0) { showInitBanner(`⏳ Initializing RRUFF library… (${idx}/${names.length})`, idx / names.length); await new Promise(r => setTimeout(r, 0)); }
                     }
                 } finally {
                     try { if (f) f.close(); } catch (e) {}
@@ -1214,7 +1301,7 @@
             if (statusEl) statusEl.innerText = "Checking for a library on the server…";
             try {
                 const res = await fetchArrayBufferWithProgress(url, function (recv, total) {
-                    showInitBanner(`⏳ Downloading RRUFF library… ${Math.round(recv / total * 100)}% (${(recv / 1e6).toFixed(1)}/${(total / 1e6).toFixed(1)} MB)`);
+                    showInitBanner(`⏳ Downloading RRUFF library… ${Math.round(recv / total * 100)}% (${(recv / 1e6).toFixed(1)}/${(total / 1e6).toFixed(1)} MB)`, recv / total);
                 }, 60000);
                 if (res.ok) {
                     const sig = new Uint8Array(res.buffer.slice(0, 4));
@@ -1351,8 +1438,199 @@
             if (added) { refreshCheckboxTargetsPanel(); updateChartCanvas(); document.getElementById('rruff-status').innerText = `Overlaid ${added} matched reference(s).`; }
         }
 
+        // ============================================================
+        // COD (Crystallography Open Database) — offline .h5 libraries
+        // built by build_cod_powder_library.py. Same schema as the RRUFF
+        // library (spectra/<id> with x,y datasets + peaks attr) plus
+        // cod_id / url attributes, so overlays carry real intensities.
+        // ============================================================
+        const COD_HOST_LIBRARY_URL = "cod_powder_library.h5";
+        const COD_IDB_KEY = "cod_library_h5";
+        let codHits = [];
+        let codLibrary = [];
+        let codMatchRecords = [];
+
+        function codUrl(id) {
+            if (id === undefined || id === null || id === "" || id === "\\N") return null;
+            return "https://www.crystallography.net/cod/" + id + ".html";
+        }
+
+        // Generic IndexedDB helpers (reuse the existing store, distinct keys).
+        async function idbSaveKey(key, buf) { const db = await idbOpen(); return new Promise((res, rej) => { const tx = db.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).put(buf, key); tx.oncomplete = () => { db.close(); res(); }; tx.onerror = () => rej(tx.error); }); }
+        async function idbLoadKey(key) { const db = await idbOpen(); return new Promise((res, rej) => { const tx = db.transaction(IDB_STORE, "readonly"); const g = tx.objectStore(IDB_STORE).get(key); g.onsuccess = () => { db.close(); res(g.result || null); }; g.onerror = () => rej(g.error); }); }
+        async function idbClearKey(key) { const db = await idbOpen(); return new Promise((res, rej) => { const tx = db.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).delete(key); tx.oncomplete = () => { db.close(); res(); }; tx.onerror = () => rej(tx.error); }); }
+
+        async function ingestCodLibraryBytes(arrayBuffer, sourceLabel) {
+            showInitBanner('⏳ Initializing COD library…', 0);
+            await new Promise(r => setTimeout(r, 0));
+            try {
+                const lib = await window.loadH5Wasm();
+                const h5 = lib.h5, FS = lib.FS;
+                const fsName = `codlib_${Date.now()}.h5`;
+                FS.writeFile(fsName, new Uint8Array(arrayBuffer));
+                let f, out = [];
+                try {
+                    f = new h5.File(fsName, "r");
+                    const sp = f.get("spectra");
+                    if (!sp) throw new Error("Not a COD powder library (no 'spectra' group).");
+                    const names = sp.keys();
+                    const codStep = Math.max(1, Math.floor(names.length / 50));  // ~50 progress ticks
+                    for (let idx = 0; idx < names.length; idx++) {
+                        const g = f.get("spectra/" + names[idx]);
+                        if (!g || !g.attrs) continue;
+                        const xds = f.get("spectra/" + names[idx] + "/x");
+                        const yds = f.get("spectra/" + names[idx] + "/y");
+                        const codId = attrToString(g.attrs["cod_id"]) || names[idx];
+                        out.push({
+                            name: attrToString(g.attrs["name"]) || names[idx],
+                            id: codId,
+                            formula: attrToString(g.attrs["formula"]),
+                            url: attrToString(g.attrs["url"]) || codUrl(codId),
+                            peaks: Array.from(attrToArray(g.attrs["peaks"])),
+                            x: xds ? Array.from(xds.value) : [],
+                            y: yds ? Array.from(yds.value) : []
+                        });
+                        if (idx % codStep === 0) { showInitBanner(`⏳ Initializing COD library… (${idx}/${names.length})`, idx / names.length); await new Promise(r => setTimeout(r, 0)); }
+                    }
+                } finally {
+                    try { if (f) f.close(); } catch (e) {}
+                    try { FS.unlink(fsName); } catch (e) {}
+                }
+                codLibrary = out;
+                document.getElementById('cod-status').innerText = `COD library${sourceLabel ? ' (' + sourceLabel + ')' : ''}: ${out.length} patterns. Search or Match.`;
+                updateCodPanelState();
+                return out.length;
+            } finally { hideInitBanner(); }
+        }
+
+        async function loadCodLibrary(event) {
+            const file = event.target.files && event.target.files[0]; event.target.value = '';
+            if (!file) return;
+            const statusEl = document.getElementById('cod-status');
+            statusEl.innerText = "Loading COD .h5 library ...";
+            try {
+                const buf = await file.arrayBuffer();
+                await ingestCodLibraryBytes(buf, 'opened');
+                try { await idbSaveKey(COD_IDB_KEY, buf); } catch (e) {}
+            } catch (err) { statusEl.innerText = "Could not open COD library: " + err.message; }
+        }
+
+        async function forgetSavedCodLibrary() {
+            try { await idbClearKey(COD_IDB_KEY); } catch (e) {}
+            codLibrary = []; updateCodPanelState();
+            document.getElementById('cod-status').innerText = "Saved COD library cleared. Open an .h5 library (📚).";
+        }
+
+        function updateCodPanelState() {
+            const panel = document.getElementById('cod-panel'); if (!panel) return;
+            const loaded = codLibrary && codLibrary.length;
+            panel.classList.toggle('lib-loaded', !!loaded);
+            const note = document.getElementById('cod-loaded-note');
+            if (note && loaded) note.innerText = `✅ Library loaded — ${codLibrary.length} patterns`;
+        }
+
+        function codSearch() {
+            const q = document.getElementById('cod-query').value.trim();
+            const statusEl = document.getElementById('cod-status');
+            const resultsEl = document.getElementById('cod-results');
+            resultsEl.innerHTML = ""; codHits = [];
+            if (!codLibrary.length) { statusEl.innerText = "No COD library loaded. Use 📚 (.h5) first."; return; }
+            const ql = q.toLowerCase();
+            const hits = codLibrary.filter(e => !ql || (`${e.name} ${e.id} ${e.formula || ''}`).toLowerCase().includes(ql)).slice(0, 300);
+            if (!hits.length) { statusEl.innerText = "No matches."; return; }
+            codHits = hits;
+            hits.forEach((h, i) => { const o = document.createElement('option'); o.value = String(i); o.innerText = `${h.name} · ${h.id}${h.formula ? ' · ' + h.formula : ''}`; resultsEl.appendChild(o); });
+            statusEl.innerText = `${hits.length} match(es)${hits.length === 300 ? ' (first 300)' : ''}. Select and overlay.`;
+        }
+
+        function codRecordToParsed(rec) {
+            // Reuse the rruff* fields: scaleRefToData and the layers panel read them.
+            return { angles: rec.x.slice(), intensities: rec.y.slice(),
+                     label: `COD: ${rec.name} (${rec.id})`,
+                     rruffName: rec.name, rruffId: rec.id, rruffUrl: rec.url || codUrl(rec.id) };
+        }
+
+        function codOverlaySelected() {
+            const resultsEl = document.getElementById('cod-results');
+            const statusEl = document.getElementById('cod-status');
+            const val = resultsEl.value;
+            if (val === '' || !codHits[+val]) { statusEl.innerText = "Select a search result first."; return; }
+            const hit = codHits[+val];
+            if (!hit.x || !hit.x.length) { statusEl.innerText = "That entry has no stored profile."; return; }
+            const parsed = codRecordToParsed(hit);
+            saveToHistory(); scaleRefToData(parsed);
+            persistentDatasets[`__ref_cod_${hit.id}`] = parsed;
+            refreshCheckboxTargetsPanel(); updateChartCanvas();
+            statusEl.innerText = `Overlaid ${hit.name} (${hit.id}).`;
+        }
+
+        function codMatchByPeaks() {
+            const statusEl = document.getElementById('cod-status');
+            if (!peakGuessesX.length) { alert("Mark peaks first: turn on '🎯 Peak Selection', then right-click on the plot to mark peaks."); return; }
+            if (!codLibrary.length) { alert("Open a COD .h5 library (📚) first."); return; }
+            let tol = parseFloat(document.getElementById('cod-match-tol').value); if (isNaN(tol)) tol = 0.2;
+            const q = document.getElementById('cod-query').value.trim().toLowerCase();
+            const exp = peakGuessesX.slice();
+            const scored = [];
+            codLibrary.forEach(e => {
+                if (q && !(`${e.name} ${e.id} ${e.formula || ''}`).toLowerCase().includes(q)) return;
+                if (!e.peaks || !e.peaks.length) return;
+                const s = peakMatchScore(e.peaks, exp, tol);
+                if (s.matched > 0) scored.push({ ...s, name: e.name, id: e.id, formula: e.formula, rec: e });
+            });
+            scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
+            statusEl.innerText = `Matched ${scored.length}/${codLibrary.length} references (tol ±${tol}°).`;
+            showCodMatchResults(scored.slice(0, 100), exp.length, tol);
+        }
+
+        function showCodMatchResults(scored, nExp, tol) {
+            const listEl = document.getElementById('cod-match-list'); listEl.innerHTML = "";
+            if (!scored.length) { alert("No COD reference had reflections near your marked peaks. Try a larger tolerance."); return; }
+            codMatchRecords = scored;
+            document.getElementById('cod-match-subtitle').innerText = `Ranked by alignment of COD reflections with your ${nExp} marked peak(s) (±${tol}°). Tick to overlay; ↗ opens the COD page.`;
+            scored.forEach((s, i) => {
+                const row = document.createElement('div'); row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px'; row.style.padding = '2px 0';
+                const cb = document.createElement('input'); cb.type = 'checkbox'; cb.className = 'cod-match-cb'; cb.value = String(i); cb.id = `cmatch-${i}`;
+                const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.style.flex = '1'; lbl.style.cursor = 'pointer'; lbl.style.fontFamily = "'Consolas', monospace"; lbl.style.fontSize = '0.82rem';
+                lbl.innerText = `${String(Math.round(s.score)).padStart(3, ' ')}%  ${s.matched}/${nExp}  ${s.name} · ${s.id}${s.formula ? '  ' + s.formula : ''}`;
+                row.appendChild(cb); row.appendChild(lbl);
+                const url = (s.rec && s.rec.url) || codUrl(s.id);
+                if (url) { const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener'; a.innerText = '↗'; a.title = 'Open COD page'; a.style.textDecoration = 'none'; a.style.fontSize = '1rem'; a.style.padding = '0 4px'; row.appendChild(a); }
+                listEl.appendChild(row);
+            });
+            document.getElementById('cod-match-modal').style.display = 'flex';
+        }
+
+        function closeCodMatchModal() { document.getElementById('cod-match-modal').style.display = 'none'; }
+
+        function codOverlayMatches() {
+            const chosen = Array.from(document.querySelectorAll('#cod-match-list input.cod-match-cb:checked')).map(cb => +cb.value);
+            if (!chosen.length) { alert("Tick one or more matches to overlay."); return; }
+            closeCodMatchModal(); saveToHistory(); let added = 0;
+            for (const idx of chosen) {
+                const rec = codMatchRecords[idx] && codMatchRecords[idx].rec; if (!rec) continue;
+                try { const parsed = codRecordToParsed(rec); scaleRefToData(parsed); persistentDatasets[`__ref_cod_${rec.id}_match`] = parsed; added++; } catch (e) {}
+            }
+            if (added) { refreshCheckboxTargetsPanel(); updateChartCanvas(); document.getElementById('cod-status').innerText = `Overlaid ${added} matched reference(s).`; }
+        }
+
+        async function tryAutoLoadCodLibrary() {
+            const params = new URLSearchParams(location.search);
+            const url = params.get('codlib') || COD_HOST_LIBRARY_URL;
+            try {
+                const res = await fetchArrayBufferWithProgress(url, function () {}, 60000);
+                if (res.ok) {
+                    const sig = new Uint8Array(res.buffer.slice(0, 4));
+                    if (sig[0] === 0x89 && sig[1] === 0x48 && sig[2] === 0x44 && sig[3] === 0x46) { await ingestCodLibraryBytes(res.buffer, 'from server'); return; }
+                }
+            } catch (e) { /* not hosted / blocked */ }
+            try { const saved = await idbLoadKey(COD_IDB_KEY); if (saved) { await ingestCodLibraryBytes(saved, 'restored'); return; } } catch (e) {}
+        }
+
         // Auto-load a host-provided / previously-saved library (independent of Plotly).
-        window.addEventListener('load', function () { tryAutoLoadLibrary().catch(function () {}); });
+        window.addEventListener('load', function () {
+            tryAutoLoadLibrary().catch(function () {}).then(function () { return tryAutoLoadCodLibrary().catch(function () {}); });
+        });
     </script>
 </body>
 </html>
