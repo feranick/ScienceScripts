@@ -54,8 +54,11 @@ Small builds can fetch CIFs over HTTP on demand (the default; cached in
 impolite to the COD servers — mirror the archive once and build offline:
 
 ```bash
-# one-time: mirror all COD CIFs (~a few GB) — then rebuild any library offline
+# one-time: mirror all COD CIFs (several GB, ~500k files) — then build offline.
+# Create the destination first (rsync won't make nested parents on its own):
+mkdir -p ./cod-cif-mirror/cif
 rsync -av --delete rsync://www.crystallography.net/cif/ ./cod-cif-mirror/cif/
+# (rsync >= 3.2.3 alternative: add --mkpath instead of the mkdir line.)
 ```
 
 Then pass `--mirror ./cod-cif-mirror` and parallelise with `--jobs N`.
