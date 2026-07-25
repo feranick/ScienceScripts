@@ -61,6 +61,19 @@ rsync -av --delete rsync://www.crystallography.net/cif/ ./cod-cif-mirror/cif/
 # (rsync >= 3.2.3 alternative: add --mkpath instead of the mkdir line.)
 ```
 
+rsync is resumable — if it times out mid-run (the tree is ~500k files), just
+re-run; it skips what's already there. For reliability, sync one leading-digit
+bucket at a time inside a retry loop:
+
+```bash
+for d in 1 2 3 4 5 6 7 8 9; do
+  until rsync -a --partial --timeout=600 --contimeout=60 --delete \
+        rsync://www.crystallography.net/cif/$d/ ./cod-cif-mirror/cif/$d/; do
+    echo "  $d stalled — retrying in 30s…"; sleep 30
+  done
+done
+```
+
 Then pass `--mirror ./cod-cif-mirror` and parallelise with `--jobs N`.
 
 ### The three general-purpose libraries
