@@ -290,7 +290,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "v2026.07.25.8";
+        const VERSION_TAG = "v2026.07.25.9";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -1321,7 +1321,8 @@
                         if (!url) continue;
                         found.push({ url,
                                      label: item.label || item.title || item.name || null,
-                                     note: item.note || item.description || item.desc || null });
+                                     note: item.note || item.description || item.desc || null,
+                                     panel: (item.panel || '').toLowerCase() || null });
                     }
                 }
             } catch (e) { /* no manifest */ }
@@ -1455,8 +1456,21 @@
         // The single-library RRUFF panel owns its own file; discovering it here
         // too would load the same spectra twice under the wrong source label.
         function excludeOwnedByOtherPanels(entries) {
-            const owned = new Set([HOST_LIBRARY_URL.split('/').pop().toLowerCase()]);
-            return entries.filter(e => !owned.has(e.url.split('/').pop().toLowerCase()));
+            // The RRUFF panel holds one library of its own. Recognise it by an
+            // explicit "panel": "rruff" in the manifest, by the conventional
+            // filename, or by a filename that simply says rruff — otherwise the
+            // same spectra load twice under the wrong source label.
+            const owned = HOST_LIBRARY_URL.split('/').pop().toLowerCase();
+            return entries.filter(e => {
+                const base = e.url.split('/').pop().toLowerCase();
+                return e.panel !== 'rruff' && base !== owned && !base.includes('rruff');
+            });
+        }
+
+        // The manifest entry the RRUFF panel should use, if it named one.
+        function rruffManifestEntry(entries) {
+            return (entries || []).find(e => e.panel === 'rruff'
+                || e.url.split('/').pop().toLowerCase().includes('rruff')) || null;
         }
 
         const COD_IDB_INDEX_KEY = "cod_lib_index";       // remembers the set of libraries
@@ -1889,15 +1903,26 @@
             } catch (e) { /* no saved library */ }
 
             // 2) Otherwise see whether one is served next to the page, and offer it.
+            //    A libraries.json may name it — tagged "panel": "rruff", or just
+            //    a filename containing "rruff" — which beats guessing.
             const params = new URLSearchParams(location.search);
-            const url = params.get('lib') || HOST_LIBRARY_URL;
+            let url = params.get('lib'), label = null, note = null;
+            if (!url) {
+                try {
+                    const entry = rruffManifestEntry(
+                        await discoverLibraryUrls('__none__', 'libraries.json', HOST_LIBRARY_URL));
+                    if (entry) { url = entry.url; label = entry.label; note = entry.note; }
+                } catch (e) { /* no manifest */ }
+            }
+            if (!url) url = HOST_LIBRARY_URL;
             const size = await headSize(url);
             if (size === null) {
                 if (statusEl) statusEl.innerText =
                     "No server library found. Load a library below, or place rruff_powder_library.h5 next to this page.";
                 return;
             }
-            rruffServerOffer = { url, name: url.split('/').pop(), size, loaded: false, busy: false };
+            rruffServerOffer = { url, name: label || url.split('/').pop(), size,
+                                 note, loaded: false, busy: false };
             renderRruffOffer();
             if (statusEl) statusEl.innerText =
                 "A RRUFF powder library is available on the server \u2014 load it above, or open one below.";
