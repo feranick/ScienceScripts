@@ -290,7 +290,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "v2026.07.25.4";
+        const VERSION_TAG = "v2026.07.25.5";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -1360,15 +1360,74 @@
             return n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`;
         }
 
+        // Probe for a library without downloading it. HEAD is tried first, but a
+        // fair number of static servers and CDNs answer HEAD with 405 or an empty
+        // 200 — in which case the old code concluded "not there" and silently
+        // skipped a library that was sitting right on the server. So fall back to
+        // an 8-byte ranged GET, which also lets us confirm the HDF5 signature and
+        // read the true size from Content-Range. Costs 8 bytes.
+        const HDF5_MAGIC = [0x89, 0x48, 0x44, 0x46, 0x0d, 0x0a, 0x1a, 0x0a];
+
         async function headSize(url) {
             try {
                 const r = await fetch(url, { method: 'HEAD' });
-                if (!r.ok) return null;
-                const ct = (r.headers.get('content-type') || '').toLowerCase();
-                if (ct.includes('text/html')) return null;      // a 404 page, not a file
+                if (r.ok) {
+                    const ct = (r.headers.get('content-type') || '').toLowerCase();
+                    if (!ct.includes('text/html')) {          // an HTML body is a 404 page
+                        const len = r.headers.get('content-length');
+                        if (len) return parseInt(len, 10);
+                        return 0;                             // exists, size unknown
+                    }
+                    return null;
+                }
+            } catch (e) { /* HEAD unsupported or blocked — fall through */ }
+            return rangeProbe(url);
+        }
+
+        // 8-byte ranged GET: confirms the file is really HDF5 and reads its size.
+        async function rangeProbe(url) {
+            try {
+                const r = await fetch(url, { headers: { Range: 'bytes=0-7' } });
+                if (!r.ok) return null;                       // 404 / 403
+                const buf = new Uint8Array(await r.arrayBuffer());
+                if (buf.length >= 8 && !HDF5_MAGIC.every((b, i) => buf[i] === b)) return null;
+                const cr = r.headers.get('content-range');    // "bytes 0-7/2108000000"
+                if (cr) {
+                    const total = parseInt(cr.split('/').pop(), 10);
+                    if (!isNaN(total)) return total;
+                }
                 const len = r.headers.get('content-length');
-                return len ? parseInt(len, 10) : 0;             // 0 = exists, size unknown
+                // no Range support: the server sent the whole file, so that IS the size
+                return len && parseInt(len, 10) > 8 ? parseInt(len, 10) : 0;
             } catch (e) { return null; }
+        }
+
+        // Paste dbDiagnoseDiscovery() into the console when a library you know is
+        // on the server is not being offered. Reports what each step actually saw.
+        async function dbDiagnoseDiscovery() {
+            const names = [HOST_LIBRARY_URL, ...DB_CANDIDATE_LIBRARIES];
+            console.log('%cLibrary discovery diagnosis', 'font-weight:bold');
+            try {
+                const r = await fetch('libraries.json', { cache: 'no-cache' });
+                console.log('libraries.json:', r.ok ? await r.text() : `not found (${r.status})`);
+            } catch (e) { console.log('libraries.json: not found'); }
+            try {
+                const r = await fetch('./', { cache: 'no-cache' });
+                const ct = r.headers.get('content-type') || '';
+                const txt = r.ok && ct.includes('html') ? await r.text() : '';
+                const hrefs = [...txt.matchAll(/href="([^"?#]+\.(?:h5|hdf5))"/gi)].map(m => m[1]);
+                console.log('directory index:', r.ok ? `${ct} — .h5 links: ${hrefs.length ? hrefs.join(', ') : 'none'}` : `no (${r.status})`);
+            } catch (e) { console.log('directory index: not available'); }
+            for (const n of names) {
+                let head = 'n/a', range = 'n/a';
+                try { const r = await fetch(n, { method: 'HEAD' });
+                      head = `${r.status} ${r.headers.get('content-type') || ''} len=${r.headers.get('content-length') || '-'}`;
+                } catch (e) { head = 'threw: ' + e.message; }
+                try { const v = await rangeProbe(n); range = v === null ? 'rejected' : `${(v / 1e6).toFixed(0)} MB`;
+                } catch (e) { range = 'threw'; }
+                console.log(`  ${n}\n      HEAD: ${head}\n      range probe: ${range}`);
+            }
+            console.log('A library is offered when the range probe reports a size.');
         }
 
         // The single-library RRUFF panel owns its own file; discovering it here
