@@ -317,7 +317,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "raman-v2026.07.25.4";
+        const VERSION_TAG = "raman-v2026.07.25.7";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -1436,7 +1436,8 @@
         async function discoverLibraryUrls(paramName, manifestName, defaultName) {
             const params = new URLSearchParams(location.search);
             const explicit = params.get(paramName);
-            if (explicit) return explicit.split(',').map(s => s.trim()).filter(Boolean);
+            if (explicit) return explicit.split(',').map(s => s.trim()).filter(Boolean)
+                                         .map(url => ({ url }));
 
             const found = [];
             try {                                    // 2) manifest
@@ -1444,8 +1445,16 @@
                 if (r.ok) {
                     const list = await r.json();
                     for (const item of (Array.isArray(list) ? list : (list.libraries || []))) {
-                        const f = (typeof item === 'string') ? item : (item && (item.file || item.url || item.name));
-                        if (f) found.push(f);
+                        // A bare string still works; an object may carry a display
+                        // label and a one-line note, which read far better in the
+                        // offer list than a filename does.
+                        if (typeof item === 'string') { found.push({ url: item }); continue; }
+                        if (!item) continue;
+                        const url = item.file || item.url || item.path || item.name;
+                        if (!url) continue;
+                        found.push({ url,
+                                     label: item.label || item.title || item.name || null,
+                                     note: item.note || item.description || item.desc || null });
                     }
                 }
             } catch (e) { /* no manifest */ }
@@ -1461,7 +1470,7 @@
                         try { href = decodeURIComponent(href); } catch (e) {}
                         if (href.startsWith('http') && !href.startsWith(location.origin)) continue;
                         const name = href.split('/').pop();
-                        if (name && !seen.has(name)) { seen.add(name); found.push(name); }
+                        if (name && !seen.has(name)) { seen.add(name); found.push({ url: name }); }
                     }
                 }
             } catch (e) { /* no index / blocked */ }
@@ -1471,23 +1480,36 @@
             // what was missing: with no manifest and no directory index, only
             // `defaultName` was ever tried, so a second library sitting right
             // next to it (openspecy_raman.h5) was never found.
-            const candidates = (typeof DB_CANDIDATE_LIBRARIES !== 'undefined')
+            // Probe each conventional name and its "_web" sibling. The README
+            // recommends building a browser copy as <name>_web.h5, so those names
+            // are every bit as conventional as the originals — omitting them is
+            // what hid cod_inorganic_web.h5 sitting right next to the page.
+            const base = (typeof DB_CANDIDATE_LIBRARIES !== 'undefined')
                 ? [defaultName, ...DB_CANDIDATE_LIBRARIES] : [defaultName];
+            const candidates = [];
+            for (const b of base) {
+                candidates.push(b);
+                const web = b.replace(/\.(h5|hdf5)$/i, '_web.$1');
+                if (web !== b) candidates.push(web);
+            }
             const seen = new Set(), hits = [];
             for (const c of candidates) {
                 const key = c.toLowerCase();
                 if (seen.has(key)) continue;
                 seen.add(key);
-                if (await headSize(c) !== null) hits.push(c);
+                if (await headSize(c) !== null) hits.push({ url: c });
             }
-            return hits.length ? hits : [defaultName];
+            // Every candidate was probed above, so if none exist there is nothing
+            // to offer. Returning [defaultName] here would only make the caller
+            // probe it a second time and 404 again.
+            return hits;
         }
 
         // The single-library RRUFF panel owns its own file; discovering it here
         // too would load the same spectra twice under the wrong source label.
-        function excludeOwnedByOtherPanels(urls) {
+        function excludeOwnedByOtherPanels(entries) {
             const owned = new Set([HOST_LIBRARY_URL.split('/').pop().toLowerCase()]);
-            return urls.filter(u => !owned.has(u.split('/').pop().toLowerCase()));
+            return entries.filter(e => !owned.has(e.url.split('/').pop().toLowerCase()));
         }
 
         function isHdf5(buffer) {                    // magic: 0x89 'H' 'D' 'F'
@@ -1596,11 +1618,24 @@
                 const row = document.createElement('div');
                 row.setAttribute('data-lib-offer', '1');
                 row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px';
-                const lbl = document.createElement('span');
-                lbl.style.flex = '1'; lbl.style.fontSize = '0.78rem'; lbl.style.overflow = 'hidden';
-                lbl.style.textOverflow = 'ellipsis'; lbl.style.whiteSpace = 'nowrap';
+                const lbl = document.createElement('div');
+                lbl.style.flex = '1'; lbl.style.minWidth = '0';
                 lbl.title = o.url;
-                lbl.innerText = o.name + (o.size ? ` (${fmtBytes(o.size)})` : '');
+                const head = document.createElement('div');
+                head.style.fontSize = '0.78rem'; head.style.overflow = 'hidden';
+                head.style.textOverflow = 'ellipsis'; head.style.whiteSpace = 'nowrap';
+                // A manifest label reads better than a filename; fall back to the
+                // filename when the manifest gave us nothing.
+                head.innerText = (o.label || o.name) + (o.size ? ` (${fmtBytes(o.size)})` : '');
+                lbl.appendChild(head);
+                if (o.note) {
+                    const sub = document.createElement('div');
+                    sub.style.fontSize = '0.7rem'; sub.style.color = '#6c757d';
+                    sub.style.overflow = 'hidden'; sub.style.textOverflow = 'ellipsis';
+                    sub.style.whiteSpace = 'nowrap';
+                    sub.innerText = o.note;
+                    lbl.appendChild(sub);
+                }
                 const btn = document.createElement('button');
                 btn.className = 'btn-crop';
                 btn.style.width = 'auto'; btn.style.padding = '3px 10px'; btn.style.fontSize = '0.75rem';
@@ -1648,7 +1683,7 @@
                 if (!res.ok || !isHdf5(res.buffer)) throw new Error("not an HDF5 library");
                 const entries = await rodIngestBytes(res.buffer);
                 const key = "rod_lib_server_" + o.name;
-                rodLibraries.push({ name: o.name, key, entries, active: true });
+                rodLibraries.push({ name: o.label || o.name, key, entries, active: true });
                 if (res.buffer.byteLength <= LIB_IDB_MAX_BYTES) { try { await idbSaveKey(key, res.buffer); } catch (e) {} }
                 await rodSaveIndex();
                 o.loaded = true;
@@ -1689,18 +1724,29 @@
             } catch (e) { return; }
 
             rodServerOffers = [];
-            for (const url of urls) {
+            for (const entry of urls) {
+                const url = entry.url;
                 const name = url.split('/').pop();
                 if (rodLibraries.some(l => l.name === name || l.name === "(server) " + name)) continue;
                 const size = await headSize(url);
                 if (size === null) continue;                  // not actually there
-                rodServerOffers.push({ url, name, size, loaded: false, busy: false });
+                rodServerOffers.push({ url, name, size, loaded: false, busy: false,
+                                 label: entry.label || null, note: entry.note || null });
             }
             renderRodOffers();
+            const statusEl = document.getElementById('db-status');
             if (rodServerOffers.length) {
-                const statusEl = document.getElementById('db-status');
                 if (statusEl && !rodLibraries.length) statusEl.innerText =
                     `${rodServerOffers.length} librar(ies) available on the server — load one to search and match.`;
+            } else if (statusEl && !rodLibraries.length && location.protocol !== 'file:') {
+                // Silence here is what made this hard to diagnose: the page looks
+                // only in its own directory, so a library uploaded elsewhere on the
+                // server is invisible. Name the directory and the way out.
+                const dir = location.href.replace(/[^/]*$/, '');
+                statusEl.innerText =
+                    `No libraries found in ${dir} — put the .h5 files there, or list ` +
+                    `them (paths or URLs) in libraries.json next to this page, or pass ` +
+                    `?rodlib=<url>. Run dbDiagnoseDiscovery() in the console for detail.`;
             }
         }
 
@@ -1727,7 +1773,8 @@
         const DB_CANDIDATE_LIBRARIES = [
             "rod_raman_library.h5", "rod_library.h5",
             "openspecy_raman.h5", "openspecy_library.h5",
-            "cod_library.h5", "raman_library.h5"
+            "cod_library.h5", "raman_library.h5",
+            "openspecy_raman_web.h5", "rod_raman_library_web.h5"
         ];
 
         function dbSourceList() {

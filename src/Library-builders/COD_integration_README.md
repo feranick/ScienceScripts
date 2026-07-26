@@ -154,7 +154,41 @@ python build_cod_powder_library.py --db3 cod-260101.db3 --organic \
        --out cod_organic.h5
 ```
 
-`--max-peaks 60` keeps the 60 strongest reflections, which is far more than
+### Generating `libraries.json` — `make_libraries_manifest.py`
+
+The apps read a `libraries.json` to learn what is on the server (see
+Troubleshooting for why they cannot just list the folder). Rather than couple
+building to deployment, a separate scanner reads the finished `.h5` files:
+
+```bash
+python make_libraries_manifest.py /var/www/html/tools/xrd-plotter
+```
+
+```
+Scanning /var/www/html/tools/xrd-plotter
+  ok    cod_inorganic_web.h5      COD inorganic — 62,431 patterns · peaks-only · CuKa · 31 MB
+  ok    cod_minerals_web.h5       COD minerals — 16,102 patterns · peaks-only · CuKa · 8 MB
+  ok    rruff_powder_library.h5   RRUFF powder — 3,782 patterns · 79 MB  [rruff panel]
+  skip  index.html                not a reference library
+
+Wrote /var/www/html/tools/xrd-plotter/libraries.json  (3 libraries)
+```
+
+Labels and notes come from each file's own attributes (`source`, `technique`,
+`license`, `storage`, spectrum count) plus its filename, so nothing is guessed
+and **no rebuild is needed** — run it on libraries you built months ago. Only
+the attribute block and the group count are read, never the spectra, so a 2 GB
+library is inspected in milliseconds.
+
+A file whose name says `rruff` is tagged `"panel": "rruff"`, which routes it to
+the apps' single-library RRUFF panel instead of offering it twice.
+
+Anything that is not one of our libraries is skipped: a LabSpec data file, an
+HTML error page saved with an `.h5` extension, `index.html`. Options:
+`--dry-run` to preview, `--keep-labels` so hand-edited labels survive a
+re-scan, `--include`/`--exclude` to filter, `--out` for a different path.
+
+`--max-peaks 60` keeps the 60 strongest reflections`--max-peaks 60` keeps the 60 strongest reflections, which is far more than
 peak matching needs and still resolves crowded low-symmetry patterns. Drop to
 30 if you want the organic set smaller; raise it if you overlay peaks-only
 references and want a denser rebuilt profile.
@@ -263,10 +297,46 @@ Current builds refuse politely above 1.2 GB instead of crashing, but a file
 between roughly 300 MB and 1.2 GB will still load slowly and drop its stored
 curves; peaks-only is the right answer at that size.
 
-**The browser only offers some of the `.h5` files in the folder.** With no
-`libraries.json` and no server directory index, discovery falls back to a list
-of conventional filenames. Either name your files accordingly, add a manifest,
-or pass them explicitly with `?codlib=a.h5,b.h5`.
+**Why not just list whatever `.h5` is in the folder?** A browser cannot: there
+is no filesystem API over HTTP, only "fetch this exact URL and see if it 404s".
+The server has to volunteer a listing, and Apache does not by default (and an
+`index.html` in the directory suppresses it even with `Options +Indexes`). Hence
+the manifest, which is also the only way to give a library a readable name.
+
+**The browser only offers some of the `.h5` files, or none.** Discovery looks
+**relative to the page**, so a library must live in the same directory the HTML
+is served from — `https://host/tools/xrd-plotter/cod_inorganic.h5` for a page at
+`https://host/tools/xrd-plotter/`. A library uploaded elsewhere on the server is
+invisible. Open the network tab: `404 (Not Found)` on the candidate names means
+exactly this.
+
+Three ways to fix it, in increasing order of robustness:
+
+1. Put the `.h5` files next to the page.
+2. Add a `libraries.json` next to the page — the recommended option. Entries
+   may be relative paths or absolute URLs, so the files can live anywhere, and
+   an object form lets you give each library a readable name and a one-line
+   note that the panel displays instead of the filename:
+   ```json
+   [
+     { "file": "cod_inorganic_web.h5",
+       "label": "COD inorganic",
+       "note": "~62k phases, no C/H · peaks-only" },
+     { "file": "../shared/cod_minerals_web.h5",
+       "label": "COD minerals",
+       "note": "~16k named minerals · peaks-only" }
+   ]
+   ```
+   A bare string still works (`["cod_inorganic_web.h5"]`) — the label and note
+   are optional. `title`/`description` are accepted as aliases for
+   `label`/`note`, and `url`/`path` for `file`.
+3. Pass them per-visit: `?codlib=../libraries/cod_inorganic_web.h5`
+
+With no manifest and no directory index, discovery falls back to a list of
+conventional filenames (`cod_powder_library.h5`, `cod_inorganic.h5`,
+`cod_minerals.h5`, `cod_organic.h5`, …), which is why matching those names
+happens to work. Run `dbDiagnoseDiscovery()` in the console to see what each
+step actually found.
 
 **A library loads but Match finds nothing.** Check the tolerance — the default
 is 0.2° 2θ, which is tight for a poorly-calibrated diffractometer. Also confirm
