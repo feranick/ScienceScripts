@@ -456,6 +456,7 @@ def build(wav, spectra, meta_rows, args):
         print("WARNING: no spectra written. Try --only both, or relax --filter.")
     else:
         print("\nOpen Specy data are CC-BY: cite the contributing collections you use.")
+    return kept
 
 
 def parse_args(argv=None):
@@ -521,6 +522,7 @@ def main(argv=None):
         wav, spectra, meta = extract_library(decode_rds(path))
 
     build(wav, spectra, meta, args)
+
 
 
 if __name__ == "__main__":

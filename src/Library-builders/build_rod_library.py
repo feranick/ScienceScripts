@@ -672,6 +672,9 @@ def build_library(ids, args, cfg):
             print(f"   {count:5d}  {reason}")
     if kept == 0:
         print("WARNING: no spectra written. Check the selection, cache, or network.")
+    return kept
+
+
 
 
 # ============================================================================
@@ -755,6 +758,7 @@ def main(argv=None):
         ids = ids[:args.limit]
     print(f"Building from {len(ids)} ROD entr(y/ies) -> {args.out}")
     build_library(ids, args, cfg)
+
 
 
 if __name__ == "__main__":
