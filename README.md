@@ -14,11 +14,17 @@ ticked on and off individually; setup controls (adding libraries, online modes,
 link-outs) live in a collapsible *Manage sources*.
 
 Reference libraries are `.h5` files built by the scripts in
+[`src/Library-builders/`](src/Library-builders) — see
 [Reference database builders](#reference-database-builders) below. All three apps
 read one schema, so a library is usable by whichever tool matches its technique.
 
+    src/XRD/     xrd_plotter.py    xrd_plotter.html    converter/
+    src/Raman/   raman_plotter.py  raman_plotter.html
+    src/FTIR/    ftir_plotter.py   ftir_plotter.html
+    src/Library-builders/
+
 ## XRD
-1. **xrd_converter (GUI and CLI)**: Convert xrd data in complex csv or xrdml formats into simple csv format for plotting, or archiving. Both GUI and command line versions available.
+1. **xrd_converter (GUI and CLI)** (`src/XRD/converter/`): Convert xrd data in complex csv or xrdml formats into simple csv format for plotting, or archiving. Both GUI and command line versions available.
 2. **xrd_plotter**: Plot one or more XRD data files (csv or xrdml format). Available both as a local python script (with GUI) or as a stand-alone web script (running either locally or in remote server).
 
     ### Functionality of the plotter:
@@ -33,7 +39,7 @@ read one schema, so a library is usable by whichever tool matches its technique.
         - [RRUFF](https://www.rruff.net/zipped_data_files/powder/) measured mineral patterns
         - Materials Project, by formula or peak selection (python version only, needs an API key)
 
-    See [COD_integration_README.md](COD_integration_README.md) for building COD
+    See [COD_integration_README.md](src/Library-builders/COD_integration_README.md) for building COD
     libraries, sizing them, and serving them.
 
 ## Raman
@@ -51,7 +57,7 @@ read one schema, so a library is usable by whichever tool matches its technique.
         - [Open Specy](https://openspecy.org) (CC-BY) — polymers, microplastics, pigments and other organics
         - [SDBS](https://sdbs.db.aist.go.jp/) — link-out only; SDBS prohibits automated retrieval, so you download a spectrum yourself and import the `.jdx`
 
-    See [ROD_integration_README.md](ROD_integration_README.md) for the ROD and
+    See [ROD_integration_README.md](src/Library-builders/ROD_integration_README.md) for the ROD and
     Open Specy integration, and why ChemSpider and SDBS cannot be pulled
     automatically.
 
@@ -76,7 +82,7 @@ read one schema, so a library is usable by whichever tool matches its technique.
 
 ## Reference database builders
 
-Each writes an `.h5` in one shared schema (`/spectra/<id>` with `x`, `y`,
+In [`src/Library-builders/`](src/Library-builders). Each writes an `.h5` in one shared schema (`/spectra/<id>` with `x`, `y`,
 `peaks`, `intensities` and metadata attributes). Band detection matches the apps
 exactly, so match scores are consistent whichever source a reference came from.
 
@@ -95,7 +101,7 @@ file's own attributes. No rebuilding needed, and only the attribute block is
 read, so a multi-GB library is inspected in milliseconds.
 
 ```bash
-python make_libraries_manifest.py /var/www/html/tools/xrd-plotter
+python src/Library-builders/make_libraries_manifest.py /var/www/html/tools/xrd-plotter
 ```
 
 ### Serving the HTML apps
