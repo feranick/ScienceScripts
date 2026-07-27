@@ -29,7 +29,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "raman-v2026.07.27.1"
+VERSION_TAG = "raman-v2026.07.27.3"
 
 # RRUFF reference database (open Raman spectra of minerals).
 # Data are distributed as per-quality zip archives of two-column .txt files.
@@ -99,6 +99,125 @@ def detect_reference_peaks(x, y, max_peaks=40, min_prominence=0.04):
     proms = props.get('prominences', np.ones(len(peaks)))
     order = np.argsort(proms)[::-1][:max_peaks]
     return np.sort(x[peaks[order]])
+
+
+
+# ---- Peak identification on hover: per-app display settings ----------------
+PEAKID_UNIT = "cm⁻¹"
+PEAKID_AXIS = "Raman shift"
+PEAKID_WORD = "band"
+PEAKID_FMT = ".0f"
+PEAKID_DEF_TOL = 12.0
+PEAKID_SNAP_MIN = 4.0
+PEAKID_NAME_CAP = 200          # above this, show counts but no names
+PEAKID_TOP_SHOW = 6
+PEAKID_MAX_POSITIONS = 40_000_000
+
+def peak_index_build(sources, skip_kinds=('folder', 'online')):
+    """Flatten every reference band into one sorted position array."""
+    entries, pos_parts, ent_parts = [], [], []
+    for s in sources:
+        if s.get('kind') in skip_kinds:
+            continue
+        for e in (s.get('entries') or []):
+            p = np.asarray(e.get('peaks') if e.get('peaks') is not None else [], dtype=float)
+            if p.size:
+                p = p[np.isfinite(p)]
+            if not p.size:
+                continue
+            ei = len(entries)
+            entries.append({'rec': e, 'label': s.get('label', ''), 'key': s.get('key', '')})
+            pos_parts.append(p)
+            ent_parts.append(np.full(p.size, ei, dtype=np.int64))
+    if not entries:
+        return None
+    pos = np.concatenate(pos_parts)
+    ent = np.concatenate(ent_parts)
+    order = np.argsort(pos, kind='stable')
+    return {'pos': pos[order], 'ent': ent[order], 'entries': entries,
+            'n_peaks': int(pos.size), 'xlo': float(pos.min()), 'xhi': float(pos.max())}
+
+def peak_index_at(idx, x, tol):
+    """Entry indices with at least one band within tol of x (sorted, unique)."""
+    if not idx:
+        return np.empty(0, dtype=np.int64)
+    lo = int(np.searchsorted(idx['pos'], x - tol, side='left'))
+    hi = int(np.searchsorted(idx['pos'], x + tol, side='right'))
+    if hi <= lo:
+        return np.empty(0, dtype=np.int64)
+    return np.unique(idx['ent'][lo:hi])
+
+def peak_index_narrow(idx, marked, tol):
+    """References still consistent with every peak marked so far."""
+    if not idx:
+        return np.empty(0, dtype=np.int64)
+    keep = None
+    for mx in marked:
+        hits = peak_index_at(idx, mx, tol)
+        keep = hits if keep is None else np.intersect1d(keep, hits, assume_unique=True)
+        if keep.size == 0:
+            break
+    if keep is None:
+        keep = np.arange(len(idx['entries']), dtype=np.int64)
+    return keep
+
+def peak_index_rank(idx, ids, query, tol):
+    """Rank a small candidate set.
+
+    Strength is the mean relative height of the bands that line up with the
+    query, so a reference whose MAJOR bands are the ones you marked outranks one
+    where they are minor shoulders.
+    """
+    out = []
+    for ei in ids:
+        e = idx['entries'][int(ei)]['rec']
+        # `or []` would raise here: h5py hands back numpy arrays, whose truth
+        # value is ambiguous. Test explicitly against None.
+        raw = e.get('peaks')
+        p = np.asarray(raw if raw is not None else [], dtype=float)
+        it = e.get('intensities')
+        it = np.asarray(it, dtype=float) if it is not None and len(it) == p.size else None
+        mx = float(np.nanmax(it)) if it is not None and it.size else 0.0
+        matched, strength = 0, 0.0
+        for q in query:
+            if not p.size:
+                continue
+            k = int(np.argmin(np.abs(p - q)))
+            if abs(p[k] - q) <= tol:
+                matched += 1
+                strength += (it[k] / mx) if (it is not None and mx > 0 and np.isfinite(it[k])) else 1.0
+        out.append({'ei': int(ei), 'matched': matched,
+                    'strength': (strength / matched) if matched else 0.0,
+                    'name': e.get('name') or '(unnamed)', 'id': e.get('id') or '',
+                    'formula': e.get('formula') or '',
+                    'source': e.get('source') or idx['entries'][int(ei)]['label'] or ''})
+    # Deterministic: name breaks ties so the list is stable and testable.
+    out.sort(key=lambda r: (-r['matched'], -r['strength'], r['name']))
+    return out
+
+def peak_id_summary(idx, base, marked, x, tol, name_cap=200):
+    """The readout for one hovered position.
+
+    `base` is the narrowed set for the already-marked peaks; this adds only the
+    hovered one, so the caller can show before -> after.
+    """
+    if not idx:
+        return None
+    total = len(idx['entries'])
+    hits = peak_index_at(idx, x, tol)
+    # Hovering a band you already marked adds no information; say so rather than
+    # showing an unchanged count as though it were a narrowing step.
+    already = any(abs(m - x) <= tol for m in marked)
+    if base is None:
+        base = np.arange(total, dtype=np.int64)
+    inter = np.intersect1d(base, hits, assume_unique=True)
+    after = int(inter.size)
+    query = list(marked) if already else list(marked) + [x]
+    top = peak_index_rank(idx, inter[:name_cap], query, tol) if 0 < after <= name_cap else []
+    return {'x': float(x), 'before': int(base.size), 'after': after, 'total': total,
+            'already': already, 'at_all': int(hits.size),
+            'common_frac': (hits.size / total) if total else 0.0,
+            'top': top, 'capped': after > name_cap, 'name_cap': name_cap}
 
 
 def peak_match_score(reference_peaks, experimental_peaks, tolerance):
@@ -849,6 +968,15 @@ class RamanPlotterGUI:
         # In-memory session state
         self.active_datasets = {}
         self.peak_guesses = []
+        # Peak identification on hover: index, narrowed base and caches. Built
+        # lazily on first use so a session that never enables it pays nothing.
+        self._peakid_index = None
+        self._peakid_sig = ''
+        self._peakid_base = None
+        self._peakid_base_sig = ''
+        self._peakid_peak_cache = {}
+        self._peakid_annot = None
+        self._peakid_last = None
         self.guess_lines_artists = []
         self.fitted_curves_artists = []
         self.target_checkbox_vars = {}
@@ -1025,6 +1153,15 @@ class RamanPlotterGUI:
         self.ent_db_floor.insert(0, "5")
         self.ent_db_floor.pack(side="left")
         ttk.Label(db_mode, text="%", font=("Helvetica", 8)).pack(side="left")
+
+        db_ident = ttk.Frame(panel_db)
+        db_ident.pack(fill="x", pady=(0, 2))
+        self.peakid_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(db_ident, text="🔎 Identify on hover", variable=self.peakid_var,
+                        command=self.peakid_toggle).pack(side="left")
+        self.peakid_note = tk.StringVar(value="")
+        ttk.Label(panel_db, textvariable=self.peakid_note, font=("Helvetica", 7),
+                  foreground="#6c757d", wraplength=210, justify="left").pack(fill="x")
 
         self.db_status_var = tk.StringVar(value="Add a library under Manage sources, then search.")
         ttk.Label(panel_db, textvariable=self.db_status_var, font=("Helvetica", 8),
@@ -1281,6 +1418,7 @@ class RamanPlotterGUI:
         if event.inaxes == self.ax and self.active_datasets:
             x = event.xdata
             self.cursor_var.set(f"Cursor Position: Raman shift = {x:.2f} cm⁻¹")
+            self.peakid_hover(x)
             if self.cursor_line is None:
                 self.cursor_line = self.ax.axvline(x, color='red', linestyle='--', linewidth=1.0, alpha=0.5)
             else:
@@ -1288,6 +1426,7 @@ class RamanPlotterGUI:
                 self.cursor_line.set_visible(True)
             self.canvas.draw_idle()
         else:
+            self.peakid_hide()
             if self.cursor_line is not None:
                 self.cursor_line.set_visible(False)
                 self.canvas.draw_idle()
@@ -2056,6 +2195,187 @@ class RamanPlotterGUI:
             self.db_manage_frame.pack(fill="x", pady=(4, 0))
             self.btn_db_manage.config(text="▴")
         self._db_manage_open = not self._db_manage_open
+
+    # ==== Peak identification on hover ==================================
+    # Hovering a band reports which references are still consistent with
+    # every peak already marked, and how the candidate count shrinks when this
+    # one is added. Identification comes from a pattern, never from a single
+    # line, and this shows that rather than asserting it.
+
+    def peakid_tol(self):
+        try:
+            return float(self.ent_db_match_tol.get().strip())
+        except (ValueError, AttributeError):
+            return PEAKID_DEF_TOL
+
+    def peakid_source_sig(self):
+        return '|'.join('%s:%s' % (s['key'], s['count']) for s in self.db_enabled_sources())
+
+    def peakid_ensure_index(self):
+        sig = self.peakid_source_sig()
+        if self._peakid_index is not None and sig == self._peakid_sig:
+            return self._peakid_index
+        srcs = self.db_enabled_sources()
+        # Not `e.get('peaks') or []`: h5py returns numpy arrays and their truth
+        # value is ambiguous, which would raise instead of counting.
+        positions = sum(0 if e.get('peaks') is None else len(e['peaks'])
+                        for s in srcs if s.get('entries') for e in s['entries'])
+        if positions > PEAKID_MAX_POSITIONS:
+            self._peakid_index = None
+            self._peakid_sig = sig
+            self.peakid_note.set("Too many reference bands to index "
+                                 "(%.0fM). Disable a library." % (positions / 1e6))
+            return None
+        self._peakid_index = peak_index_build(srcs) if srcs else None
+        self._peakid_sig = sig
+        self._peakid_base = None
+        self._peakid_base_sig = ''
+        return self._peakid_index
+
+    def peakid_ensure_base(self, tol):
+        # The signature includes the marked peaks, so marking one invalidates
+        # the cache on its own and no hook is needed in the marking path.
+        sig = '%s@%s#%s' % (list(self.peak_guesses), tol, self._peakid_sig)
+        if self._peakid_base is not None and sig == self._peakid_base_sig:
+            return self._peakid_base
+        self._peakid_base = peak_index_narrow(self._peakid_index,
+                                              list(self.peak_guesses), tol)
+        self._peakid_base_sig = sig
+        return self._peakid_base
+
+    def peakid_toggle(self):
+        if not bool(self.peakid_var.get()):
+            self.peakid_hide()
+            self.peakid_note.set("")
+            return
+        srcs = [s for s in self.db_enabled_sources() if s.get('entries')]
+        if not srcs:
+            self.peakid_note.set("Load or enable an .h5 library first.")
+            self.peakid_var.set(False)
+            return
+        idx = self.peakid_ensure_index()
+        if idx is None:
+            return
+        self.peakid_note.set("Indexed {:,} bands from {:,} references. "
+                             "Hover a band on the plot.".format(
+                                 idx['n_peaks'], len(idx['entries'])))
+
+    def peakid_spectrum_peaks(self, key):
+        """Detected features of one displayed spectrum, cached until it changes."""
+        d = self.active_datasets.get(key)
+        if not d:
+            return []
+        x = np.asarray(d['angles'], dtype=float)
+        y = np.asarray(d['intensities'], dtype=float)
+        if x.size < 5:
+            return []
+        stamp = (int(x.size), float(y[0]), float(y[-1]))
+        hit = self._peakid_peak_cache.get(key)
+        if hit is not None and hit[0] == stamp:
+            return hit[1]
+        pk = list(detect_reference_peaks(x, y, 80, 0.02))
+        self._peakid_peak_cache[key] = (stamp, pk)
+        return pk
+
+    def peakid_snap(self, x, tol):
+        """Snap to a real feature of the user's own spectrum.
+
+        Sweeping across flat baseline should report nothing rather than invent
+        candidates for a position where there is no peak.
+        """
+        best, best_d = None, float('inf')
+        for key in list(self.active_datasets.keys()):
+            if key.startswith('__fit_') or key.startswith('__ref_'):
+                continue
+            for p in self.peakid_spectrum_peaks(key):
+                d = abs(float(p) - x)
+                if d < best_d:
+                    best_d, best = d, float(p)
+        return best if (best is not None and best_d <= tol) else None
+
+    def peakid_hide(self):
+        self._peakid_last = None
+        if self._peakid_annot is not None and self._peakid_annot.get_visible():
+            self._peakid_annot.set_visible(False)
+            self.canvas.draw_idle()
+
+    def peakid_text(self, s, tol):
+        pct = s['common_frac'] * 100.0
+        rarity = ('very common' if pct >= 20 else 'common' if pct >= 5
+                  else 'fairly distinctive' if pct >= 1 else 'distinctive')
+        pct_s = '<0.1' if pct < 0.1 else format(pct, '.1f')
+        lines = ['%s %s %s' % (PEAKID_AXIS, format(s['x'], PEAKID_FMT), PEAKID_UNIT),
+                 'in {:,} of {:,} refs ({}%) - {}'.format(
+                     s['at_all'], s['total'], pct_s, rarity)]
+        n_marked = len(self.peak_guesses)
+        if s['already']:
+            lines.append('already marked - adds nothing new')
+        elif not n_marked:
+            lines.append('{:,} references have a band here.'.format(s['after']))
+            lines.append('One band is not an identification -')
+            lines.append('right-click to mark peaks and watch this fall.')
+        elif s['after'] == 0:
+            lines.append('no reference matches all %d marked peak(s)' % n_marked)
+            lines.append('and this one (tol +/-%g %s)' % (tol, PEAKID_UNIT))
+        else:
+            cut = 100.0 * (1 - s['after'] / s['before']) if s['before'] else 0.0
+            lines.append('add this band: {:,} become {:,}{}'.format(
+                s['before'], s['after'], '  (-%.0f%%)' % cut if cut >= 1 else ''))
+        if s['top']:
+            lines.append('-' * 38)
+            for r in s['top'][:PEAKID_TOP_SHOW]:
+                nm = r['name'] if len(r['name']) <= 24 else r['name'][:23] + '~'
+                if r['formula']:
+                    nm = '%s %s' % (nm, r['formula'])
+                lines.append('%-30s %3.0f%%' % (nm[:30], r['strength'] * 100))
+            if s['after'] > PEAKID_TOP_SHOW:
+                lines.append('+{:,} more - use Match for the full ranking'.format(
+                    s['after'] - PEAKID_TOP_SHOW))
+        elif s['capped']:
+            lines.append('too many to name; mark more peaks (< %d)' % s['name_cap'])
+        return '\n'.join(lines)
+
+    def peakid_hover(self, x):
+        if not bool(self.peakid_var.get()) or x is None:
+            return
+        idx = self.peakid_ensure_index()
+        if idx is None:
+            return
+        tol = self.peakid_tol()
+        snap = self.peakid_snap(x, max(tol, PEAKID_SNAP_MIN))
+        if snap is None:
+            self.peakid_hide()
+            return
+        base = self.peakid_ensure_base(tol)
+        s = peak_id_summary(idx, base, list(self.peak_guesses), snap, tol,
+                            PEAKID_NAME_CAP)
+        if s is None:
+            self.peakid_hide()
+            return
+        text = self.peakid_text(s, tol)
+        # Mouse-move fires continuously; skip the redraw when nothing changed.
+        if self._peakid_last == (snap, text):
+            return
+        self._peakid_last = (snap, text)
+        if self._peakid_annot is None:
+            self._peakid_annot = self.ax.annotate(
+                text, xy=(snap, 0.98), xycoords=('data', 'axes fraction'),
+                xytext=(11, -11), textcoords='offset points',
+                ha='left', va='top', fontsize=7.0, family='monospace', zorder=30,
+                bbox=dict(boxstyle='round,pad=0.4', fc='#ffffff', ec='#ced4da',
+                          alpha=0.95))
+        else:
+            self._peakid_annot.set_text(text)
+            self._peakid_annot.xy = (snap, 0.98)
+            self._peakid_annot.set_visible(True)
+        # Flip the card to the other side near the right edge so it stays on
+        # screen. The fraction is signed-correct on an inverted axis too.
+        lo, hi = self.ax.get_xlim()
+        frac = (snap - lo) / (hi - lo) if hi != lo else 0.5
+        flip = frac > 0.55
+        self._peakid_annot.set_ha('right' if flip else 'left')
+        self._peakid_annot.set_position((-11, -11) if flip else (11, -11))
+        self.canvas.draw_idle()
 
     def db_source_list(self):
         """[{key, label, kind, count, entries}] for every loaded source."""

@@ -212,6 +212,12 @@
             <label for="toggle-tooltip">Enable Live Tooltip</label>
         </div>
 
+        <div class="checkbox-container">
+            <input type="checkbox" id="toggle-peakid" onchange="peakIdToggle()">
+            <label for="toggle-peakid" title="Hover a band to see which references stay consistent with the peaks you have marked">🔎 Identify bands on hover</label>
+        </div>
+        <div id="peakid-note" style="font-size:0.74rem;color:#6c757d;padding:0 2px;"></div>
+
         <div class="status-badge" id="status-display">Active spectra loaded: 0</div>
 
         <div class="rruff-panel" id="db-panel" style="border: 1px solid #e9ecef; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 7px;">
@@ -328,7 +334,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "raman-v2026.07.27.2";
+        const VERSION_TAG = "raman-v2026.07.27.3";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -2278,6 +2284,384 @@
             return kept.map(pk => x[pk.i]).sort((a, b) => a - b);
         }
 
+        function peakIndexBuild(sources, binW, skipKinds) {
+            const skip = skipKinds || ['folder'];
+            const entries = [];
+            let lo = Infinity, hi = -Infinity, nPk = 0;
+
+            for (const s of sources) {
+                // 'folder' entries are raw files whose bands are only known after an
+                // async parse. A hover handler cannot await, so they are left out and
+                // reported as excluded rather than silently ignored.
+                if (skip.indexOf(s.kind) >= 0) continue;
+                for (const e of s.entries) {
+                    const p = e.peaks;
+                    if (!p || !p.length) continue;
+                    let good = 0;
+                    for (let k = 0; k < p.length; k++) {
+                        const v = p[k];
+                        if (!isFinite(v)) continue;
+                        if (v < lo) lo = v;
+                        if (v > hi) hi = v;
+                        good++;
+                    }
+                    if (!good) continue;
+                    entries.push({ rec: e, kind: s.kind, srcLabel: s.label, srcKey: s.key });
+                    nPk += good;
+                }
+            }
+            if (!entries.length || !isFinite(lo)) return null;
+
+            const x0 = Math.floor(lo / binW) * binW;
+            const nBins = Math.max(1, Math.ceil((hi - x0) / binW) + 1);
+            const binStart = new Int32Array(nBins + 1);
+
+            for (const f of entries) {
+                const p = f.rec.peaks;
+                for (let k = 0; k < p.length; k++) {
+                    const v = p[k];
+                    if (!isFinite(v)) continue;
+                    binStart[Math.floor((v - x0) / binW)]++;
+                }
+            }
+            // counts -> start offsets (exclusive prefix sum)
+            let run = 0;
+            for (let b = 0; b <= nBins; b++) { const c = binStart[b]; binStart[b] = run; run += c; }
+
+            const binEnt = new Int32Array(nPk);
+            const binPos = new Float32Array(nPk);
+            const cur = binStart.slice(0, nBins);
+            for (let ei = 0; ei < entries.length; ei++) {
+                const p = entries[ei].rec.peaks;
+                for (let k = 0; k < p.length; k++) {
+                    const v = p[k];
+                    if (!isFinite(v)) continue;
+                    const slot = cur[Math.floor((v - x0) / binW)]++;
+                    binEnt[slot] = ei;
+                    binPos[slot] = v;
+                }
+            }
+
+            return {
+                binW, x0, nBins, binStart, binEnt, binPos, entries,
+                nPeaks: nPk,
+                // Scratch for dedupe inside a single query. Reused so a hover allocates
+                // nothing: an entry with two bands in range must be counted once.
+                stamp: new Int32Array(entries.length), stampId: 0,
+                xlo: lo, xhi: hi
+            };
+        }
+
+        function peakIndexAt(idx, x, tol) {
+            const out = [];
+            if (!idx) return out;
+            const b0 = Math.max(0, Math.floor((x - tol - idx.x0) / idx.binW));
+            const b1 = Math.min(idx.nBins - 1, Math.floor((x + tol - idx.x0) / idx.binW));
+            if (b1 < b0) return out;
+            const sid = ++idx.stampId, st = idx.stamp;
+            const bs = idx.binStart, be = idx.binEnt, bp = idx.binPos;
+            for (let b = b0; b <= b1; b++) {
+                const end = bs[b + 1];
+                for (let k = bs[b]; k < end; k++) {
+                    // Bins are coarser than tol, so the position is re-checked exactly.
+                    if (Math.abs(bp[k] - x) > tol) continue;
+                    const ei = be[k];
+                    if (st[ei] === sid) continue;
+                    st[ei] = sid;
+                    out.push(ei);
+                }
+            }
+            return out;
+        }
+
+        function peakIndexNarrow(idx, marked, tol) {
+            if (!idx) return { mask: null, count: 0, total: 0 };
+            const n = idx.entries.length;
+            let mask = new Uint8Array(n).fill(1), count = n;
+            for (const mx of marked) {
+                const hits = peakIndexAt(idx, mx, tol);
+                const next = new Uint8Array(n);
+                let c = 0;
+                for (const ei of hits) if (mask[ei]) { next[ei] = 1; c++; }
+                mask = next; count = c;
+                if (!c) break;
+            }
+            return { mask, count, total: n };
+        }
+
+        function peakIndexRank(idx, ids, query, tol) {
+            const out = [];
+            for (const ei of ids) {
+                const e = idx.entries[ei].rec;
+                const p = e.peaks, it = e.intensities;
+                let mx = 0;
+                if (it) for (let k = 0; k < it.length; k++) if (it[k] > mx) mx = it[k];
+                let s = 0, nm = 0;
+                for (const q of query) {
+                    let bd = Infinity, bi = -1;
+                    for (let k = 0; k < p.length; k++) {
+                        const d = Math.abs(p[k] - q);
+                        if (d < bd) { bd = d; bi = k; }
+                    }
+                    if (bd <= tol) { nm++; s += (it && mx > 0 && isFinite(it[bi])) ? it[bi] / mx : 1; }
+                }
+                out.push({
+                    ei, matched: nm, strength: nm ? s / nm : 0,
+                    name: e.name || '(unnamed)', id: e.id || '',
+                    formula: e.formula || '', source: e.source || idx.entries[ei].srcLabel || ''
+                });
+            }
+            // Deterministic: name breaks ties so the list is stable and testable.
+            out.sort((a, b) => (b.matched - a.matched) || (b.strength - a.strength)
+                               || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+            return out;
+        }
+
+        function peakIdSummary(idx, base, marked, x, tol, nameCap) {
+            if (!idx) return null;
+            const cap = nameCap || 200;
+            const total = idx.entries.length;
+            const hits = peakIndexAt(idx, x, tol);
+
+            // Hovering a band you already marked adds no information; say so instead of
+            // showing an unchanged count as though it were a narrowing step.
+            const already = marked.some(m => Math.abs(m - x) <= tol);
+
+            const keep = [];
+            let after = 0;
+            for (const ei of hits) {
+                if (base.mask && !base.mask[ei]) continue;
+                after++;
+                if (keep.length < cap) keep.push(ei);
+            }
+            const before = base.mask ? base.count : total;
+            const top = (after > 0 && after <= cap)
+                ? peakIndexRank(idx, keep, already ? marked : marked.concat([x]), tol)
+                : [];
+            return {
+                x, before, after, total, already,
+                // How many references in the whole set have a band here at all: the
+                // honest measure of how diagnostic this one position is.
+                atAll: hits.length,
+                commonFrac: total ? hits.length / total : 0,
+                top, capped: after > cap, nameCap: cap
+            };
+        }
+
+        // ==== Peak identification on hover ==============================
+        // Hovering a band reports which references are still consistent with
+        // every peak already marked, and how the candidate count shrinks when
+        // this one is added. Identification comes from a pattern, never from a
+        // single line, and this makes that visible instead of asserted.
+        const PEAKID_BIN_W = 1.0;
+        const PEAKID_UNIT = 'cm⁻¹';
+        const PEAKID_DEF_TOL = 12;
+        const PEAKID_NAME_CAP = 200;      // above this, show counts but no names
+        const PEAKID_TOP_SHOW = 6;
+        const PEAKID_MAX_POSITIONS = 24e6; // refuse to index beyond this
+
+        let peakIdOn = false, peakIdIndex = null, peakIdSig = "";
+        let peakIdBase = null, peakIdBaseSig = "";
+        let peakIdPinned = false, peakIdRaf = 0, peakIdPendX = null;
+        let peakIdPeakCache = {}, peakIdMouse = { x: 0, y: 0 }, peakIdLastSnap = null;
+
+        document.addEventListener('mousemove', e => { peakIdMouse.x = e.clientX; peakIdMouse.y = e.clientY; });
+
+        function peakIdTol() {
+            const el = document.getElementById('db-match-tol');
+            const t = el ? parseFloat(el.value) : NaN;
+            return isNaN(t) ? PEAKID_DEF_TOL : t;
+        }
+
+        function peakIdSourceSig() {
+            return dbEnabledSources().map(s => s.key + ':' + s.entries.length).join('|');
+        }
+
+        function peakIdEnsureIndex() {
+            const sig = peakIdSourceSig();
+            if (peakIdIndex && sig === peakIdSig) return peakIdIndex;
+            const srcs = dbEnabledSources();
+            let positions = 0;
+            for (const s of srcs) if (s.kind !== 'folder')
+                for (const e of s.entries) positions += (e.peaks && e.peaks.length) || 0;
+            if (positions > PEAKID_MAX_POSITIONS) {
+                peakIdIndex = null; peakIdSig = sig;
+                peakIdNote(`Too many reference ${'band'}s to index (${(positions / 1e6).toFixed(0)}M). `
+                           + `Disable a library and try again.`, true);
+                return null;
+            }
+            peakIdIndex = srcs.length ? peakIndexBuild(srcs, PEAKID_BIN_W) : null;
+            peakIdSig = sig; peakIdBase = null; peakIdBaseSig = "";
+            return peakIdIndex;
+        }
+
+        function peakIdEnsureBase(tol) {
+            // Signature includes the marked peaks, so marking one invalidates the
+            // cache on its own -- no hook needed in the peak-marking path.
+            const sig = peakGuessesX.join(',') + '@' + tol + '#' + peakIdSig;
+            if (peakIdBase && sig === peakIdBaseSig) return peakIdBase;
+            peakIdBase = peakIndexNarrow(peakIdIndex, peakGuessesX, tol);
+            peakIdBaseSig = sig;
+            return peakIdBase;
+        }
+
+        // Detected features of a displayed spectrum, cached until the data change.
+        function peakIdSpectrumPeaks(key) {
+            const d = persistentDatasets[key];
+            if (!d || !d.angles || d.angles.length < 5) return [];
+            const c = peakIdPeakCache[key];
+            if (c && c.n === d.angles.length && c.y0 === d.intensities[0]) return c.peaks;
+            const peaks = detectReferencePeaks(d.angles, d.intensities, 80, 0.02);
+            peakIdPeakCache[key] = { n: d.angles.length, y0: d.intensities[0], peaks };
+            return peaks;
+        }
+
+        // Snap to a real feature of the user's own spectrum: sweeping across flat
+        // baseline should say nothing rather than invent candidates.
+        function peakIdSnap(x, tol) {
+            let best = null, bd = Infinity;
+            for (const key of Object.keys(persistentDatasets)) {
+                if (key.startsWith('__fit_') || key.startsWith('__ref_')) continue;
+                const cb = document.getElementById('fit-check-' + key);
+                if (cb && !cb.checked) continue;
+                for (const p of peakIdSpectrumPeaks(key)) {
+                    const d = Math.abs(p - x);
+                    if (d < bd) { bd = d; best = p; }
+                }
+            }
+            return (best !== null && bd <= tol) ? best : null;
+        }
+
+        function peakIdNote(msg, warn) {
+            const el = document.getElementById('peakid-note');
+            if (el) { el.innerHTML = msg; el.style.color = warn ? '#b02a37' : '#6c757d'; }
+        }
+
+        function peakIdToggle() {
+            const cb = document.getElementById('toggle-peakid');
+            peakIdOn = !!(cb && cb.checked);
+            if (!peakIdOn) { peakIdHide(true); peakIdNote(''); return; }
+            if (!dbEnabledSources().length) {
+                peakIdNote('Load or enable a reference library first.', true);
+                return;
+            }
+            const t0 = performance.now();
+            const idx = peakIdEnsureIndex();
+            if (!idx) { if (dbEnabledSources().length) peakIdNote('Nothing indexable in the enabled sources.', true); return; }
+            peakIdNote(`Indexed ${idx.nPeaks.toLocaleString()} ${'band'}s from `
+                       + `${idx.entries.length.toLocaleString()} references in ${(performance.now() - t0).toFixed(0)} ms. `
+                       + `Hover a ${'band'}; click to pin.`);
+        }
+
+        function peakIdHide(force) {
+            if (peakIdPinned && !force) return;
+            const tip = document.getElementById('peakid-tip');
+            if (tip) tip.style.display = 'none';
+            if (force) { peakIdPinned = false; peakIdLastSnap = null; }
+        }
+
+        function peakIdUnpin() { peakIdPinned = false; peakIdHide(true); }
+
+        function peakIdPin() {
+            if (!peakIdOn || peakIdLastSnap === null) return;
+            peakIdPinned = true;
+            const tip = document.getElementById('peakid-tip');
+            if (tip) tip.style.display = 'block';
+            peakIdDraw(peakIdLastSnap);
+        }
+
+        // Hover fires far faster than the screen refreshes; coalesce to one frame.
+        function peakIdHover(x) {
+            if (!peakIdOn || peakIdPinned) return;
+            peakIdPendX = x;
+            if (peakIdRaf) return;
+            peakIdRaf = requestAnimationFrame(() => {
+                peakIdRaf = 0;
+                const xx = peakIdPendX;
+                if (xx === null || xx === undefined) return;
+                const tol = peakIdTol();
+                const snap = peakIdSnap(xx, Math.max(tol, (PEAKID_BIN_W * 4)));
+                if (snap === null) { peakIdLastSnap = null; peakIdHide(); return; }
+                peakIdLastSnap = snap;
+                peakIdDraw(snap);
+            });
+        }
+
+        function peakIdFmt(v) {
+            return PEAKID_UNIT === '°' ? v.toFixed(2) : v.toFixed(0);
+        }
+
+        function peakIdDraw(snap) {
+            const tip = document.getElementById('peakid-tip');
+            if (!tip) return;
+            const idx = peakIdEnsureIndex();
+            if (!idx) { peakIdHide(); return; }
+            const tol = peakIdTol();
+            const base = peakIdEnsureBase(tol);
+            const s = peakIdSummary(idx, base, peakGuessesX.slice(), snap, tol, PEAKID_NAME_CAP);
+            if (!s) { peakIdHide(); return; }
+
+            const pct = (s.commonFrac * 100);
+            const rarity = pct >= 20 ? 'very common' : pct >= 5 ? 'common'
+                         : pct >= 1 ? 'fairly distinctive' : 'distinctive';
+            let h = `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">`
+                  + `<b>${'Raman shift'} ${peakIdFmt(snap)} ${PEAKID_UNIT}</b>`
+                  + (peakIdPinned ? `<span onclick="peakIdUnpin()" style="cursor:pointer;color:#adb5bd;font-weight:bold;">&#10005;</span>` : '')
+                  + `</div>`;
+            h += `<div style="color:#6c757d;font-size:0.76rem;margin:2px 0 6px 0;">`
+               + `in ${s.atAll.toLocaleString()} of ${s.total.toLocaleString()} references `
+               + `(${pct < 0.1 ? '<0.1' : pct.toFixed(1)}%) &middot; ${rarity}</div>`;
+
+            if (s.already) {
+                h += `<div style="color:#0d6efd;">Already marked &mdash; adds nothing new.</div>`;
+            } else if (!peakGuessesX.length) {
+                h += `<div><b>${s.after.toLocaleString()}</b> references have a ${'band'} here.</div>`
+                   + `<div style="color:#b02a37;margin-top:4px;font-size:0.78rem;">`
+                   + `One ${'band'} is not an identification. Right-click to mark peaks &mdash; `
+                   + `the candidate list collapses fast.</div>`;
+            } else if (s.after === 0) {
+                h += `<div style="color:#b02a37;">No reference matches all ${peakGuessesX.length} `
+                   + `marked peak(s) <i>and</i> this one.</div>`
+                   + `<div style="color:#6c757d;margin-top:4px;font-size:0.78rem;">`
+                   + `Either this ${'band'} belongs to a second phase, or the tolerance `
+                   + `(&plusmn;${tol} ${PEAKID_UNIT}) is too tight.</div>`;
+            } else {
+                const cut = s.before > 0 ? (100 * (1 - s.after / s.before)) : 0;
+                h += `<div>add this ${'band'} &rarr; <b>${s.before.toLocaleString()}</b> `
+                   + `become <b style="color:#198754;">${s.after.toLocaleString()}</b>`
+                   + (cut >= 1 ? ` <span style="color:#6c757d;">(&minus;${cut.toFixed(0)}%)</span>` : '')
+                   + `</div>`;
+            }
+
+            if (s.top.length) {
+                h += `<div style="margin-top:6px;border-top:1px solid #e9ecef;padding-top:5px;">`;
+                for (const r of s.top.slice(0, PEAKID_TOP_SHOW)) {
+                    const bar = Math.round(r.strength * 100);
+                    h += `<div style="display:flex;justify-content:space-between;gap:8px;line-height:1.5;">`
+                       + `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px;">`
+                       + `${r.name}${r.formula ? ` <span style="color:#6c757d;">${r.formula}</span>` : ''}</span>`
+                       + `<span style="color:#6c757d;flex-shrink:0;" title="mean relative height of the matching bands">${bar}%</span></div>`;
+                }
+                if (s.after > PEAKID_TOP_SHOW)
+                    h += `<div style="color:#6c757d;font-size:0.76rem;margin-top:3px;">`
+                       + `+${(s.after - PEAKID_TOP_SHOW).toLocaleString()} more &mdash; use Match for the full ranking.</div>`;
+                h += `</div>`;
+            } else if (s.capped) {
+                h += `<div style="color:#6c757d;margin-top:5px;font-size:0.78rem;">`
+                   + `Too many to name usefully. Mark more peaks to get below ${PEAKID_NAME_CAP}.</div>`;
+            }
+
+            tip.innerHTML = h;
+            tip.style.display = 'block';
+            // Keep the card on screen near the cursor.
+            const w = tip.offsetWidth || 260, hh = tip.offsetHeight || 90;
+            let lx = peakIdMouse.x + 16, ly = peakIdMouse.y + 12;
+            if (lx + w > window.innerWidth - 8) lx = peakIdMouse.x - w - 14;
+            if (ly + hh > window.innerHeight - 8) ly = Math.max(8, peakIdMouse.y - hh - 12);
+            tip.style.left = lx + 'px';
+            tip.style.top = ly + 'px';
+        }
+
         function peakMatchScore(refPeaks, expPeaks, tol) {
             if (!expPeaks.length || !refPeaks.length) return { score: 0, avg: tol, matched: 0 };
             let matched = 0, cum = 0;
@@ -2420,11 +2804,15 @@
             const chartDiv = document.getElementById('chart-container');
             chartDiv.on('plotly_hover', function(data) {
                 if (data && data.points && data.points.length > 0) {
-                    currentMouseHoverX = data.points[0].x; document.getElementById('cursor-bar').innerHTML = `Cursor Position: Raman shift = <b>${currentMouseHoverX.toFixed(2)} cm⁻¹</b>`;
+                    currentMouseHoverX = data.points[0].x;
+                    peakIdHover(currentMouseHoverX); document.getElementById('cursor-bar').innerHTML = `Cursor Position: Raman shift = <b>${currentMouseHoverX.toFixed(2)} cm⁻¹</b>`;
                 }
             });
-            chartDiv.on('plotly_unhover', function() { currentMouseHoverX = null; document.getElementById('cursor-bar').innerHTML = `Cursor Position: Raman shift = --`; });
+            chartDiv.on('plotly_unhover', function() { peakIdHide(); currentMouseHoverX = null; document.getElementById('cursor-bar').innerHTML = `Cursor Position: Raman shift = --`; });
             chartDiv.on('plotly_click', function(plotlyData) {
+                // Pin the identification card so a long list can be read.
+                if (peakIdOn && !normalizationModeActive) { peakIdPin(); }
+
                 if (normalizationModeActive && plotlyData && plotlyData.points && plotlyData.points.length > 0) {
                     const xClick = plotlyData.points[0].x;
                     let windowSize = parseFloat(document.getElementById('norm-span-input').value);
@@ -2530,5 +2918,6 @@
             refreshCheckboxTargetsPanel(); updateChartCanvas();
         }
     </script>
+    <div id="peakid-tip" style="display:none;position:fixed;z-index:9999;max-width:290px;background:#fff;border:1px solid #ced4da;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,0.18);padding:9px 11px;font-family:Arial,sans-serif;font-size:0.82rem;color:#212529;pointer-events:auto;"></div>
 </body>
 </html>
