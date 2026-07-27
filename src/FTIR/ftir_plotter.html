@@ -333,7 +333,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "ftir-v2026.07.27.6";
+        const VERSION_TAG = "ftir-v2026.07.27.7";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -2577,6 +2577,9 @@
 
             tip.innerHTML = h;
             tip.style.display = 'block';
+            // Clickable only while pinned (for the close button). Following the
+            // cursor it is pure readout, and must not eat a click meant for the plot.
+            tip.style.pointerEvents = peakIdPinned ? 'auto' : 'none';
             // Keep the card on screen near the cursor.
             const w = tip.offsetWidth || 260, hh = tip.offsetHeight || 90;
             let lx = peakIdMouse.x + 16, ly = peakIdMouse.y + 12;
@@ -2711,7 +2714,11 @@
                 });
             });
             const verticalShapes = peakGuessesX.map(x_g => ({
-                type: 'line', xref: 'x', yref: 'paper', x0: x_g, y0: 0, x1: x_g, y1: 1, line: { color: '#d63384', width: 1.5, dash: 'dashdot' }
+                // layer:'below' is load-bearing, not cosmetic. Plotly draws
+                // 'above' shapes over the drag layer, so a full-height marker
+                // line intercepts the mousedown that starts a zoom and the plot
+                // stops responding to zoom/pan the moment the first peak is marked.
+                type: 'line', layer: 'below', xref: 'x', yref: 'paper', x0: x_g, y0: 0, x1: x_g, y1: 1, line: { color: '#d63384', width: 1.5, dash: 'dashdot' }
             }));
             const layout = {
                 title: { text: 'FTIR Spectra', font: { size: 15, family: 'Arial, sans-serif', weight: 'bold' } },
@@ -2734,8 +2741,11 @@
             });
             chartDiv.on('plotly_unhover', function() { peakIdHide(); currentMouseHoverX = null; document.getElementById('cursor-bar').innerHTML = `Cursor Position: Wavenumber = --`; });
             chartDiv.on('plotly_click', function(plotlyData) {
-                // Pin the identification card so a long list can be read.
-                if (peakIdOn && !normalizationModeActive) { peakIdPin(); }
+                // Pin the identification card so a long list can be read. Left
+                // button only: right-click marks a peak, and pinning there froze
+                // the card over the plot until the page was reloaded.
+                const peakIdBtn = plotlyData && plotlyData.event ? plotlyData.event.button : 0;
+                if (peakIdOn && !normalizationModeActive && peakIdBtn === 0) { peakIdPin(); }
 
                 if (normalizationModeActive && plotlyData && plotlyData.points && plotlyData.points.length > 0) {
                     const xClick = plotlyData.points[0].x;
@@ -2842,6 +2852,6 @@
             refreshCheckboxTargetsPanel(); updateChartCanvas();
         }
     </script>
-    <div id="peakid-tip" style="display:none;position:fixed;z-index:9999;max-width:290px;background:#fff;border:1px solid #ced4da;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,0.18);padding:9px 11px;font-family:Arial,sans-serif;font-size:0.82rem;color:#212529;pointer-events:auto;"></div>
+    <div id="peakid-tip" style="display:none;position:fixed;z-index:9999;max-width:290px;background:#fff;border:1px solid #ced4da;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,0.18);padding:9px 11px;font-family:Arial,sans-serif;font-size:0.82rem;color:#212529;pointer-events:none;"></div>
 </body>
 </html>
