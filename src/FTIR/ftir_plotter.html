@@ -327,7 +327,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "ftir-v2026.07.27.1";
+        const VERSION_TAG = "ftir-v2026.07.27.2";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -1101,6 +1101,14 @@
             const o = rruffServerOffer;
             if (!o || o.loaded || o.busy) return;
             const statusEl = document.getElementById('db-status');
+            // Belt and braces: if this file is already loaded, mark the offer done
+            // rather than adding a second copy.
+            const dupKey = "spec_lib_server_" + o.name;
+            if (specLibraries.some(l => l.key === dupKey || l.file === o.name)) {
+                o.loaded = true;
+                if (typeof dbRefresh === 'function') dbRefresh();
+                return;
+            }
             o.busy = true; renderRruffOffer();
             showInitBanner('\u23F3 Downloading RRUFF library\u2026');
             try {
@@ -1261,7 +1269,7 @@
             return out;
         }
         async function libSaveIndex() {
-            try { await idbSaveKey(LIB_IDB_INDEX_KEY, specLibraries.map(l => ({ name: l.name, key: l.key, active: l.active }))); } catch (e) {}
+            try { await idbSaveKey(LIB_IDB_INDEX_KEY, specLibraries.map(l => ({ name: l.name, file: l.file || null, key: l.key, active: l.active }))); } catch (e) {}
         }
         async function addSpecLibrary(event) {
             const files = Array.from(event.target.files || []); event.target.value = '';
@@ -1272,9 +1280,12 @@
                     const buf = await file.arrayBuffer();
                     const entries = await libIngestBytes(buf);
                     const key = "spec_lib_" + file.name;
-                    const existing = specLibraries.findIndex(l => l.name === file.name);
-                    if (existing >= 0) specLibraries.splice(existing, 1);
-                    specLibraries.push({ name: file.name, key, entries, active: true });
+                    // Identity is the FILE, not the display name: a manifest label
+                    // renames a library, and keying on the name meant the same file
+                    // could be added over and over.
+                    const existing = specLibraries.findIndex(l => l.key === key || l.file === file.name);
+                    if (existing >= 0) specLibraries.splice(existing, 1);   // reloading replaces
+                    specLibraries.push({ name: file.name, file: file.name, key, entries, active: true });
                     if (buf.byteLength <= LIB_IDB_MAX_BYTES) { try { await idbSaveKey(key, buf); } catch (e) {} }
                 } catch (err) {
                     statusEl.innerText = "Could not open " + file.name + ": " + err.message;
@@ -1617,7 +1628,7 @@
                 if (!res.ok || !isHdf5(res.buffer)) throw new Error("not an HDF5 library");
                 const entries = await libIngestBytes(res.buffer);
                 const key = "spec_lib_server_" + o.name;
-                specLibraries.push({ name: o.label || o.name, key, entries, active: true });
+                specLibraries.push({ name: o.label || o.name, file: o.name, key, entries, active: true });
                 if (res.buffer.byteLength <= LIB_IDB_MAX_BYTES) { try { await idbSaveKey(key, res.buffer); } catch (e) {} }
                 await libSaveIndex();
                 o.loaded = true;
@@ -1641,7 +1652,9 @@
                             const buf = await idbLoadKey(meta.key);
                             if (!buf) continue;
                             const entries = await libIngestBytes(buf);
-                            specLibraries.push({ name: meta.name, key: meta.key, entries, active: meta.active !== false });
+                            specLibraries.push({ name: meta.name, file: meta.file || null,
+                                                  key: meta.key, entries,
+                                                  active: meta.active !== false });
                         } catch (e) {}
                     }
                     refreshLibsPanel(); updateLibPanelState();
@@ -1661,7 +1674,9 @@
             for (const entry of urls) {
                 const url = entry.url;
                 const name = url.split('/').pop();
-                if (specLibraries.some(l => l.name === name || l.name === "(server) " + name)) continue;
+                const key = "spec_lib_server_" + name;
+                if (specLibraries.some(l => l.key === key || l.file === name
+                                     || l.name === name || l.name === "(server) " + name)) continue;
                 const size = await headSize(url);
                 if (size === null) continue;                  // not actually there
                 libServerOffers.push({ url, name, size, loaded: false, busy: false,

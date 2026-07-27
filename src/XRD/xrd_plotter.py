@@ -47,7 +47,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.07.27.1"
+VERSION_TAG = "v2026.07.27.2"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 # RRUFF powder reference library (patterns calculated for Cu radiation, i.e. the
@@ -386,6 +386,10 @@ def load_cod_powder_h5_library(path):
         def dec(v):
             return v.decode('latin1') if isinstance(v, bytes) else str(v)
 
+        # File-level source, so the unified panel can label the library properly
+        # instead of falling back to the generic "Library".
+        file_source = dec(f.attrs.get('source', '')) or 'COD'
+
         has_curve = False
         for gname in sp:
             grp = sp[gname]
@@ -410,6 +414,9 @@ def load_cod_powder_h5_library(path):
                 'group': gname,
                 'name': dec(a.get('name', gname)),
                 'id': cod_id,
+                # Without this the unified panel had no source to show and fell
+                # back to the generic "Library" label.
+                'source': dec(a.get('source', '')) or file_source,
                 'url': dec(a.get('url', cod_url(cod_id) or '')),
                 'formula': dec(a.get('formula', '')),
                 'sg': dec(a.get('sg', '')),

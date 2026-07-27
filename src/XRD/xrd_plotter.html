@@ -301,7 +301,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "v2026.07.27.1";
+        const VERSION_TAG = "v2026.07.27.2";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -1541,6 +1541,7 @@
                     f = new h5.File(fsName, "r");
                     const sp = f.get("spectra");
                     if (!sp) throw new Error("Not a COD powder library (no 'spectra' group).");
+                    const fileSource = attrToString(f.attrs && f.attrs["source"]) || "COD";
                     const names = sp.keys();
                     const codStep = Math.max(1, Math.floor(names.length / 50));  // ~50 progress ticks
                     for (let idx = 0; idx < names.length; idx++) {
@@ -1559,6 +1560,9 @@
                         out.push({
                             name: attrToString(g.attrs["name"]) || names[idx],
                             id: codId,
+                            // Without this the unified panel had no source to show
+                            // and fell back to the generic "Library" label.
+                            source: attrToString(g.attrs["source"]) || fileSource,
                             formula: attrToString(g.attrs["formula"]),
                             url: attrToString(g.attrs["url"]) || codUrl(codId),
                             peaks: f32(pkds ? pkds.value : attrToArray(g.attrs["peaks"])),
@@ -1607,7 +1611,7 @@
             return out;
         }
         async function codSaveIndex() {
-            try { await idbSaveKey(COD_IDB_INDEX_KEY, codLibraries.map(l => ({ name: l.name, key: l.key, active: l.active }))); } catch (e) {}
+            try { await idbSaveKey(COD_IDB_INDEX_KEY, codLibraries.map(l => ({ name: l.name, file: l.file || null, key: l.key, active: l.active }))); } catch (e) {}
         }
         async function addCodLibrary(event) {
             const files = Array.from(event.target.files || []); event.target.value = '';
@@ -1618,9 +1622,12 @@
                     const buf = await file.arrayBuffer();
                     const entries = await codIngestBytes(buf);
                     const key = "cod_lib_" + file.name;
-                    const existing = codLibraries.findIndex(l => l.name === file.name);
-                    if (existing >= 0) codLibraries.splice(existing, 1);
-                    codLibraries.push({ name: file.name, key, entries, active: true });
+                    // Identity is the FILE, not the display name: a manifest label
+                    // renames a library, and keying on the name meant the same file
+                    // could be added over and over.
+                    const existing = codLibraries.findIndex(l => l.key === key || l.file === file.name);
+                    if (existing >= 0) codLibraries.splice(existing, 1);   // reloading replaces
+                    codLibraries.push({ name: file.name, file: file.name, key, entries, active: true });
                     if (buf.byteLength <= COD_IDB_MAX_BYTES) {
                         try { await idbSaveKey(key, buf); } catch (e) {}
                     }   // a multi-hundred-MB blob would blow the quota and cost another copy
@@ -1776,6 +1783,14 @@
             const o = codServerOffers[idx];
             if (!o || o.loaded || o.busy) return;
             const statusEl = document.getElementById('db-status');
+            // Belt and braces: if this file is already loaded, mark the offer done
+            // rather than adding a second copy.
+            const dupKey = "cod_lib_server_" + o.name;
+            if (codLibraries.some(l => l.key === dupKey || l.file === o.name)) {
+                o.loaded = true;
+                if (typeof dbRefresh === 'function') dbRefresh();
+                return;
+            }
             o.busy = true; renderCodOffers();
             try {
                 const res = await fetchArrayBufferWithProgress(o.url, function (recv, total) {
@@ -1785,7 +1800,7 @@
                 if (!res.ok || !isHdf5(res.buffer)) throw new Error("not an HDF5 library");
                 const entries = await codIngestBytes(res.buffer);
                 const key = "rod_lib_server_" + o.name;
-                codLibraries.push({ name: o.label || o.name, key, entries, active: true });
+                codLibraries.push({ name: o.label || o.name, file: o.name, key, entries, active: true });
                 if (res.buffer.byteLength <= COD_IDB_MAX_BYTES) {
                         try { await idbSaveKey(key, res.buffer); } catch (e) {}
                     }
@@ -1862,7 +1877,9 @@
                             const buf = await idbLoadKey(meta.key);
                             if (!buf) continue;
                             const entries = await codIngestBytes(buf);
-                            codLibraries.push({ name: meta.name, key: meta.key, entries, active: meta.active !== false });
+                            codLibraries.push({ name: meta.name, file: meta.file || null,
+                                                  key: meta.key, entries,
+                                                  active: meta.active !== false });
                         } catch (e) {}
                     }
                     refreshCodLibsPanel(); updateCodPanelState();
@@ -1882,7 +1899,9 @@
             for (const entry of urls) {
                 const url = entry.url;
                 const name = url.split('/').pop();
-                if (codLibraries.some(l => l.name === name || l.name === "(server) " + name)) continue;
+                const key = "cod_lib_server_" + name;
+                if (codLibraries.some(l => l.key === key || l.file === name
+                                     || l.name === name || l.name === "(server) " + name)) continue;
                 const size = await headSize(url);
                 if (size === null) continue;                  // not actually there
                 codServerOffers.push({ url, name, size, loaded: false, busy: false,
