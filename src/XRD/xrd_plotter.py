@@ -47,7 +47,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.07.27.3"
+VERSION_TAG = "v2026.07.27.4"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 # RRUFF powder reference library (patterns calculated for Cu radiation, i.e. the
@@ -225,7 +225,20 @@ def peak_index_rank(idx, ids, query, tol):
                     'source': e.get('source') or idx['entries'][int(ei)]['label'] or ''})
     # Deterministic: name breaks ties so the list is stable and testable.
     out.sort(key=lambda r: (-r['matched'], -r['strength'], r['name']))
-    return out
+    # COD carries several entries for one phase, so an uncollapsed list showed
+    # "Iron Fe" three times and wasted half the card. Collapse by name+formula,
+    # keeping the best-ranked representative, and record how many entries it
+    # stands for so the "+N more" arithmetic stays honest.
+    seen, collapsed = {}, []
+    for r in out:
+        k = '%s %s' % (r['name'], r['formula'])
+        if k not in seen:
+            r['count'] = 1
+            seen[k] = len(collapsed)
+            collapsed.append(r)
+        else:
+            collapsed[seen[k]]['count'] += 1
+    return collapsed
 
 def peak_id_summary(idx, base, marked, x, tol, name_cap=200):
     """The readout for one hovered position.
@@ -2024,7 +2037,20 @@ class XRDPlotterGUI:
         self._peakid_sig = sig
         self._peakid_base = None
         self._peakid_base_sig = ''
+        # Toggling a source rebuilds the index, so the note has to follow or it
+        # keeps advertising a reference count that is no longer loaded.
+        if bool(self.peakid_var.get()):
+            self.peakid_report()
         return self._peakid_index
+
+    def peakid_report(self):
+        if self._peakid_index is None:
+            self.peakid_note.set("Nothing indexable in the enabled sources.")
+            return
+        self.peakid_note.set("Indexed {:,} reflections from {:,} references. "
+                             "Hover a reflection on the plot.".format(
+                                 self._peakid_index['n_peaks'],
+                                 len(self._peakid_index['entries'])))
 
     def peakid_ensure_base(self, tol):
         # The signature includes the marked peaks, so marking one invalidates
@@ -2047,12 +2073,8 @@ class XRDPlotterGUI:
             self.peakid_note.set("Load or enable an .h5 library first.")
             self.peakid_var.set(False)
             return
-        idx = self.peakid_ensure_index()
-        if idx is None:
-            return
-        self.peakid_note.set("Indexed {:,} reflections from {:,} references. "
-                             "Hover a reflection on the plot.".format(
-                                 idx['n_peaks'], len(idx['entries'])))
+        self.peakid_ensure_index()
+        self.peakid_report()
 
     def peakid_spectrum_peaks(self, key):
         """Detected features of one displayed spectrum, cached until it changes."""
@@ -2104,6 +2126,9 @@ class XRDPlotterGUI:
         n_marked = len(self.peak_guesses)
         if s['already']:
             lines.append('already marked - adds nothing new')
+            # Without this the count was only inferrable from "6 + 60 more".
+            lines.append('{:,} candidate(s) still match your {} marked peak(s)'.format(
+                s['after'], n_marked))
         elif not n_marked:
             lines.append('{:,} references have a reflection here.'.format(s['after']))
             lines.append('One reflection is not an identification -')
@@ -2116,15 +2141,21 @@ class XRDPlotterGUI:
             lines.append('add this reflection: {:,} become {:,}{}'.format(
                 s['before'], s['after'], '  (-%.0f%%)' % cut if cut >= 1 else ''))
         if s['top']:
+            shown = s['top'][:PEAKID_TOP_SHOW]
+            # Rows are collapsed phases, so "+N more" counts remaining ENTRIES,
+            # not remaining rows, or the arithmetic stops adding up.
+            shown_entries = sum(r.get('count', 1) for r in shown)
             lines.append('-' * 38)
-            for r in s['top'][:PEAKID_TOP_SHOW]:
+            for r in shown:
                 nm = r['name'] if len(r['name']) <= 24 else r['name'][:23] + '~'
                 if r['formula']:
                     nm = '%s %s' % (nm, r['formula'])
+                if r.get('count', 1) > 1:
+                    nm = '%s x%d' % (nm, r['count'])
                 lines.append('%-30s %3.0f%%' % (nm[:30], r['strength'] * 100))
-            if s['after'] > PEAKID_TOP_SHOW:
+            if s['after'] > shown_entries:
                 lines.append('+{:,} more - use Match for the full ranking'.format(
-                    s['after'] - PEAKID_TOP_SHOW))
+                    s['after'] - shown_entries))
         elif s['capped']:
             lines.append('too many to name; mark more peaks (< %d)' % s['name_cap'])
         return '\n'.join(lines)

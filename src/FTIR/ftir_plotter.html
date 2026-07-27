@@ -333,7 +333,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "ftir-v2026.07.27.3";
+        const VERSION_TAG = "ftir-v2026.07.27.4";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -2313,7 +2313,18 @@
             // Deterministic: name breaks ties so the list is stable and testable.
             out.sort((a, b) => (b.matched - a.matched) || (b.strength - a.strength)
                                || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-            return out;
+            // COD carries several entries for one phase, so an uncollapsed list showed
+            // "Iron Fe" three times and wasted half the card. Collapse by name+formula,
+            // keeping the best-ranked representative, and record how many entries it
+            // stands for so the "+N more" arithmetic stays honest.
+            const seen = new Map(), collapsed = [];
+            for (const r of out) {
+                const k = r.name + ' ' + r.formula;
+                const at = seen.get(k);
+                if (at === undefined) { r.count = 1; seen.set(k, collapsed.length); collapsed.push(r); }
+                else collapsed[at].count++;
+            }
+            return collapsed;
         }
 
         function peakIdSummary(idx, base, marked, x, tol, nameCap) {
@@ -2391,7 +2402,17 @@
             }
             peakIdIndex = srcs.length ? peakIndexBuild(srcs, PEAKID_BIN_W) : null;
             peakIdSig = sig; peakIdBase = null; peakIdBaseSig = "";
+            // Toggling a source rebuilds the index, so the note has to follow or
+            // it keeps advertising a reference count that is no longer loaded.
+            if (peakIdOn) peakIdReport();
             return peakIdIndex;
+        }
+
+        function peakIdReport() {
+            if (!peakIdIndex) { peakIdNote('Nothing indexable in the enabled sources.', true); return; }
+            peakIdNote(`Indexed ${peakIdIndex.nPeaks.toLocaleString()} ${'band'}s from `
+                       + `${peakIdIndex.entries.length.toLocaleString()} references. `
+                       + `Hover a ${'band'}; click to pin.`);
         }
 
         function peakIdEnsureBase(tol) {
@@ -2444,12 +2465,8 @@
                 peakIdNote('Load or enable a reference library first.', true);
                 return;
             }
-            const t0 = performance.now();
-            const idx = peakIdEnsureIndex();
-            if (!idx) { if (dbEnabledSources().length) peakIdNote('Nothing indexable in the enabled sources.', true); return; }
-            peakIdNote(`Indexed ${idx.nPeaks.toLocaleString()} ${'band'}s from `
-                       + `${idx.entries.length.toLocaleString()} references in ${(performance.now() - t0).toFixed(0)} ms. `
-                       + `Hover a ${'band'}; click to pin.`);
+            peakIdEnsureIndex();
+            peakIdReport();
         }
 
         function peakIdHide(force) {
@@ -2512,7 +2529,10 @@
                + `(${pct < 0.1 ? '<0.1' : pct.toFixed(1)}%) &middot; ${rarity}</div>`;
 
             if (s.already) {
-                h += `<div style="color:#0d6efd;">Already marked &mdash; adds nothing new.</div>`;
+                h += `<div style="color:#0d6efd;">Already marked &mdash; adds nothing new.</div>`
+                   // Without this the count was only inferrable from "6 + 60 more".
+                   + `<div><b>${s.after.toLocaleString()}</b> candidate(s) still match your `
+                   + `${peakGuessesX.length} marked peak(s).</div>`;
             } else if (!peakGuessesX.length) {
                 h += `<div><b>${s.after.toLocaleString()}</b> references have a ${'band'} here.</div>`
                    + `<div style="color:#b02a37;margin-top:4px;font-size:0.78rem;">`
@@ -2533,17 +2553,22 @@
             }
 
             if (s.top.length) {
+                const shown = s.top.slice(0, PEAKID_TOP_SHOW);
+                // Rows are collapsed phases, so "+N more" counts remaining
+                // ENTRIES, not remaining rows, or the arithmetic stops adding up.
+                const shownEntries = shown.reduce((n, r) => n + (r.count || 1), 0);
                 h += `<div style="margin-top:6px;border-top:1px solid #e9ecef;padding-top:5px;">`;
-                for (const r of s.top.slice(0, PEAKID_TOP_SHOW)) {
+                for (const r of shown) {
                     const bar = Math.round(r.strength * 100);
                     h += `<div style="display:flex;justify-content:space-between;gap:8px;line-height:1.5;">`
                        + `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px;">`
-                       + `${r.name}${r.formula ? ` <span style="color:#6c757d;">${r.formula}</span>` : ''}</span>`
+                       + `${r.name}${r.formula ? ` <span style="color:#6c757d;">${r.formula}</span>` : ''}`
+                       + `${(r.count || 1) > 1 ? ` <span style="color:#adb5bd;">&times;${r.count}</span>` : ''}</span>`
                        + `<span style="color:#6c757d;flex-shrink:0;" title="mean relative height of the matching bands">${bar}%</span></div>`;
                 }
-                if (s.after > PEAKID_TOP_SHOW)
+                if (s.after > shownEntries)
                     h += `<div style="color:#6c757d;font-size:0.76rem;margin-top:3px;">`
-                       + `+${(s.after - PEAKID_TOP_SHOW).toLocaleString()} more &mdash; use Match for the full ranking.</div>`;
+                       + `+${(s.after - shownEntries).toLocaleString()} more &mdash; use Match for the full ranking.</div>`;
                 h += `</div>`;
             } else if (s.capped) {
                 h += `<div style="color:#6c757d;margin-top:5px;font-size:0.78rem;">`
