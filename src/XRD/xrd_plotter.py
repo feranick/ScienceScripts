@@ -47,7 +47,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.07.27.4"
+VERSION_TAG = "v2026.07.27.5"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 # RRUFF powder reference library (patterns calculated for Cu radiation, i.e. the
@@ -3116,7 +3116,12 @@ class XRDPlotterGUI:
         self.status_var.set("Active profiles loaded: 0"); self.cursor_var.set("Cursor Position: 2θ = --")
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the console script; also used by direct execution."""
     root = tk.Tk()
-    app = XRDPlotterGUI(root)
+    XRDPlotterGUI(root)
     root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

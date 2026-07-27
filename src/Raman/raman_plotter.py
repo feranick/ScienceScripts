@@ -29,7 +29,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "raman-v2026.07.27.4"
+VERSION_TAG = "raman-v2026.07.27.5"
 
 # RRUFF reference database (open Raman spectra of minerals).
 # Data are distributed as per-quality zip archives of two-column .txt files.
@@ -3438,7 +3438,12 @@ class RamanPlotterGUI:
         self.status_var.set("Active spectra loaded: 0"); self.cursor_var.set("Cursor Position: Raman shift = --")
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the console script; also used by direct execution."""
     root = tk.Tk()
-    app = RamanPlotterGUI(root)
+    RamanPlotterGUI(root)
     root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

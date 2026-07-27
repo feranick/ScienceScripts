@@ -88,11 +88,21 @@ except ImportError:
     sys.exit("This tool needs h5py:  pip install h5py")
 
 # Band detection is shared with the ROD builder so scores stay comparable.
+#
+# Relative first, absolute second, and the order matters. When installed as a
+# package the relative import is the only one guaranteed to reach OUR sibling;
+# trying the bare name first would happily bind to any build_rod_library.py that
+# happens to sit in the working directory, silently using a stale band detector.
+# Run directly from a checkout there is no parent package, the relative form
+# raises, and the bare name finds the file next to this one.
 try:
-    from build_rod_library import detect_bands, normalize, crop, decimate
+    from .build_rod_library import detect_bands, normalize, crop, decimate
 except ImportError:
-    sys.exit("Place this next to build_rod_library.py (it reuses the band "
-             "detector so match scores are consistent across libraries).")
+    try:
+        from build_rod_library import detect_bands, normalize, crop, decimate
+    except ImportError:
+        sys.exit("Place this next to build_rod_library.py (it reuses the band "
+                 "detector so match scores are consistent across libraries).")
 
 
 OSF_URLS = {

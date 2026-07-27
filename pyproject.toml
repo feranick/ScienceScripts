@@ -1,0 +1,149 @@
+# Wheel build for the spectroscopy toolchain in ScienceScripts.
+#
+# The scripts live in technique folders (src/XRD, src/Raman, src/FTIR,
+# src/Library-builders) rather than in an importable package, and one of those
+# folder names contains a hyphen, so it can never be a Python package name. The
+# build therefore REMAPS paths instead of moving files: hatchling's `sources`
+# table rewrites each folder onto a single import package, `sciencescripts`, and
+# the modules land side by side there. Nothing in the repo has to be rearranged,
+# and the scripts still run directly from a checkout exactly as before.
+#
+#   src/XRD/xrd_plotter.py              ->  sciencescripts/xrd_plotter.py
+#   src/Raman/raman_plotter.py          ->  sciencescripts/raman_plotter.py
+#   src/FTIR/ftir_plotter.py            ->  sciencescripts/ftir_plotter.py
+#   src/Library-builders/build_*.py     ->  sciencescripts/build_*.py
+#   src/sciencescripts/__init__.py      ->  sciencescripts/__init__.py
+#
+# Build and install:
+#   python -m pip install build
+#   python -m build --wheel
+#   python -m pip install dist/sciencescripts-*.whl
+
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sciencescripts"
+version = "2026.7.27.5"
+description = "Spectroscopy plotters (XRD, Raman, FTIR) with reference-database matching, and the library builders that feed them"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Nicola Ferralis", email = "ferralis@mit.edu" }]
+keywords = ["XRD", "Raman", "FTIR", "spectroscopy", "diffraction", "COD", "RRUFF"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+
+# Imported at module scope by at least one shipped module, so all are required.
+# tkinter is stdlib but is packaged separately by most Linux distributions and
+# cannot be expressed here -- see the note at the bottom of this file.
+dependencies = [
+    "numpy>=1.20",
+    "scipy>=1.7",
+    "matplotlib>=3.5",
+    "h5py>=3.0",
+    "pandas>=1.3",
+]
+
+[project.optional-dependencies]
+# Computing powder patterns from COD structures, and the Materials Project
+# lookup in xrd_plotter. Both import lazily, so the base install works without
+# them until you use those features.
+cod = ["pymatgen>=2023.1.30"]
+mp = ["pymatgen>=2023.1.30", "mp-api>=0.33"]
+# Reading Open Specy's .rds release. Either reader works; rdata is pure Python
+# and usually the easier install.
+openspecy = ["rdata>=0.9"]
+openspecy-pyreadr = ["pyreadr>=0.4"]
+all = ["pymatgen>=2023.1.30", "mp-api>=0.33", "rdata>=0.9"]
+
+[project.urls]
+Homepage = "https://github.com/feranick/ScienceScripts"
+Source = "https://github.com/feranick/ScienceScripts"
+Issues = "https://github.com/feranick/ScienceScripts/issues"
+
+# The three plotters open a Tk window. gui-scripts rather than scripts means
+# Windows launches them without a console window attached; on Linux and macOS
+# the two are equivalent.
+[project.gui-scripts]
+xrd-plotter = "sciencescripts.xrd_plotter:main"
+raman-plotter = "sciencescripts.raman_plotter:main"
+ftir-plotter = "sciencescripts.ftir_plotter:main"
+
+[project.scripts]
+build-cod-powder-library = "sciencescripts.build_cod_powder_library:main"
+build-rod-library = "sciencescripts.build_rod_library:main"
+build-openspecy-library = "sciencescripts.build_openspecy_library:main"
+build-rruff-library = "sciencescripts.build_rruff_library:main"
+build-rruff-ir-library = "sciencescripts.build_rruff_ir_library:main"
+build-rruff-powder-library = "sciencescripts.build_rruff_powder_library:main"
+make-libraries-manifest = "sciencescripts.make_libraries_manifest:main"
+
+# ---------------------------------------------------------------------------
+#  Wheel contents
+# ---------------------------------------------------------------------------
+# only-include names the paths that go in; sources rewrites where they land.
+# Everything else in the repo (SEM/EDS, PyMol Plotter, Build GMSH, the
+# converter, the .html apps) is deliberately left out: different dependencies,
+# and the .html pages are standalone files meant to be opened or served, not
+# imported.
+[tool.hatch.build.targets.wheel]
+only-include = [
+    "src/sciencescripts",
+    "src/XRD/xrd_plotter.py",
+    "src/Raman/raman_plotter.py",
+    "src/FTIR/ftir_plotter.py",
+    "src/Library-builders/build_cod_powder_library.py",
+    "src/Library-builders/build_rod_library.py",
+    "src/Library-builders/build_openspecy_library.py",
+    "src/Library-builders/build_rruff_library.py",
+    "src/Library-builders/build_rruff_ir_library.py",
+    "src/Library-builders/build_rruff_powder_library.py",
+    "src/Library-builders/make_libraries_manifest.py",
+]
+
+[tool.hatch.build.targets.wheel.sources]
+"src/sciencescripts" = "sciencescripts"
+"src/XRD" = "sciencescripts"
+"src/Raman" = "sciencescripts"
+"src/FTIR" = "sciencescripts"
+"src/Library-builders" = "sciencescripts"
+
+# The sdist carries the whole spectroscopy toolchain including the .html apps
+# and the integration notes, so a source archive is enough to work from.
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/sciencescripts/",
+    "src/XRD/",
+    "src/Raman/",
+    "src/FTIR/",
+    "src/Library-builders/",
+    "README.md",
+    "pyproject.toml",
+]
+exclude = ["**/__pycache__", "**/*.pyc", "**/*.h5"]
+
+# ---------------------------------------------------------------------------
+#  tkinter
+# ---------------------------------------------------------------------------
+# The three plotters need tkinter, which is part of the standard library but is
+# split into a separate OS package on most Linux distributions and is therefore
+# not installable with pip. If `xrd-plotter` exits with "No module named
+# 'tkinter'":
+#
+#   Debian/Ubuntu   sudo apt install python3-tk
+#   Fedora/RHEL     sudo dnf install python3-tkinter
+#   Arch            sudo pacman -S tk
+#   macOS (brew)    brew install python-tk
+#   Windows         included with the python.org installer
+#
+# The library builders and make-libraries-manifest do not import tkinter and
+# work on a headless machine.
