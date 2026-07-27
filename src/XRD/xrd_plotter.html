@@ -212,6 +212,17 @@
                 <input type="number" id="db-match-tol" value="0.2" step="0.05" min="0.01" title="Match tolerance (deg 2θ)" style="width: 52px; padding: 7px 4px; border: 1px solid #ced4da; border-radius: 6px; text-align: center;">
             </div>
 
+            <div style="display: flex; align-items: center; gap: 6px; font-size: 0.76rem; color: #495057;">
+                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;"
+                       title="Also require that the reference has no unexplained strong peaks inside your measured range">
+                    <input type="checkbox" id="db-exclusive" style="width:13px;height:13px;"> Exclusive
+                </label>
+                <span style="flex:1;"></span>
+                <label title="Reference peaks below this fraction of that reference's strongest peak are treated as unobservable">noise floor</label>
+                <input type="number" id="db-floor" value="5" min="0" max="50" step="1"
+                       style="width: 44px; padding: 3px; border: 1px solid #ced4da; border-radius: 4px; text-align: center;">%
+            </div>
+
             <div id="db-status" style="font-size: 0.78rem; color: #6c757d;">Add a library below, then search. To match: turn on Peak Selection, right-click to mark peaks, then Match.</div>
 
             <div style="border-top: 1px solid #e9ecef; padding-top: 6px; display: flex; align-items: center; gap: 6px;">
@@ -290,7 +301,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "v2026.07.25.10";
+        const VERSION_TAG = "v2026.07.27.1";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -2019,6 +2030,61 @@
             return `${e.name} ${e.id} ${e.formula || ''}`.toLowerCase();
         }
 
+
+        // ---- exclusive matching -------------------------------------------
+        // The original score is *recall*: what fraction of your marked peaks the
+        // reference explains. It says nothing about peaks the reference has that
+        // you did not mark, so a busy spectrum containing your peaks by accident
+        // ranks as highly as the real phase.
+        //
+        // Exclusive mode adds *precision*: what fraction of the reference's
+        // OBSERVABLE peaks you marked. Observable matters — comparing against
+        // peaks you could not have seen would penalise every correct answer:
+        //   * peaks outside the measured x-range are excluded, and
+        //   * peaks below `floorFrac` of that reference's strongest peak are
+        //     excluded, being below a realistic noise floor.
+        // Ranking is by F1, so a reference full of unexplained strong peaks sinks
+        // even when it contains everything you marked.
+        function peakMatchExclusive(refPeaks, refInten, expPeaks, tol, xmin, xmax, floorFrac) {
+            const base = peakMatchScore(refPeaks, expPeaks, tol);
+            const haveInten = refInten && refInten.length === refPeaks.length;
+            let strongest = 0;
+            if (haveInten) for (const v of refInten) if (v > strongest) strongest = v;
+            const floor = haveInten ? strongest * floorFrac : -Infinity;
+
+            let considered = 0, explained = 0;
+            for (let i = 0; i < refPeaks.length; i++) {
+                const p = refPeaks[i];
+                if (xmin != null && (p < xmin || p > xmax)) continue;
+                if (haveInten && refInten[i] < floor) continue;
+                considered++;
+                for (const e of expPeaks) {
+                    if (Math.abs(p - e) <= tol) { explained++; break; }
+                }
+            }
+            const recall = base.score / 100;
+            const precision = considered ? explained / considered : 0;
+            const f1 = (recall + precision) ? (2 * recall * precision) / (recall + precision) : 0;
+            return { score: f1 * 100, recall: recall * 100, precision: precision * 100,
+                     matched: base.matched, avg: base.avg, considered,
+                     extra: considered - explained, haveInten: !!haveInten };
+        }
+
+        // The measured window, so exclusive mode only judges peaks you could see.
+        function dbDataRange() {
+            let lo = null, hi = null;
+            for (const k of Object.keys(persistentDatasets)) {
+                if (k.startsWith('__fit_') || k.startsWith('__ref_')) continue;
+                const a = persistentDatasets[k].angles;
+                if (!a || !a.length) continue;
+                for (const v of a) {
+                    if (lo === null || v < lo) lo = v;
+                    if (hi === null || v > hi) hi = v;
+                }
+            }
+            return [lo, hi];
+        }
+
         function dbHaystack(kind, e) {
             if (kind === 'folder') return `${e.name} ${e.id} ${e.file ? e.file.name : ''}`.toLowerCase();
             if (kind === 'rruff') return `${e.name} ${e.id}`.toLowerCase();
@@ -2119,14 +2185,18 @@
             if (!sources.length) { alert("Enable or add at least one source first."); return; }
             let tol = parseFloat(document.getElementById('db-match-tol').value); if (isNaN(tol)) tol = 0.2;
             const q = document.getElementById('db-query').value.trim().toLowerCase();
+            const exclusive = document.getElementById('db-exclusive').checked;
+            let floorPct = parseFloat(document.getElementById('db-floor').value);
+            if (isNaN(floorPct)) floorPct = 5;
+            const [xlo, xhi] = exclusive ? dbDataRange() : [null, null];
             const exp = peakGuessesX.slice();
             const scored = [];
-            let scanned = 0;
+            let scanned = 0, noInten = 0;
 
             for (const s of sources) {
                 for (const e of s.entries) {
                     if (q && !dbHaystack(s.kind, e).includes(q)) continue;
-                    let peaks = e.peaks;
+                    let peaks = e.peaks, inten = e.intensities;
                     if (s.kind === 'folder') {           // raw .txt — detect on the fly
                         try {
                             // This app's RRUFF folder files are powder XY, read by
@@ -2134,11 +2204,24 @@
                             // name and does not exist here.
                             const parsed = parseRruffPowder(await e.file.text());
                             peaks = detectReferencePeaks(parsed.angles, parsed.intensities);
+                            // Intensities at the detected positions, so exclusive
+                            // mode can apply the noise floor to folder references too.
+                            inten = peaks.map(pp => {
+                                let best = 0, bd = Infinity;
+                                for (let k = 0; k < parsed.angles.length; k++) {
+                                    const d = Math.abs(parsed.angles[k] - pp);
+                                    if (d < bd) { bd = d; best = parsed.intensities[k]; }
+                                }
+                                return best;
+                            });
                         } catch (err) { continue; }
                     }
                     if (!peaks || !peaks.length) continue;
                     scanned++;
-                    const sc = peakMatchScore(peaks, exp, tol);
+                    const sc = exclusive
+                        ? peakMatchExclusive(peaks, inten, exp, tol, xlo, xhi, floorPct / 100)
+                        : peakMatchScore(peaks, exp, tol);
+                    if (exclusive && !sc.haveInten) noInten++;
                     if (sc.matched > 0) scored.push({ ...sc, name: e.name, id: e.id,
                         source: dbBadge(s.kind, e), kind: s.kind, srcLabel: s.label,
                         detail: e.formula || e.collection || '', rec: e });
@@ -2157,11 +2240,16 @@
                     + `${total.toLocaleString()} entries.`);
                 return;
             }
-            dbUpdateStatus(`Matched ${scored.length}/${scanned} references across ${sources.length} source(s) (tol ±${tol} ° 2θ).`);
-            dbShowMatchResults(scored.slice(0, 100), exp.length, tol);
+            const modeNote = exclusive
+                ? ` · exclusive, floor ${floorPct}%`
+                  + (xlo === null ? '' : `, range ${xlo.toFixed(1)}–${xhi.toFixed(1)}`)
+                  + (noInten ? `, ${noInten} without intensities` : '')
+                : '';
+            dbUpdateStatus(`Matched ${scored.length}/${scanned} references across ${sources.length} source(s) (tol ±${tol} ° 2θ${modeNote}).`);
+            dbShowMatchResults(scored.slice(0, 100), exp.length, tol, exclusive);
         }
 
-        function dbShowMatchResults(scored, nExp, tol) {
+        function dbShowMatchResults(scored, nExp, tol, exclusive) {
             const listEl = document.getElementById('cod-match-list'); listEl.innerHTML = "";
             if (!scored.length) {
                 alert(`None of the ${nExp} marked peak(s) fell within ±${tol} ° 2θ of a `
@@ -2172,7 +2260,12 @@
             }
             codMatchRecords = scored;
             document.getElementById('cod-match-subtitle').innerText =
-                `Ranked across every enabled source by alignment with your ${nExp} marked peak(s) (±${tol} ° 2θ). Tick to overlay; ↗ opens the source page.`;
+                (exclusive
+                    ? `Exclusive: ranked by F1 of recall and precision — a reference with `
+                      + `unexplained strong peaks inside your measured range scores lower `
+                      + `even if it contains all ${nExp} of your marked peaks. `
+                      + `Columns are score, r=recall/p=precision, +unexplained. (±${tol}`
+                    : `Ranked across every enabled source by alignment with your ${nExp} marked peak(s) (±${tol} ° 2θ). Tick to overlay; ↗ opens the source page.`);
             scored.forEach((s, i) => {
                 const row = document.createElement('div');
                 row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px'; row.style.padding = '2px 0';
@@ -2181,7 +2274,19 @@
                 const lbl = document.createElement('label');
                 lbl.htmlFor = cb.id; lbl.style.flex = '1'; lbl.style.cursor = 'pointer';
                 lbl.style.fontFamily = "'Consolas', monospace"; lbl.style.fontSize = '0.8rem';
-                lbl.innerText = `${String(Math.round(s.score)).padStart(3, ' ')}%  ${s.matched}/${nExp}  [${s.source}] ${s.name}${s.id ? ' · ' + s.id : ''}${s.detail ? '  ' + s.detail : ''}`;
+                // In exclusive mode the headline number is F1, so show what drove
+                // it: recall, precision, and how many strong reference peaks in
+                // range you did not mark.
+                const parts = exclusive
+                    ? `${String(Math.round(s.score)).padStart(3, ' ')}%  `
+                      + `r${Math.round(s.recall)}/p${Math.round(s.precision)}  `
+                      + `+${s.extra}`
+                    : `${String(Math.round(s.score)).padStart(3, ' ')}%  ${s.matched}/${nExp}`;
+                lbl.innerText = `${parts}  [${s.source}] ${s.name}${s.id ? ' · ' + s.id : ''}${s.detail ? '  ' + s.detail : ''}`;
+                if (exclusive) lbl.title = `recall ${Math.round(s.recall)}% (${s.matched}/${nExp} marked peaks found)\n`
+                    + `precision ${Math.round(s.precision)}% (${s.considered - s.extra}/${s.considered} observable reference peaks marked)\n`
+                    + `${s.extra} unexplained reference peak(s) in range`
+                    + (s.haveInten ? '' : '\nno stored intensities: noise floor not applied');
                 row.appendChild(cb); row.appendChild(lbl);
                 const url = (s.rec && s.rec.url) || (s.kind !== 'lib' ? rruffUrl(s.name, s.id) : null);
                 if (url) { const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener'; a.innerText = '↗'; a.title = 'Open source page'; a.style.textDecoration = 'none'; a.style.fontSize = '1rem'; a.style.padding = '0 4px'; row.appendChild(a); }

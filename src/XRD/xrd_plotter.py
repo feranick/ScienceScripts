@@ -47,7 +47,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.07.25.10"
+VERSION_TAG = "v2026.07.27.1"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 # RRUFF powder reference library (patterns calculated for Cu radiation, i.e. the
@@ -148,6 +148,54 @@ def peak_match_score(reference_peaks, experimental_peaks, tolerance):
         else:
             cumulative += tolerance
     return (matched / len(exp)) * 100.0, cumulative / len(exp), matched
+
+def peak_match_exclusive(reference_peaks, reference_intensities, experimental_peaks,
+                         tolerance, xmin=None, xmax=None, floor_frac=0.05):
+    """Exclusive match: reward explaining the marked peaks AND nothing else.
+
+    `peak_match_score` measures *recall* -- what fraction of the marked peaks the
+    reference explains. It says nothing about peaks the reference has that were
+    not marked, so a busy spectrum containing the marked peaks by coincidence
+    ranks as highly as the real phase.
+
+    This adds *precision*: what fraction of the reference's OBSERVABLE peaks were
+    marked. Observable matters, or every correct answer would be penalised for
+    peaks that could not have been seen:
+      * peaks outside [xmin, xmax] (the measured range) are excluded, and
+      * peaks below `floor_frac` of that reference's strongest peak are excluded,
+        being below a realistic noise floor.
+
+    Returns (score, avg, matched, recall, precision, extra, considered, have_int)
+    where `score` is the F1 of recall and precision, so a reference full of
+    unexplained strong peaks sinks even when it contains everything marked.
+    """
+    ref = np.asarray(reference_peaks, dtype=float)
+    score, avg, matched = peak_match_score(ref, experimental_peaks, tolerance)
+
+    inten = None
+    if reference_intensities is not None:
+        inten = np.asarray(reference_intensities, dtype=float)
+        if inten.size != ref.size:
+            inten = None
+    have_int = inten is not None
+    floor = (float(np.max(inten)) * floor_frac) if have_int and inten.size else -np.inf
+
+    exp = list(experimental_peaks)
+    considered = explained = 0
+    for i, p in enumerate(ref):
+        if xmin is not None and (p < xmin or p > xmax):
+            continue
+        if have_int and inten[i] < floor:
+            continue
+        considered += 1
+        if exp and np.min(np.abs(np.asarray(exp, dtype=float) - p)) <= tolerance:
+            explained += 1
+
+    recall = score / 100.0
+    precision = (explained / considered) if considered else 0.0
+    f1 = (2 * recall * precision / (recall + precision)) if (recall + precision) else 0.0
+    return (f1 * 100.0, avg, matched, recall * 100.0, precision * 100.0,
+            considered - explained, considered, have_int)
 
 
 def _synth_profile(tth, inten):
@@ -727,6 +775,16 @@ class XRDPlotterGUI:
         self.ent_db_match_tol = ttk.Entry(db_act, width=5, justify="center")
         self.ent_db_match_tol.insert(0, "0.2")
         self.ent_db_match_tol.pack(side="left")
+
+        db_mode = ttk.Frame(panel_db)
+        db_mode.pack(fill="x", pady=(0, 2))
+        self.db_exclusive_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(db_mode, text="Exclusive", variable=self.db_exclusive_var).pack(side="left")
+        ttk.Label(db_mode, text="noise floor", font=("Helvetica", 8)).pack(side="left", padx=(8, 2))
+        self.ent_db_floor = ttk.Entry(db_mode, width=4, justify="center")
+        self.ent_db_floor.insert(0, "5")
+        self.ent_db_floor.pack(side="left")
+        ttk.Label(db_mode, text="%", font=("Helvetica", 8)).pack(side="left")
 
         self.db_status_var = tk.StringVar(value="Add a library under Manage sources, then search.")
         ttk.Label(panel_db, textvariable=self.db_status_var, font=("Helvetica", 8),
@@ -1989,6 +2047,25 @@ class XRDPlotterGUI:
             tolerance = 0.2
         exp_peaks = list(self.peak_guesses)
         q = self.ent_db_query.get().strip().lower()
+        exclusive = bool(self.db_exclusive_var.get())
+        try:
+            floor_frac = max(0.0, float(self.ent_db_floor.get().strip()) / 100.0)
+        except ValueError:
+            floor_frac = 0.05
+        # Exclusive mode may only judge peaks that were observable, so it needs the
+        # measured window of the loaded data.
+        xlo = xhi = None
+        if exclusive:
+            for _k, _d in self.active_datasets.items():
+                if _k.startswith("__fit_") or _k.startswith("__ref_"):
+                    continue
+                _ang = _d.get('angles')
+                if _ang is None or len(_ang) == 0:
+                    continue
+                _lo, _hi = float(np.min(_ang)), float(np.max(_ang))
+                xlo = _lo if xlo is None else min(xlo, _lo)
+                xhi = _hi if xhi is None else max(xhi, _hi)
+        no_inten = 0
 
         scored, scanned = [], 0
         for s in sources:
@@ -2008,9 +2085,23 @@ class XRDPlotterGUI:
                     except Exception:                        # noqa: BLE001
                         continue
                     scanned += 1
-                    score, avg, matched = peak_match_score(peaks, exp_peaks, tolerance)
+                    if exclusive:
+                        # intensity at each detected position, so the noise floor
+                        # applies to folder references too
+                        inten = [float(y[int(np.argmin(np.abs(np.asarray(x) - pk)))])
+                                 for pk in peaks]
+                        (score, avg, matched, recall, precision,
+                         extra, considered, have_int) = peak_match_exclusive(
+                            peaks, inten, exp_peaks, tolerance, xlo, xhi, floor_frac)
+                        if not have_int:
+                            no_inten += 1
+                    else:
+                        score, avg, matched = peak_match_score(peaks, exp_peaks, tolerance)
+                        recall = precision = extra = considered = None
                     if matched > 0:
                         scored.append({'score': score, 'avg': avg, 'matched': matched,
+                                       'recall': recall, 'precision': precision,
+                                       'extra': extra, 'considered': considered,
                                        'name': name, 'id': rid, 'tag': 'RRUFF',
                                        'kind': 'folder', 'path': path, 'detail': ''})
                 continue
@@ -2021,9 +2112,20 @@ class XRDPlotterGUI:
                 if peaks is None or len(peaks) == 0:
                     continue
                 scanned += 1
-                score, avg, matched = peak_match_score(peaks, exp_peaks, tolerance)
+                if exclusive:
+                    (score, avg, matched, recall, precision,
+                     extra, considered, have_int) = peak_match_exclusive(
+                        peaks, e.get('intensities'), exp_peaks, tolerance,
+                        xlo, xhi, floor_frac)
+                    if not have_int:
+                        no_inten += 1
+                else:
+                    score, avg, matched = peak_match_score(peaks, exp_peaks, tolerance)
+                    recall = precision = extra = considered = None
                 if matched > 0:
                     scored.append({'score': score, 'avg': avg, 'matched': matched,
+                                   'recall': recall, 'precision': precision, 'extra': extra,
+                                   'considered': considered, 
                                    'name': e.get('name'), 'id': e.get('id'),
                                    'tag': self._db_tag(s['kind'], e), 'kind': s['kind'],
                                    'group': e.get('group'), 'lib_path': e.get('lib_path'),
@@ -2043,12 +2145,21 @@ class XRDPlotterGUI:
                 f'result list. Clear the box to match against all {total:,} entries.')
             return
         scored.sort(key=lambda t: (-t['score'], t['avg']))
+        note = ""
+        if exclusive:
+            note = f" \u00b7 exclusive, floor {floor_frac * 100:g}%"
+            if xlo is not None:
+                note += f", range {xlo:g}\u2013{xhi:g}"
+            if no_inten:
+                note += f", {no_inten} without intensities"
         self.db_update_status(
             f"Matched {len(scored)}/{scanned} references across "
-            f"{len([s for s in sources if s['kind'] != 'online'])} source(s) (tol ±{tolerance:g}).")
-        self._db_show_match_results(scored[:100], len(exp_peaks), tolerance)
+            f"{len([s for s in sources if s['kind'] != 'online'])} source(s) "
+            f"(tol \u00b1{tolerance:g} ° 2θ{note}).")
+        self._db_show_match_results(scored[:100], len(exp_peaks), tolerance,
+                                    exclusive=exclusive)
 
-    def _db_show_match_results(self, scored, n_exp, tolerance):
+    def _db_show_match_results(self, scored, n_exp, tolerance, exclusive=False):
         if not scored:
             messagebox.showinfo(
                 "No Matches",
@@ -2062,7 +2173,15 @@ class XRDPlotterGUI:
         pop.geometry("780x380")
         pop.transient(self.root)
         pop.grab_set()
-        ttk.Label(pop, text=f"Ranked across every enabled source by alignment with your "
+        if exclusive:
+            hdr = (f"Exclusive: ranked by F1 of recall and precision. A reference with "
+                   f"unexplained strong peaks inside your measured range scores lower "
+                   f"even if it contains all {n_exp} marked peak(s). "
+                   f"Unexpl. = observable reference peaks you did not mark "
+                   f"(\u00b1{tolerance:g} ° 2θ).")
+        else:
+            hdr = None
+        ttk.Label(pop, text=hdr or f"Ranked across every enabled source by alignment with your "
                             f"{n_exp} marked peak(s) (±{tolerance:g} ° 2θ). "
                             f"Double-click a row to open its database page.",
                   font=("Helvetica", 9, "bold")).pack(pady=6, padx=8, anchor="w")
@@ -2071,15 +2190,28 @@ class XRDPlotterGUI:
         frame.pack(fill="both", expand=True, padx=8, pady=4)
         scroll = ttk.Scrollbar(frame)
         scroll.pack(side="right", fill="y")
-        tree = ttk.Treeview(frame, columns=("Score", "Src", "Name", "ID", "Detail", "Matched"),
+        cols = ("Score", "Src", "Name", "ID", "Detail", "Matched")
+        if exclusive:
+            # In exclusive mode the headline number is F1, so show what drove it.
+            cols = ("Score", "Recall", "Prec", "Extra", "Src", "Name", "ID", "Detail")
+        tree = ttk.Treeview(frame, columns=cols,
                             show="headings", yscrollcommand=scroll.set, height=11,
                             selectmode="extended")
-        for col, head, w, anchor in (("Score", "Match", 70, "center"),
-                                     ("Src", "Source", 70, "center"),
-                                     ("Name", "Name", 210, "w"),
-                                     ("ID", "ID", 95, "center"),
-                                     ("Detail", "Formula / Collection", 190, "w"),
-                                     ("Matched", "Peaks", 70, "center")):
+        specs = (("Score", "F1", 60, "center"),
+                 ("Recall", "Recall", 60, "center"),
+                 ("Prec", "Precision", 70, "center"),
+                 ("Extra", "Unexpl.", 60, "center"),
+                 ("Src", "Source", 70, "center"),
+                 ("Name", "Name", 200, "w"),
+                 ("ID", "ID", 90, "center"),
+                 ("Detail", "Formula / Collection", 170, "w")) if exclusive else (
+                 ("Score", "Match", 70, "center"),
+                 ("Src", "Source", 70, "center"),
+                 ("Name", "Name", 210, "w"),
+                 ("ID", "ID", 95, "center"),
+                 ("Detail", "Formula / Collection", 190, "w"),
+                 ("Matched", "Peaks", 70, "center"))
+        for col, head, w, anchor in specs:
             tree.heading(col, text=head)
             tree.column(col, width=w, anchor=anchor)
         tree.pack(fill="both", expand=True)
@@ -2087,9 +2219,17 @@ class XRDPlotterGUI:
 
         row_map = {}
         for rec in scored:
-            iid = tree.insert("", "end", values=(f"{rec['score']:.0f}%", rec['tag'], rec['name'],
-                                                 rec.get('id', ''), rec.get('detail', ''),
-                                                 f"{rec['matched']}/{n_exp}"))
+            if exclusive:
+                vals = (f"{rec['score']:.0f}%",
+                        f"{(rec.get('recall') or 0):.0f}%",
+                        f"{(rec.get('precision') or 0):.0f}%",
+                        str(rec.get('extra') if rec.get('extra') is not None else ''),
+                        rec['tag'], rec['name'], rec.get('id', ''), rec.get('detail', ''))
+            else:
+                vals = (f"{rec['score']:.0f}%", rec['tag'], rec['name'],
+                        rec.get('id', ''), rec.get('detail', ''),
+                        f"{rec['matched']}/{n_exp}")
+            iid = tree.insert("", "end", values=vals)
             row_map[iid] = rec
 
         def open_pages(event=None):
