@@ -47,7 +47,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.07.25.9"
+VERSION_TAG = "v2026.07.25.10"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 # RRUFF powder reference library (patterns calculated for Cu radiation, i.e. the
@@ -1920,7 +1920,14 @@ class XRDPlotterGUI:
             self.db_results_list.selection_set(0)
             self.db_update_status(f"{len(self.db_hits)} match(es). Select and overlay.")
         else:
-            self.db_update_status("No matches.")
+            q = self.ent_db_query.get().strip()
+            total = sum(src['count'] for src in self.db_enabled_sources())
+            # "No matches." read like a dead button. Name the query, the size of
+            # what was searched, and the fact that this filter also gates Match.
+            self.db_update_status(
+                f'No match for "{q}" in {total:,} entries — clear the box to see '
+                f'everything (this filter also applies to Match).'
+                if q else "The enabled sources are empty.")
 
     def _db_selected(self):
         sel = self.db_results_list.curselection()
@@ -1990,11 +1997,14 @@ class XRDPlotterGUI:
             if s['kind'] == 'folder':
                 for name, rid, path in self._rruff_candidates(self.ent_db_query.get()):
                     try:
+                        # RRUFF powder files are read by parse_rruff_powder, which
+                        # also returns the reflection list -- _parse_two_column_text
+                        # is the Raman/FTIR name and does not exist in this app.
                         with open(path, 'r', encoding='utf-8', errors='ignore') as fh:
-                            x, y, _ = _parse_two_column_text(fh.read(), name)
+                            x, y, pk, _meta = parse_rruff_powder(fh.read())
                         if len(x) < 5:
                             continue
-                        peaks = detect_reference_peaks(x, y)
+                        peaks = pk if pk is not None and len(pk) else detect_reference_peaks(x, y)
                     except Exception:                        # noqa: BLE001
                         continue
                     scanned += 1
@@ -2019,6 +2029,19 @@ class XRDPlotterGUI:
                                    'group': e.get('group'), 'lib_path': e.get('lib_path'),
                                    'url': e.get('url'), 'cod_url': e.get('cod_url', ''),
                                    'detail': e.get('formula') or e.get('collection') or ''})
+        # Nothing scanned means the search box filtered every entry out, which is
+        # a different problem from too tight a tolerance; "try a larger tolerance"
+        # would send the user the wrong way.
+        if not scanned and q:
+            total = sum(src['count'] for src in sources)
+            self.db_update_status(
+                f'Nothing to match: "{q}" excludes all {total:,} entries.')
+            messagebox.showinfo(
+                "Nothing to Match",
+                f'No reference matches the search box ("{q}"), so there was '
+                f'nothing to rank.\n\nThe search text filters Match as well as the '
+                f'result list. Clear the box to match against all {total:,} entries.')
+            return
         scored.sort(key=lambda t: (-t['score'], t['avg']))
         self.db_update_status(
             f"Matched {len(scored)}/{scanned} references across "
@@ -2027,9 +2050,12 @@ class XRDPlotterGUI:
 
     def _db_show_match_results(self, scored, n_exp, tolerance):
         if not scored:
-            messagebox.showinfo("No Matches",
-                                "No reference had bands near your marked peaks.\n"
-                                "Try a larger match tolerance or different peaks.")
+            messagebox.showinfo(
+                "No Matches",
+                f"None of the {n_exp} marked peak(s) fell within "
+                f"\u00b1{tolerance:g}\u00b0 2\u03b8 of a reference reflection in the "
+                f"scanned entries.\n\nTry a larger tolerance, or check the search box "
+                f"is not filtering out the phases you expect.")
             return
         pop = tk.Toplevel(self.root)
         pop.title("Reference Databases — Candidate Ranking")

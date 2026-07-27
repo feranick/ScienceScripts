@@ -28,7 +28,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "ftir-v2026.07.25.9"
+VERSION_TAG = "ftir-v2026.07.25.10"
 
 # RRUFF reference database (open FTIR spectra of minerals).
 # Data are distributed as per-quality zip archives of two-column .txt files.
@@ -2054,7 +2054,14 @@ class FTIRPlotterGUI:
             self.db_results_list.selection_set(0)
             self.db_update_status(f"{len(self.db_hits)} match(es). Select and overlay.")
         else:
-            self.db_update_status("No matches.")
+            q = self.ent_db_query.get().strip()
+            total = sum(s['count'] for s in self.db_enabled_sources())
+            # "No matches." read like a dead button. Name the query, the size of
+            # what was searched, and the fact that this filter also gates Match.
+            self.db_update_status(
+                f'No match for "{q}" in {total:,} entries — clear the box to see '
+                f'everything (this filter also applies to Match).'
+                if q else "The enabled sources are empty.")
 
     def _db_selected(self):
         sel = self.db_results_list.curselection()
@@ -2185,6 +2192,19 @@ class FTIRPlotterGUI:
                                    'group': e.get('group'), 'lib_path': e.get('lib_path'),
                                    'url': e.get('url'), 'cod_url': e.get('cod_url', ''),
                                    'detail': e.get('formula') or e.get('collection') or ''})
+        # Nothing scanned means the search box filtered every entry out, which is
+        # a different problem from too tight a tolerance; "try a larger tolerance"
+        # would send the user the wrong way.
+        if not scanned and q:
+            total = sum(src['count'] for src in sources)
+            self.db_update_status(
+                f'Nothing to match: "{q}" excludes all {total:,} entries.')
+            messagebox.showinfo(
+                "Nothing to Match",
+                f'No reference matches the search box ("{q}"), so there was '
+                f'nothing to rank.\n\nThe search text filters Match as well as the '
+                f'result list. Clear the box to match against all {total:,} entries.')
+            return
         scored.sort(key=lambda t: (-t['score'], t['avg']))
         self.db_update_status(
             f"Matched {len(scored)}/{scanned} references across "
@@ -2193,9 +2213,12 @@ class FTIRPlotterGUI:
 
     def _db_show_match_results(self, scored, n_exp, tolerance):
         if not scored:
-            messagebox.showinfo("No Matches",
-                                "No reference had bands near your marked bands.\n"
-                                "Try a larger match tolerance or different peaks.")
+            messagebox.showinfo(
+                "No Matches",
+                f"None of the {n_exp} marked peak(s) fell within "
+                f"±{tolerance:g} cm⁻¹ of a reference band in the scanned "
+                f"entries.\n\nTry a larger tolerance, or check the search box is "
+                f"not filtering out the phases you expect.")
             return
         pop = tk.Toplevel(self.root)
         pop.title("Reference Databases — Candidate Ranking")
