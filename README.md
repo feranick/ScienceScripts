@@ -18,10 +18,55 @@ Reference libraries are `.h5` files built by the scripts in
 [Reference database builders](#reference-database-builders) below. All three apps
 read one schema, so a library is usable by whichever tool matches its technique.
 
+### Identify peaks on hover
+
+Tick **🔎 Identify on hover** and move the cursor along a spectrum. Each peak
+reports how many references are still consistent with *every* peak you have
+marked, and what happens to that number when this one is added — say
+`add this reflection: 2,292 become 711 (−69%)`. Names appear once the set is
+small enough to mean something; above 200 candidates you get the count and a
+prompt to mark more peaks.
+
+That threshold is the point of the feature. A single peak is not an
+identification: in a 67k-phase XRD set roughly a third of all phases have *some*
+reflection within ±0.2° of any given position, and picking five names out of
+twenty thousand would look authoritative while being arbitrary. Watching the
+count collapse as peaks accumulate teaches what peak matching actually depends
+on. Each card also reports how common that position is across the library, so a
+distinctive band is visibly worth more than a crowded one.
+
+Costs one index build when first enabled (~4M band positions, well under a
+second) and about 0.2 ms per hover.
+
     src/XRD/     xrd_plotter.py    xrd_plotter.html    converter/
     src/Raman/   raman_plotter.py  raman_plotter.html
     src/FTIR/    ftir_plotter.py   ftir_plotter.html
     src/Library-builders/
+
+### Installing
+
+The Python side installs as a wheel. Nothing needs rearranging — the build
+remaps the technique folders onto one import package, `sciencescripts`.
+
+```bash
+python -m pip install build
+python -m build --wheel
+python -m pip install dist/sciencescripts-*.whl
+```
+
+That puts ten commands on PATH: `xrd-plotter`, `raman-plotter`, `ftir-plotter`,
+the six `build-*-library` builders, and `make-libraries-manifest`. Every script
+still runs directly from a checkout exactly as before.
+
+Optional extras cover the dependencies that are imported lazily, so the base
+install stays small: `[cod]` for computing powder patterns from COD structures,
+`[mp]` for the Materials Project lookup, `[openspecy]` for reading Open Specy's
+`.rds` release, or `[all]`.
+
+The three plotters need **tkinter**, which ships with Python but is a separate OS
+package on most Linux distributions and cannot be installed with pip — `apt
+install python3-tk`, `dnf install python3-tkinter`, or `brew install python-tk`.
+The builders and the manifest tool do not import it and run headless.
 
 ## XRD
 1. **xrd_converter (GUI and CLI)** (`src/XRD/converter/`): Convert xrd data in complex csv or xrdml formats into simple csv format for plotting, or archiving. Both GUI and command line versions available.

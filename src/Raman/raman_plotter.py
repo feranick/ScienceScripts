@@ -29,7 +29,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "raman-v2026.07.27.5"
+VERSION_TAG = "raman-v2026.07.27.6"
 
 # RRUFF reference database (open Raman spectra of minerals).
 # Data are distributed as per-quality zip archives of two-column .txt files.
@@ -199,7 +199,7 @@ def peak_index_rank(idx, ids, query, tol):
     # stands for so the "+N more" arithmetic stays honest.
     seen, collapsed = {}, []
     for r in out:
-        k = '%s %s' % (r['name'], r['formula'])
+        k = '%s\x00%s' % (r['name'], r['formula'])
         if k not in seen:
             r['count'] = 1
             seen[k] = len(collapsed)
@@ -1159,7 +1159,7 @@ class RamanPlotterGUI:
 
         db_mode = ttk.Frame(panel_db)
         db_mode.pack(fill="x", pady=(0, 2))
-        self.db_exclusive_var = tk.BooleanVar(value=False)
+        self.db_exclusive_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(db_mode, text="Exclusive", variable=self.db_exclusive_var).pack(side="left")
         ttk.Label(db_mode, text="noise floor", font=("Helvetica", 8)).pack(side="left", padx=(8, 2))
         self.ent_db_floor = ttk.Entry(db_mode, width=4, justify="center")
@@ -1169,7 +1169,7 @@ class RamanPlotterGUI:
 
         db_ident = ttk.Frame(panel_db)
         db_ident.pack(fill="x", pady=(0, 2))
-        self.peakid_var = tk.BooleanVar(value=False)
+        self.peakid_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(db_ident, text="🔎 Identify on hover", variable=self.peakid_var,
                         command=self.peakid_toggle).pack(side="left")
         self.peakid_note = tk.StringVar(value="")

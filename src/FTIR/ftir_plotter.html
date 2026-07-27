@@ -212,7 +212,7 @@
         </div>
 
         <div class="checkbox-container">
-            <input type="checkbox" id="toggle-peakid" onchange="peakIdToggle()">
+            <input type="checkbox" id="toggle-peakid" checked onchange="peakIdToggle()">
             <label for="toggle-peakid" title="Hover a band to see which references stay consistent with the peaks you have marked">🔎 Identify bands on hover</label>
         </div>
         <div id="peakid-note" style="font-size:0.74rem;color:#6c757d;padding:0 2px;"></div>
@@ -241,7 +241,7 @@
             <div style="display: flex; align-items: center; gap: 6px; font-size: 0.76rem; color: #495057;">
                 <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;"
                        title="Also require that the reference has no unexplained strong peaks inside your measured range">
-                    <input type="checkbox" id="db-exclusive" style="width:13px;height:13px;"> Exclusive
+                    <input type="checkbox" id="db-exclusive" checked style="width:13px;height:13px;"> Exclusive
                 </label>
                 <span style="flex:1;"></span>
                 <label title="Reference peaks below this fraction of that reference's strongest peak are treated as unobservable">noise floor</label>
@@ -333,7 +333,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "ftir-v2026.07.27.4";
+        const VERSION_TAG = "ftir-v2026.07.27.6";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -2319,7 +2319,7 @@
             // stands for so the "+N more" arithmetic stays honest.
             const seen = new Map(), collapsed = [];
             for (const r of out) {
-                const k = r.name + ' ' + r.formula;
+                const k = r.name + '\u0000' + r.formula;
                 const at = seen.get(k);
                 if (at === undefined) { r.count = 1; seen.set(k, collapsed.length); collapsed.push(r); }
                 else collapsed[at].count++;
@@ -2370,7 +2370,7 @@
         const PEAKID_TOP_SHOW = 6;
         const PEAKID_MAX_POSITIONS = 24e6; // refuse to index beyond this
 
-        let peakIdOn = false, peakIdIndex = null, peakIdSig = "";
+        let peakIdOn = true, peakIdIndex = null, peakIdSig = "";
         let peakIdBase = null, peakIdBaseSig = "";
         let peakIdPinned = false, peakIdRaf = 0, peakIdPendX = null;
         let peakIdPeakCache = {}, peakIdMouse = { x: 0, y: 0 }, peakIdLastSnap = null;
