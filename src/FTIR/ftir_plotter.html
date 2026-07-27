@@ -316,7 +316,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "ftir-v2026.07.25.9";
+        const VERSION_TAG = "ftir-v2026.07.25.10";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -1822,8 +1822,20 @@
             }
             resultsEl.innerHTML = "";
             if (!dbHits.length) {
-                resultsEl.style.display = 'none';
-                dbUpdateStatus(q ? `No matches for "${q}".` : "No entries.");
+                // Hiding the box made a no-result search look like a dead button.
+                // Say so in place, and say what to do about it.
+                const total = sources.reduce((n, s) => n + s.entries.length, 0);
+                resultsEl.style.display = 'flex';
+                const msg = document.createElement('div');
+                msg.style.padding = '8px'; msg.style.fontSize = '0.78rem';
+                msg.style.color = '#842029'; msg.style.background = '#f8d7da';
+                msg.innerText = q
+                    ? `No match for "${q}" in ${total.toLocaleString()} entries across `
+                      + `${sources.length} source(s). Clear the box to see everything — `
+                      + `note this filter also applies to Match.`
+                    : "The enabled sources are empty.";
+                resultsEl.appendChild(msg);
+                dbUpdateStatus(q ? `No match for "${q}".` : "No entries.");
                 return;
             }
             resultsEl.style.display = 'flex';
@@ -1909,13 +1921,31 @@
                 }
             }
             scored.sort((a, b) => (b.score - a.score) || (a.avg - b.avg));
+            // Nothing scanned means the search box filtered every entry out, which
+            // is a different problem from a tolerance that is too tight. Saying
+            // "try a larger tolerance" here would send you the wrong way.
+            if (!scanned && q) {
+                const total = sources.reduce((n, s) => n + s.entries.length, 0);
+                dbUpdateStatus(`Nothing to match: "${q}" excludes all ${total.toLocaleString()} entries.`);
+                alert(`No reference matches the search box ("${q}"), so there was `
+                    + `nothing to rank.\n\nThe search text filters Match as well as `
+                    + `the result list. Clear the box to match against all `
+                    + `${total.toLocaleString()} entries.`);
+                return;
+            }
             dbUpdateStatus(`Matched ${scored.length}/${scanned} references across ${sources.length} source(s) (tol ±${tol} cm⁻¹).`);
             dbShowMatchResults(scored.slice(0, 100), exp.length, tol);
         }
 
         function dbShowMatchResults(scored, nExp, tol) {
             const listEl = document.getElementById('lib-match-list'); listEl.innerHTML = "";
-            if (!scored.length) { alert("No reference had bands near your marked bands. Try a larger tolerance."); return; }
+            if (!scored.length) {
+                alert(`None of the ${nExp} marked peak(s) fell within ±${tol} cm⁻¹ of a `
+                    + `reference band in the scanned entries.\n\n`
+                    + `Try a larger tolerance, or check the search box is not filtering `
+                    + `out the phases you expect.`);
+                return;
+            }
             libMatchRecords = scored;
             document.getElementById('lib-match-subtitle').innerText =
                 `Ranked across every enabled source by alignment with your ${nExp} marked peak(s) (±${tol} cm⁻¹). Tick to overlay; ↗ opens the source page.`;
