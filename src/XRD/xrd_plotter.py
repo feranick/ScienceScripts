@@ -47,7 +47,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.07.27.6"
+VERSION_TAG = "v2026.07.28.1"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 # RRUFF powder reference library (patterns calculated for Cu radiation, i.e. the
@@ -263,6 +263,66 @@ def peak_id_summary(idx, base, marked, x, tol, name_cap=200):
             'already': already, 'at_all': int(hits.size),
             'common_frac': (hits.size / total) if total else 0.0,
             'top': top, 'capped': after > name_cap, 'name_cap': name_cap}
+
+
+def flat_is_flat(f):
+    """True when an open h5py.File uses the consolidated layout."""
+    if 'peaks_all' in f and 'offsets' in f:
+        return True
+    schema = f.attrs.get('schema', '')
+    if isinstance(schema, bytes):
+        schema = schema.decode('latin1')
+    return str(schema) == 'flat'
+
+def flat_string_col(f, name, count, decode):
+    """One metadata column as a list of str, or None when absent."""
+    if name not in f:
+        return None
+    raw = f[name][:]
+    out = [decode(v) for v in raw]
+    if len(out) != count:
+        return None
+    return out
+
+def flat_entries(f, file_source, decode, url_for=None, id_keys=('id',)):
+    """Entry dicts in the same shape the group-per-entry loaders return.
+
+    Peaks are numpy views into the two big arrays, so the whole library is two
+    reads rather than two per entry -- which is also why loading is seconds
+    instead of minutes for a 195k-entry set.
+    """
+    import numpy as _np
+
+    peaks_all = _np.asarray(f['peaks_all'][:], dtype=float)
+    inten_all = _np.asarray(f['inten_all'][:], dtype=float) if 'inten_all' in f else None
+    offs = _np.asarray(f['offsets'][:], dtype='int64')
+    n = int(offs.size) - 1
+    if n < 0:
+        return []
+
+    names = flat_string_col(f, 'name', n, decode)
+    forms = flat_string_col(f, 'formula', n, decode)
+    ids = flat_string_col(f, 'id', n, decode)
+    urls = flat_string_col(f, 'url', n, decode)
+    sgs = flat_string_col(f, 'sg', n, decode)
+
+    entries = []
+    for i in range(n):
+        lo, hi = int(offs[i]), int(offs[i + 1])
+        ident = (ids[i] if ids else str(i)) or str(i)
+        entries.append({
+            'group': ident,
+            'name': (names[i] if names else '') or ident,
+            'id': ident,
+            'source': file_source,
+            'formula': (forms[i] if forms else ''),
+            'sg': (sgs[i] if sgs else ''),
+            'url': (urls[i] if urls else '') or (url_for(ident) if url_for else ''),
+            'peaks': peaks_all[lo:hi],
+            'intensities': (inten_all[lo:hi] if inten_all is not None
+                            else _np.zeros(0)),
+        })
+    return entries
 
 
 def peak_match_score(reference_peaks, experimental_peaks, tolerance):
@@ -512,6 +572,17 @@ def load_cod_powder_h5_library(path):
     entries = []
     with h5py.File(path, 'r') as f:
         if 'spectra' not in f:
+            # A flat-schema library has no /spectra group: the reflections
+            # live in one concatenated array with an offset index, which is
+            # ~16x smaller for a peaks-only set. Detected, not configured.
+            if flat_is_flat(f):
+                def _dec_any(v):
+                    return v.decode('latin1') if isinstance(v, bytes) else str(v)
+                _fs = _dec_any(f.attrs.get('source', '')) or 'COD'
+                entries = flat_entries(f, _fs, _dec_any, cod_url)
+                if not entries:
+                    raise ValueError("Flat library contains no patterns.")
+                return {'path': path, 'source': _fs, 'entries': entries}
             raise ValueError("Not a COD powder library ('spectra' group missing).")
         sp = f['spectra']
 

@@ -334,7 +334,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "raman-v2026.07.27.7";
+        const VERSION_TAG = "raman-v2026.07.28.1";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -866,6 +866,72 @@
 
         // h5wasm returns attributes either as raw values or {value, shape, ...}
         function attrRaw(a) { return (a && a.value !== undefined) ? a.value : a; }
+        function flatStringCol(f, name, count) {
+            const d = f.get(name);
+            if (!d) return null;
+            let v;
+            try { v = d.value; } catch (e) { return null; }
+            if (v == null) return null;
+            if (typeof v === "string") return [v];
+            if (Array.isArray(v) || typeof v[0] === "string") {
+                return Array.from(v, s => (typeof s === "string" ? s : String(s)));
+            }
+            // Raw bytes: fixed-width records, so the stride is derivable from the count.
+            if (v instanceof Uint8Array && count > 0 && v.length % count === 0) {
+                const w = v.length / count, dec = new TextDecoder();
+                const out = new Array(count);
+                for (let i = 0; i < count; i++) {
+                    let end = (i + 1) * w;
+                    while (end > i * w && v[end - 1] === 0) end--;   // trim NUL padding
+                    out[i] = dec.decode(v.subarray(i * w, end));
+                }
+                return out;
+            }
+            return null;
+        }
+
+
+        function flatEntries(f, fileSource, urlFor) {
+            const pa = f.get("peaks_all"), of = f.get("offsets");
+            if (!pa || !of) return null;
+            const ia = f.get("inten_all");
+            const asF32 = v => (v instanceof Float32Array ? v : Float32Array.from(v));
+            const peaksAll = asF32(pa.value);
+            const intenAll = ia ? asF32(ia.value) : null;
+            const offs = of.value;
+            if (!offs || offs.length < 2) return null;
+            const n = offs.length - 1;
+
+            const names = flatStringCol(f, "name", n);
+            const forms = flatStringCol(f, "formula", n);
+            const ids = flatStringCol(f, "id", n);
+            const urls = flatStringCol(f, "url", n);
+            const sgs = flatStringCol(f, "sg", n);
+
+            const out = new Array(n);
+            for (let i = 0; i < n; i++) {
+                // Number(): offsets are uint32 here, but a file written with int64 comes
+                // back as BigInt64Array and would poison the arithmetic silently.
+                const lo = Number(offs[i]), hi = Number(offs[i + 1]);
+                const id = (ids && ids[i]) || String(i);
+                out[i] = {
+                    name: (names && names[i]) || id,
+                    id: id,
+                    source: fileSource,
+                    formula: (forms && forms[i]) || "",
+                    sg: (sgs && sgs[i]) || "",
+                    url: (urls && urls[i]) || (urlFor ? urlFor(id) : ""),
+                    peaks: peaksAll.subarray(lo, hi),
+                    intensities: intenAll ? intenAll.subarray(lo, hi) : new Float32Array(0),
+                    // Flat libraries are peaks-only by construction; the overlay path
+                    // rebuilds a profile from the reflections.
+                    x: new Float32Array(0),
+                    y: new Float32Array(0)
+                };
+            }
+            return out;
+        }
+
         function attrToString(a) {
             let v = attrRaw(a);
             if (v == null) return "";
@@ -1318,11 +1384,21 @@
                 try {
                     f = new h5.File(fsName, "r");
                     const sp = f.get("spectra");
-                    if (!sp) throw new Error("Not a reference library (no 'spectra' group).");
+                    if (!sp) {
+                        // A flat-schema library has no /spectra group at all: the
+                        // reflections live in one concatenated array with an offset
+                        // index. 16x smaller, so this is the normal case for the
+                        // large COD sets.
+                        const flat = flatEntries(
+                            f, attrToString(f.attrs && f.attrs["source"]) || "Library",
+                            typeof rodUrl === "function" ? rodUrl : null);
+                        if (!flat) throw new Error("Not a reference library (no 'spectra' group).");
+                        out = flat;
+                    }
                     // build_rod_library.py and build_openspecy_library.py emit the
                     // same schema; `source` is what distinguishes them.
                     const fileSource = attrToString(f.attrs && f.attrs["source"]) || "Library";
-                    const names = sp.keys();
+                    const names = sp ? sp.keys() : [];   // flat schema: no groups to walk
                     const tick = Math.max(1, Math.floor(names.length / 50));
                     for (let idx = 0; idx < names.length; idx++) {
                         const gname = names[idx];
