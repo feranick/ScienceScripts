@@ -197,27 +197,42 @@ def write_flat(src, names, dest, file_attrs, src_name, drop, max_peaks, t0):
     return int(offs[-1])
 
 
-def flat_convert(src_path, dest_path=None, drop=(), max_peaks=0, quiet=False):
+def flat_convert(src_path, dest_path=None, drop=(), max_peaks=0, quiet=False,
+                 verify=0, limit=0):
     """Convert a group-per-entry library to the flat layout, in place if asked.
 
-    Importable so the builders can offer --flat without duplicating any of this:
-    they write the ordinary schema, then call here. Writing to a temp file and
-    replacing means a failure leaves the original intact.
+    ALWAYS writes to a temporary file first, even when the destination differs
+    from the source. HDF5 cannot truncate a file it already has open, so
+    `-o <same name>` fails outright, and a mid-run failure would otherwise leave
+    a half-written library where the original used to be.
+
+    Verification happens before the replace, while the original is still intact:
+    afterwards there is nothing left to compare against.
     """
-    in_place = dest_path is None or os.path.abspath(dest_path) == os.path.abspath(src_path)
-    tmp = (src_path + '.flat.tmp') if in_place else dest_path
+    same = dest_path is None or os.path.abspath(dest_path) == os.path.abspath(src_path)
+    final = src_path if same else dest_path
+    tmp = final + '.flat.tmp'
     t0 = time.time()
-    with h5py.File(src_path, 'r') as src:
-        if 'spectra' not in src:
-            raise ValueError('%s has no /spectra group' % src_path)
-        names = entry_names(src)
-        npk = write_flat(src, names, tmp, dict(src.attrs), src_path,
-                         set(drop), max_peaks, t0)
-    if in_place:
-        os.replace(tmp, src_path)
-        final = src_path
-    else:
-        final = dest_path
+    try:
+        with h5py.File(src_path, 'r') as src:
+            if 'spectra' not in src:
+                raise ValueError('%s has no /spectra group' % src_path)
+            names = entry_names(src)
+            if limit:
+                names = names[:limit]
+            npk = write_flat(src, names, tmp, dict(src.attrs), src_path,
+                             set(drop), max_peaks, t0)
+        if verify:
+            verify_flat(src_path, tmp, verify, max_peaks)
+        os.replace(tmp, final)
+    except BaseException:
+        # never leave a partial file where a library is expected
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        raise
     if not quiet:
         sz = os.path.getsize(final)
         print('  flat layout: %s entries, %s reflections, %s  (%.2f KB/entry)'
@@ -277,6 +292,37 @@ def main():
     src_size = os.path.getsize(args.src)
 
     t0 = time.time()
+    print('  source: %s   %s' % (args.src, human(src_size)))
+    print('  gzip: %s   drop attrs: %s   max-peaks: %s'
+          % ('off' if args.no_compress else 'kept',
+             ','.join(sorted(drop)) or 'none', args.max_peaks or 'all'))
+
+    # ---- the flat path -----------------------------------------------------
+    # Handled entirely by flat_convert, which opens the source itself. Nothing
+    # here may hold the file open first: HDF5 cannot truncate a file it already
+    # has open, so `-o <same name>` failed outright when this was inlined.
+    if args.flat:
+        if args.split_mb:
+            sys.exit('--flat and --split-mb together are not supported: the '
+                     'flat layout is small enough that sharding is pointless.')
+        want_flat = args.out or os.path.join(
+            os.path.dirname(os.path.abspath(args.src)), stem + '_flat.h5')
+        final = flat_convert(args.src, want_flat, drop, args.max_peaks,
+                             quiet=True, verify=args.verify, limit=args.limit)
+        sz = os.path.getsize(final)
+        with h5py.File(final, 'r') as h:
+            n = int(h.attrs.get('count', 0))
+        print()
+        print('  wrote %-46s %s  (%s entries, %.2f KB/entry)'
+              % (os.path.basename(final), human(sz), format(n, ','),
+                 sz / max(1, n) / 1024))
+        print('  total %s -> %s   (%.1fx smaller)'
+              % (human(src_size), human(sz), src_size / max(1, sz)))
+        print('  in %.0fs' % (time.time() - t0))
+        print('\n  Next: re-run make_libraries_manifest.py on the serving '
+              'directory so libraries.json picks up the new file.')
+        return
+
     with h5py.File(args.src, 'r') as src:
         if 'spectra' not in src:
             sys.exit('%s has no /spectra group -- is it one of our libraries?'
@@ -286,32 +332,7 @@ def main():
         if args.limit:
             names = names[:args.limit]
         n = len(names)
-        print('  source: %s   %s entries   %s' % (args.src, format(n, ','), human(src_size)))
-        print('  gzip: %s   drop attrs: %s   max-peaks: %s'
-              % ('off' if args.no_compress else 'kept',
-                 ','.join(sorted(drop)) or 'none', args.max_peaks or 'all'))
-
-        if args.flat:
-            if args.split_mb:
-                sys.exit('--flat and --split-mb together are not supported: the '
-                         'flat layout is small enough that sharding is pointless.')
-            dest = args.out or os.path.join(
-                os.path.dirname(os.path.abspath(args.src)), stem + '_flat.h5')
-            npk = write_flat(src, names, dest, file_attrs, args.src, drop,
-                             args.max_peaks, t0)
-            sz = os.path.getsize(dest)
-            print()
-            print('  wrote %-46s %s  (%s entries, %.2f KB/entry)'
-                  % (os.path.basename(dest), human(sz), format(n, ','), sz / n / 1024))
-            print('  total %s -> %s   (%.1fx smaller)'
-                  % (human(src_size), human(sz), src_size / sz))
-            print('  %s reflections carried over, in %.0fs'
-                  % (format(npk, ','), time.time() - t0))
-            if args.verify:
-                verify_flat(args.src, dest, args.verify, args.max_peaks)
-            print('\n  Next: re-run make_libraries_manifest.py on the serving '
-                  'directory so libraries.json picks up the new file.')
-            return
+        print('  %s entries' % format(n, ','))
 
         # One shard unless asked otherwise. Sizes are only known as we go, so
         # shards are cut on a running byte estimate and the count is not known

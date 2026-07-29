@@ -334,7 +334,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "raman-v2026.07.28.2";
+        const VERSION_TAG = "raman-v2026.07.28.3";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -1610,6 +1610,12 @@
                 candidates.push(b);
                 const web = b.replace(/\.(h5|hdf5)$/i, '_web.$1');
                 if (web !== b) candidates.push(web);
+                // repack_library.py --flat defaults to <name>_flat.h5, so that
+                // suffix is every bit as conventional as _web. Recommending a
+                // naming scheme and then not probing for it is exactly how
+                // cod_inorganic_web.h5 stayed invisible next to the page.
+                const flat = b.replace(/\.(h5|hdf5)$/i, '_flat.$1');
+                if (flat !== b) candidates.push(flat);
             }
             const seen = new Set(), hits = [];
             for (const c of candidates) {
