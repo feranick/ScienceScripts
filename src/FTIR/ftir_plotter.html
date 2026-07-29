@@ -259,8 +259,6 @@
             <div id="db-manage" style="display: none; flex-direction: column; gap: 6px;">
                 <label class="btn-crop" for="db-h5" style="text-align: center; cursor: pointer; font-size: 0.8rem;">📚 Add .h5 librar(ies)</label>
                 <input type="file" id="db-h5" accept=".h5,.hdf5" multiple style="display:none;" onchange="addDbLibrary(event)">
-                <label class="btn-crop" for="rruff-folder" style="text-align: center; cursor: pointer; font-size: 0.8rem;">📂 Load local RRUFF folder</label>
-                <input type="file" id="rruff-folder" webkitdirectory directory multiple style="display:none;" onchange="loadRruffFolder(event)">
                 <button class="btn-crop" style="font-size: 0.75rem; padding: 5px;" onclick="forgetSavedLibrary()">🗑 Forget saved RRUFF library</button>
                 <div style="border-top: 1px dashed #e9ecef; padding-top: 6px;">
                     <div style="font-size: 0.78rem; color: #495057; font-weight: bold; margin-bottom: 4px;">🔗 SDBS (organic compounds)</div>
@@ -333,7 +331,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "ftir-v2026.07.28.3";
+        const VERSION_TAG = "ftir-v2026.07.29.1";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -949,27 +947,9 @@
         // or open a consolidated .h5 library built by build_rruff_library.py
         // (loaded into memory with precomputed peaks for instant matching).
         let rruffHits = [];          // current search results (records)
-        let rruffLocalFiles = [];    // indexed folder ({name,id,file})
         let rruffLibrary = [];       // in-memory .h5 library ({name,id,peaks,x,y})
         let rruffMatchRecords = [];  // records backing the current match modal
 
-        function loadRruffFolder(event) {
-            const files = Array.from(event.target.files || []).filter(f => f.name.toLowerCase().endsWith('.txt'));
-            rruffLocalFiles = files.map(f => {
-                const parts = f.name.split('__');
-                const name = parts[0] || f.name;
-                const id = (parts[1] && /^R\d+/.test(parts[1])) ? parts[1] : '';
-                return { name, id, file: f };
-            });
-            rruffLibrary = [];  // folder takes precedence
-            const statusEl = document.getElementById('db-status');
-            statusEl.innerText = rruffLocalFiles.length
-                ? `Local RRUFF folder: ${rruffLocalFiles.length} spectra. Search or Match by peaks.`
-                : "No .txt spectra found in that folder.";
-            updateRruffPanelState();
-            if (typeof dbRefresh === 'function') dbRefresh();
-            event.target.value = '';
-        }
 
         // Parse .h5 library bytes into the in-memory rruffLibrary (shared by
         // manual open, host auto-load, and IndexedDB restore).
@@ -978,13 +958,11 @@
         function updateRruffPanelState() {
             const panel = document.getElementById('rruff-panel');
             if (!panel) return;
-            const loaded = (rruffLibrary && rruffLibrary.length) || (rruffLocalFiles && rruffLocalFiles.length);
+            const loaded = !!(rruffLibrary && rruffLibrary.length);
             panel.classList.toggle('lib-loaded', !!loaded);
             const note = document.getElementById('rruff-loaded-note');
             if (note && loaded) {
-                note.innerText = rruffLibrary.length
-                    ? `✅ Library loaded — ${rruffLibrary.length} spectra`
-                    : `✅ Folder loaded — ${rruffLocalFiles.length} spectra`;
+                note.innerText = `✅ Library loaded — ${rruffLibrary.length} spectra`;
             }
         }
 
@@ -1034,7 +1012,6 @@
                     try { FS.unlink(fsName); } catch (e) {}
                 }
                 rruffLibrary = out;
-                rruffLocalFiles = [];  // library takes precedence
                 document.getElementById('db-status').innerText =
                     `RRUFF library${sourceLabel ? ' (' + sourceLabel + ')' : ''}: ${out.length} spectra (precomputed peaks). Search or Match.`;
                 updateRruffPanelState();
@@ -1838,9 +1815,6 @@
             if (rruffLibrary && rruffLibrary.length)
                 out.push({ key: 'rruff-lib', label: 'RRUFF library', kind: 'rruff',
                            count: rruffLibrary.length, entries: rruffLibrary });
-            if (rruffLocalFiles && rruffLocalFiles.length)
-                out.push({ key: 'rruff-folder', label: 'RRUFF folder', kind: 'folder',
-                           count: rruffLocalFiles.length, entries: rruffLocalFiles });
             specLibraries.forEach((lib, i) => {
                 const src = (lib.entries[0] && lib.entries[0].source) || 'Library';
                 out.push({ key: 'lib-' + i, label: `${src} — ${lib.name}`, kind: 'lib',
@@ -1852,7 +1826,7 @@
         const dbEnabledSources = () => dbSourceList().filter(s => !dbDisabled.has(s.key));
 
         function dbBadge(kind, entry) {
-            if (kind === 'rruff' || kind === 'folder') return 'RRUFF';
+            if (kind === 'rruff') return 'RRUFF';
             const src = (entry && entry.source) || 'LIB';
             return src === 'OpenSpecy' ? 'SPECY' : src.toUpperCase().slice(0, 6);
         }
@@ -1973,7 +1947,6 @@
         }
 
         function dbHaystack(kind, e) {
-            if (kind === 'folder') return `${e.name} ${e.id} ${e.file ? e.file.name : ''}`.toLowerCase();
             if (kind === 'rruff') return `${e.name} ${e.id}`.toLowerCase();
             return libHaystack(e);
         }
@@ -2082,22 +2055,6 @@
                 for (const e of s.entries) {
                     if (q && !dbHaystack(s.kind, e).includes(q)) continue;
                     let peaks = e.peaks, inten = e.intensities;
-                    if (s.kind === 'folder') {           // raw .txt — detect on the fly
-                        try {
-                            const parsed = parseTwoColumn(await e.file.text(), e.name);
-                            peaks = detectReferencePeaks(parsed.angles, parsed.intensities);
-                            // Intensities at the detected positions, so exclusive
-                            // mode can apply the noise floor to folder references too.
-                            inten = peaks.map(pp => {
-                                let best = 0, bd = Infinity;
-                                for (let k = 0; k < parsed.angles.length; k++) {
-                                    const d = Math.abs(parsed.angles[k] - pp);
-                                    if (d < bd) { bd = d; best = parsed.intensities[k]; }
-                                }
-                                return best;
-                            });
-                        } catch (err) { continue; }
-                    }
                     if (!peaks || !peaks.length) continue;
                     scanned++;
                     const sc = exclusive
@@ -2269,72 +2226,72 @@
         }
 
         function peakIndexBuild(sources, binW, skipKinds) {
-            const skip = skipKinds || ['folder'];
-            const entries = [];
-            let lo = Infinity, hi = -Infinity, nPk = 0;
+    const skip = skipKinds || [];
+    const entries = [];
+    let lo = Infinity, hi = -Infinity, nPk = 0;
 
-            for (const s of sources) {
-                // 'folder' entries are raw files whose bands are only known after an
-                // async parse. A hover handler cannot await, so they are left out and
-                // reported as excluded rather than silently ignored.
-                if (skip.indexOf(s.kind) >= 0) continue;
-                for (const e of s.entries) {
-                    const p = e.peaks;
-                    if (!p || !p.length) continue;
-                    let good = 0;
-                    for (let k = 0; k < p.length; k++) {
-                        const v = p[k];
-                        if (!isFinite(v)) continue;
-                        if (v < lo) lo = v;
-                        if (v > hi) hi = v;
-                        good++;
-                    }
-                    if (!good) continue;
-                    entries.push({ rec: e, kind: s.kind, srcLabel: s.label, srcKey: s.key });
-                    nPk += good;
-                }
+    for (const s of sources) {
+        // A source with no precomputed peaks cannot be indexed: a hover handler
+        // cannot await a parse. The raw-.txt 'folder' kind that needed this was
+        // removed in 2026.07.28.6; the guard stays for any future async source.
+        if (skip.indexOf(s.kind) >= 0) continue;
+        for (const e of s.entries) {
+            const p = e.peaks;
+            if (!p || !p.length) continue;
+            let good = 0;
+            for (let k = 0; k < p.length; k++) {
+                const v = p[k];
+                if (!isFinite(v)) continue;
+                if (v < lo) lo = v;
+                if (v > hi) hi = v;
+                good++;
             }
-            if (!entries.length || !isFinite(lo)) return null;
-
-            const x0 = Math.floor(lo / binW) * binW;
-            const nBins = Math.max(1, Math.ceil((hi - x0) / binW) + 1);
-            const binStart = new Int32Array(nBins + 1);
-
-            for (const f of entries) {
-                const p = f.rec.peaks;
-                for (let k = 0; k < p.length; k++) {
-                    const v = p[k];
-                    if (!isFinite(v)) continue;
-                    binStart[Math.floor((v - x0) / binW)]++;
-                }
-            }
-            // counts -> start offsets (exclusive prefix sum)
-            let run = 0;
-            for (let b = 0; b <= nBins; b++) { const c = binStart[b]; binStart[b] = run; run += c; }
-
-            const binEnt = new Int32Array(nPk);
-            const binPos = new Float32Array(nPk);
-            const cur = binStart.slice(0, nBins);
-            for (let ei = 0; ei < entries.length; ei++) {
-                const p = entries[ei].rec.peaks;
-                for (let k = 0; k < p.length; k++) {
-                    const v = p[k];
-                    if (!isFinite(v)) continue;
-                    const slot = cur[Math.floor((v - x0) / binW)]++;
-                    binEnt[slot] = ei;
-                    binPos[slot] = v;
-                }
-            }
-
-            return {
-                binW, x0, nBins, binStart, binEnt, binPos, entries,
-                nPeaks: nPk,
-                // Scratch for dedupe inside a single query. Reused so a hover allocates
-                // nothing: an entry with two bands in range must be counted once.
-                stamp: new Int32Array(entries.length), stampId: 0,
-                xlo: lo, xhi: hi
-            };
+            if (!good) continue;
+            entries.push({ rec: e, kind: s.kind, srcLabel: s.label, srcKey: s.key });
+            nPk += good;
         }
+    }
+    if (!entries.length || !isFinite(lo)) return null;
+
+    const x0 = Math.floor(lo / binW) * binW;
+    const nBins = Math.max(1, Math.ceil((hi - x0) / binW) + 1);
+    const binStart = new Int32Array(nBins + 1);
+
+    for (const f of entries) {
+        const p = f.rec.peaks;
+        for (let k = 0; k < p.length; k++) {
+            const v = p[k];
+            if (!isFinite(v)) continue;
+            binStart[Math.floor((v - x0) / binW)]++;
+        }
+    }
+    // counts -> start offsets (exclusive prefix sum)
+    let run = 0;
+    for (let b = 0; b <= nBins; b++) { const c = binStart[b]; binStart[b] = run; run += c; }
+
+    const binEnt = new Int32Array(nPk);
+    const binPos = new Float32Array(nPk);
+    const cur = binStart.slice(0, nBins);
+    for (let ei = 0; ei < entries.length; ei++) {
+        const p = entries[ei].rec.peaks;
+        for (let k = 0; k < p.length; k++) {
+            const v = p[k];
+            if (!isFinite(v)) continue;
+            const slot = cur[Math.floor((v - x0) / binW)]++;
+            binEnt[slot] = ei;
+            binPos[slot] = v;
+        }
+    }
+
+    return {
+        binW, x0, nBins, binStart, binEnt, binPos, entries,
+        nPeaks: nPk,
+        // Scratch for dedupe inside a single query. Reused so a hover allocates
+        // nothing: an entry with two bands in range must be counted once.
+        stamp: new Int32Array(entries.length), stampId: 0,
+        xlo: lo, xhi: hi
+    };
+}
 
         function peakIndexAt(idx, x, tol) {
             const out = [];
@@ -2477,7 +2434,7 @@
             if (peakIdIndex && sig === peakIdSig) return peakIdIndex;
             const srcs = dbEnabledSources();
             let positions = 0;
-            for (const s of srcs) if (s.kind !== 'folder')
+            for (const s of srcs)
                 for (const e of s.entries) positions += (e.peaks && e.peaks.length) || 0;
             if (positions > PEAKID_MAX_POSITIONS) {
                 peakIdIndex = null; peakIdSig = sig;

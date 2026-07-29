@@ -47,7 +47,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.07.28.4"
+VERSION_TAG = "v2026.07.29.1"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 # RRUFF powder reference library (patterns calculated for Cu radiation, i.e. the
@@ -145,10 +145,12 @@ PEAKID_NAME_CAP = 200          # above this, show counts but no names
 PEAKID_TOP_SHOW = 6
 PEAKID_MAX_POSITIONS = 40_000_000
 
-def peak_index_build(sources, skip_kinds=('folder', 'online')):
+def peak_index_build(sources, skip_kinds=('online',)):
     """Flatten every reference band into one sorted position array."""
     entries, pos_parts, ent_parts = [], [], []
     for s in sources:
+        # 'online' sources carry no entries list; the raw-.txt 'folder' kind that
+        # also had to be skipped here was removed in 2026.07.28.6.
         if s.get('kind') in skip_kinds:
             continue
         for e in (s.get('entries') or []):
@@ -537,6 +539,42 @@ def entry_readable(grp, names=('peaks',)):
     return True
 
 
+def sniff_library_kind(path):
+    """Which of our schemas is this .h5? -> 'flat' | 'rruff' | 'library' | None.
+
+    The app used to offer a RRUFF-only .h5 button and a COD-only one, so loading
+    a COD or flat library through the wrong door produced "Not a RRUFF powder
+    library ('spectra' group missing)" -- a schema complaint for a perfectly good
+    file. One entry point plus this sniffer removes the choice from the user.
+
+    RRUFF powder libraries store measured x/y curves and keep peaks in a group
+    ATTRIBUTE; the builder also stamps Format. COD/ROD/Open Specy libraries store
+    peaks as DATASETS. Flat libraries have no /spectra group at all.
+    """
+    if not H5_AVAILABLE:
+        return None
+    try:
+        with h5py.File(path, 'r') as f:
+            if 'peaks_all' in f and 'offsets' in f:
+                return 'flat'
+            if 'spectra' not in f:
+                return None
+            fmt = f.attrs.get('Format', f.attrs.get('format', ''))
+            if isinstance(fmt, bytes):
+                fmt = fmt.decode('latin1')
+            if 'rruff' in str(fmt).lower():
+                return 'rruff'
+            for nm in list(f['spectra'].keys())[:8]:
+                g = f['spectra'][nm]
+                if 'peaks' in g:                       # dataset -> COD-style
+                    return 'library'
+                if 'peaks' in g.attrs and 'x' in g:    # attribute + curve -> RRUFF
+                    return 'rruff'
+            return 'library'
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def load_rruff_powder_h5_library(path):
     """Reads a consolidated RRUFF powder library .h5 (from build_rruff_powder_library.py).
     Returns {'path', 'entries': [{group, name, id, url, peaks(np.array)}]}."""
@@ -879,7 +917,6 @@ class XRDPlotterGUI:
         self._peakid_annot = None
         self._peakid_last = None
         self.rruff_lib = None
-        self.rruff_local_dir = None
         self.rruff_search_hits = []
         # COD (Crystallography Open Database) sources
         self.cod_libs = []             # list of loaded .h5 libraries (multi, toggleable)
@@ -1065,12 +1102,18 @@ class XRDPlotterGUI:
         self._db_manage_open = False
         mf = self.db_manage_frame
 
-        ttk.Button(mf, text="🗂️ Open COD Source…", command=self.cod_open).pack(fill="x", pady=2)
+        # One entry point for every schema. Two schema-specific buttons meant a
+        # COD library opened through the RRUFF one was rejected as "not a RRUFF
+        # powder library", which reads like a broken file rather than a wrong door.
+        ttk.Button(mf, text="📚 Add .h5 librar(ies)…",
+                   command=self.db_add_libraries).pack(fill="x", pady=2)
+        ttk.Label(mf, text="COD, ROD, Open Specy, RRUFF or flat — detected automatically",
+                  font=("Helvetica", 7), foreground="#6c757d", wraplength=240,
+                  justify="left").pack(anchor="w")
 
         ttk.Separator(mf, orient="horizontal").pack(fill="x", pady=4)
-        ttk.Label(mf, text="RRUFF (powder)", font=("Helvetica", 8, "bold")).pack(anchor="w")
-        ttk.Button(mf, text="📂 Use Local RRUFF Folder", command=self.rruff_pick_local_folder).pack(fill="x", pady=2)
-        ttk.Button(mf, text="📚 Open RRUFF .h5 Library", command=self.rruff_open_library).pack(fill="x", pady=2)
+        ttk.Button(mf, text="🗂️ Search COD online (needs a db3 index)…",
+                   command=self.cod_open).pack(fill="x", pady=2)
 
         ttk.Separator(mf, orient="horizontal").pack(fill="x", pady=4)
         ttk.Label(mf, text="Materials Project (online)", font=("Helvetica", 8, "bold")).pack(anchor="w")
@@ -1886,20 +1929,7 @@ class XRDPlotterGUI:
         except Exception as e:
             messagebox.showerror("Library Error", f"Could not open library:\n{e}")
             return
-        self.rruff_local_dir = None
         self.rruff_status_var.set(f"RRUFF library: {len(self.rruff_lib['entries'])} patterns (precomputed peaks). Search or Match.")
-
-    def rruff_pick_local_folder(self):
-        d = filedialog.askdirectory(title="Select a folder of RRUFF powder .txt files")
-        if not d:
-            return
-        if not any(fn.lower().endswith('.txt') for fn in os.listdir(d)):
-            messagebox.showwarning("No Files", "That folder contains no .txt files.")
-            return
-        self.rruff_local_dir = d
-        self.rruff_lib = None
-        n = len([f for f in os.listdir(d) if f.lower().endswith('.txt')])
-        self.rruff_status_var.set(f"RRUFF folder: {n} files. Search or Match by peaks.")
 
     def _rruff_read_reference(self, hit):
         """Returns (x, y, label) for a hit from the .h5 library or a powder file."""
@@ -1930,20 +1960,12 @@ class XRDPlotterGUI:
                 if not q or q in f"{e['name']} {e['id']}".lower():
                     out.append({'name': e['name'], 'id': e['id'], 'url': e.get('url'),
                                 'group': e['group'], 'peaks': e['peaks']})
-        elif self.rruff_local_dir:
-            for fn in sorted(os.listdir(self.rruff_local_dir)):
-                if not fn.lower().endswith('.txt'):
-                    continue
-                name, rid = rruff_meta_from_filename(fn)
-                if not q or q in f"{name} {rid} {fn}".lower():
-                    out.append({'name': name, 'id': rid, 'url': None,
-                                'path': os.path.join(self.rruff_local_dir, fn)})
         return out
 
     def rruff_run_search(self):
         self.rruff_results_list.delete(0, tk.END)
         self.rruff_search_hits = []
-        if not self.rruff_lib and not self.rruff_local_dir:
+        if not self.rruff_lib:
             messagebox.showinfo("No RRUFF Source", "Open an .h5 library or a local folder first.")
             return
         hits = self._rruff_candidates(self.ent_rruff_query.get())
@@ -1992,7 +2014,7 @@ class XRDPlotterGUI:
             messagebox.showinfo("Mark Peaks First",
                                 "Turn on '🎯 Peak Selection', right-click on the plot to mark peaks, then Match.")
             return
-        if not self.rruff_lib and not self.rruff_local_dir:
+        if not self.rruff_lib:
             messagebox.showinfo("No RRUFF Source", "Open an .h5 library or a local folder first.")
             return
         try:
@@ -2316,10 +2338,6 @@ class XRDPlotterGUI:
             out.append({'key': 'rruff-lib', 'label': 'RRUFF library', 'kind': 'rruff',
                         'count': len(self.rruff_lib['entries']),
                         'entries': self.rruff_lib['entries']})
-        elif self.rruff_local_dir:
-            files = [f for f in os.listdir(self.rruff_local_dir) if f.lower().endswith('.txt')]
-            out.append({'key': 'rruff-folder', 'label': 'RRUFF folder', 'kind': 'folder',
-                        'count': len(files), 'entries': None})
         for i, lib in enumerate(self.cod_libs):
             src = (lib['entries'][0].get('source') if lib['entries'] else '') or 'Library'
             out.append({'key': f'lib-{i}', 'label': f"{src} — {lib['name']}", 'kind': 'lib',
@@ -2387,7 +2405,7 @@ class XRDPlotterGUI:
 
     @staticmethod
     def _db_tag(kind, e):
-        if kind in ('rruff', 'folder'):
+        if kind == 'rruff':
             return 'RRUFF'
         src = (e.get('source') if isinstance(e, dict) else None) or 'LIB'
         return 'SPECY' if src == 'OpenSpecy' else src.upper()[:6]
@@ -2406,11 +2424,6 @@ class XRDPlotterGUI:
         for s in sources:
             if s['kind'] == 'online':
                 continue                      # handled asynchronously below
-            if s['kind'] == 'folder':
-                for name, rid, path in self._rruff_candidates(query):
-                    self.db_hits.append({'kind': 'folder', 'tag': 'RRUFF',
-                                         'rec': {'name': name, 'id': rid, 'path': path}})
-                continue
             for e in s['entries']:
                 if q and q not in self._db_haystack(s['kind'], e):
                     continue
@@ -2536,40 +2549,6 @@ class XRDPlotterGUI:
         for s in sources:
             if s['kind'] == 'online':
                 continue                       # bounded online scan stays separate
-            if s['kind'] == 'folder':
-                for name, rid, path in self._rruff_candidates(self.ent_db_query.get()):
-                    try:
-                        # RRUFF powder files are read by parse_rruff_powder, which
-                        # also returns the reflection list -- _parse_two_column_text
-                        # is the Raman/FTIR name and does not exist in this app.
-                        with open(path, 'r', encoding='utf-8', errors='ignore') as fh:
-                            x, y, pk, _meta = parse_rruff_powder(fh.read())
-                        if len(x) < 5:
-                            continue
-                        peaks = pk if pk is not None and len(pk) else detect_reference_peaks(x, y)
-                    except Exception:                        # noqa: BLE001
-                        continue
-                    scanned += 1
-                    if exclusive:
-                        # intensity at each detected position, so the noise floor
-                        # applies to folder references too
-                        inten = [float(y[int(np.argmin(np.abs(np.asarray(x) - pk)))])
-                                 for pk in peaks]
-                        (score, avg, matched, recall, precision,
-                         extra, considered, have_int) = peak_match_exclusive(
-                            peaks, inten, exp_peaks, tolerance, xlo, xhi, floor_frac)
-                        if not have_int:
-                            no_inten += 1
-                    else:
-                        score, avg, matched = peak_match_score(peaks, exp_peaks, tolerance)
-                        recall = precision = extra = considered = None
-                    if matched > 0:
-                        scored.append({'score': score, 'avg': avg, 'matched': matched,
-                                       'recall': recall, 'precision': precision,
-                                       'extra': extra, 'considered': considered,
-                                       'name': name, 'id': rid, 'tag': 'RRUFF',
-                                       'kind': 'folder', 'path': path, 'detail': ''})
-                continue
             for e in s['entries']:
                 if q and q not in self._db_haystack(s['kind'], e):
                     continue
@@ -2774,6 +2753,55 @@ class XRDPlotterGUI:
                    command=lambda: (pop.destroy(), self.cod_add_library())).pack(fill="x", pady=(6, 0))
 
     # ---- multi-library management (remembered across launches) ----
+    def db_add_libraries(self):
+        """Add one or more .h5 reference libraries, whatever schema they use.
+
+        Replaces the old pair of schema-specific buttons. Each file is sniffed
+        and sent to the loader that understands it, so a COD, ROD, Open Specy,
+        flat or RRUFF library all arrive through the same door.
+        """
+        paths = filedialog.askopenfilenames(
+            title="Add reference .h5 librar(ies) — COD, ROD, Open Specy, RRUFF or flat",
+            filetypes=[("Reference library", ("*.h5", "*.hdf5")), ("All Files", "*.*")])
+        if not paths:
+            return
+        added, rruff_loaded, problems = 0, 0, []
+        for path in paths:
+            base = os.path.basename(path)
+            kind = sniff_library_kind(path)
+            if kind == 'rruff':
+                try:
+                    self.rruff_lib = load_rruff_powder_h5_library(path)
+                    self.rruff_status_var.set(
+                        "RRUFF library: %d patterns (precomputed peaks). Search or Match."
+                        % len(self.rruff_lib['entries']))
+                    rruff_loaded += 1
+                except Exception as e:
+                    problems.append('%s: %s' % (base, e))
+            elif kind in ('library', 'flat'):
+                try:
+                    if self._cod_load_library_path(path, active=True, persist=False):
+                        added += 1
+                    else:
+                        problems.append('%s: could not be added' % base)
+                except Exception as e:
+                    problems.append('%s: %s' % (base, e))
+            else:
+                problems.append('%s: not one of our libraries (no /spectra group '
+                                'and no peaks_all/offsets)' % base)
+        if added:
+            self._cod_save_config()
+            self._cod_refresh_libs_panel()
+            self._cod_update_lib_status()
+        self.db_refresh()
+        if problems:
+            messagebox.showerror(
+                "Library Error",
+                "Loaded %d librar(ies)%s.\n\nProblems:\n  %s"
+                % (added + rruff_loaded,
+                   '' if not (added + rruff_loaded) else '',
+                   '\n  '.join(problems)))
+
     def cod_add_library(self):
         """Add one or more baked COD .h5 libraries to the managed list."""
         paths = filedialog.askopenfilenames(

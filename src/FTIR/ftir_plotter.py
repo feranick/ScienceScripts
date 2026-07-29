@@ -28,14 +28,11 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "ftir-v2026.07.28.4"
+VERSION_TAG = "ftir-v2026.07.29.1"
 
 # RRUFF reference database (open FTIR spectra of minerals).
 # Data are distributed as per-quality zip archives of two-column .txt files.
 RRUFF_BASE_URL = "https://www.rruff.net/zipped_data_files/infrared/"
-RRUFF_DATASETS = [
-    "infrared", "processed", "excellent", "fair", "poor",
-]
 RRUFF_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".ftir_plotter_rruff")
 
 # Open Specy (https://openspecy.org, CC-BY) -- polymers, microplastics,
@@ -114,10 +111,12 @@ PEAKID_NAME_CAP = 200          # above this, show counts but no names
 PEAKID_TOP_SHOW = 6
 PEAKID_MAX_POSITIONS = 40_000_000
 
-def peak_index_build(sources, skip_kinds=('folder', 'online')):
+def peak_index_build(sources, skip_kinds=('online',)):
     """Flatten every reference band into one sorted position array."""
     entries, pos_parts, ent_parts = [], [], []
     for s in sources:
+        # 'online' sources carry no entries list; the raw-.txt 'folder' kind that
+        # also had to be skipped here was removed in 2026.07.28.6.
         if s.get('kind') in skip_kinds:
             continue
         for e in (s.get('entries') or []):
@@ -638,65 +637,6 @@ def _parse_two_column_text(text, base_id):
 # RRUFF REFERENCE DATABASE (download / cache / search)
 # ==========================================
 
-def rruff_dataset_dir(dataset):
-    return os.path.join(RRUFF_CACHE_DIR, dataset)
-
-
-def rruff_is_cached(dataset):
-    d = rruff_dataset_dir(dataset)
-    return os.path.isdir(d) and any(fn.lower().endswith('.txt') for fn in os.listdir(d))
-
-
-def rruff_download_dataset(dataset, progress_cb=None):
-    """Downloads and extracts a RRUFF raman zip archive into the local cache.
-    Returns the number of .txt spectra extracted. Network access required."""
-    if dataset not in RRUFF_DATASETS:
-        raise ValueError(f"Unknown RRUFF dataset '{dataset}'.")
-    os.makedirs(RRUFF_CACHE_DIR, exist_ok=True)
-    dest = rruff_dataset_dir(dataset)
-    os.makedirs(dest, exist_ok=True)
-    url = f"{RRUFF_BASE_URL}{dataset}.zip"
-    if progress_cb:
-        progress_cb(f"Downloading {dataset}.zip ...")
-    req = urllib.request.Request(url, headers={"User-Agent": "raman-plotter/1.0"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        blob = resp.read()
-    if progress_cb:
-        progress_cb("Extracting archive ...")
-    count = 0
-    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
-        for member in zf.namelist():
-            if not member.lower().endswith('.txt'):
-                continue
-            out_name = os.path.join(dest, os.path.basename(member))
-            with zf.open(member) as src, open(out_name, 'wb') as out:
-                out.write(src.read())
-            count += 1
-    return count
-
-
-def rruff_search_cached(dataset, query):
-    """Searches cached RRUFF .txt files for minerals whose name/ID/filename
-    matches the query. Returns a list of dicts: {name, id, path}."""
-    d = rruff_dataset_dir(dataset)
-    results = []
-    if not os.path.isdir(d):
-        return results
-    q = query.strip().lower()
-    for fn in sorted(os.listdir(d)):
-        if not fn.lower().endswith('.txt'):
-            continue
-        path = os.path.join(d, fn)
-        # RRUFF filenames look like: Quartz__R040031__FTIR__..._532.txt
-        parts = fn.split('__')
-        name = parts[0] if parts else fn
-        rid = parts[1] if len(parts) > 1 else ''
-        hay = f"{name} {rid} {fn}".lower()
-        if not q or q in hay:
-            results.append({'name': name, 'id': rid, 'path': path})
-    return results
-
-
 def entry_readable(grp, names=('peaks',)):
     """True when the named datasets in this group can actually be read.
 
@@ -717,6 +657,42 @@ def entry_readable(grp, names=('peaks',)):
         except (OSError, ValueError, KeyError):
             return False
     return True
+
+
+def sniff_library_kind(path):
+    """Which of our schemas is this .h5? -> 'flat' | 'rruff' | 'library' | None.
+
+    The app used to offer a RRUFF-only .h5 button alongside a generic one, so a
+    COD or flat library opened through the RRUFF door was rejected as "not a
+    RRUFF library ('spectra' group missing)" -- a schema complaint for a
+    perfectly good file. One entry point plus this sniffer removes the choice.
+
+    RRUFF libraries store measured x/y curves and keep peaks in a group
+    ATTRIBUTE; the builder also stamps Format. COD/ROD/Open Specy libraries store
+    peaks as DATASETS. Flat libraries have no /spectra group at all.
+    """
+    if not H5_AVAILABLE:
+        return None
+    try:
+        with h5py.File(path, 'r') as f:
+            if 'peaks_all' in f and 'offsets' in f:
+                return 'flat'
+            if 'spectra' not in f:
+                return None
+            fmt = f.attrs.get('Format', f.attrs.get('format', ''))
+            if isinstance(fmt, bytes):
+                fmt = fmt.decode('latin1')
+            if 'rruff' in str(fmt).lower():
+                return 'rruff'
+            for nm in list(f['spectra'].keys())[:8]:
+                g = f['spectra'][nm]
+                if 'peaks' in g:                       # dataset -> library schema
+                    return 'library'
+                if 'peaks' in g.attrs and 'x' in g:    # attribute + curve -> RRUFF
+                    return 'rruff'
+            return 'library'
+    except (OSError, ValueError, KeyError):
+        return None
 
 
 def load_rruff_h5_library(path):
@@ -1198,20 +1174,9 @@ class FTIRPlotterGUI:
         self._db_manage_open = False
         mf = self.db_manage_frame
 
-        ttk.Button(mf, text="📚 Add .h5 librar(ies)…", command=self.lib_add).pack(fill="x", pady=2)
+        ttk.Button(mf, text="📚 Add .h5 librar(ies)…", command=self.db_add_libraries).pack(fill="x", pady=2)
 
         ttk.Separator(mf, orient="horizontal").pack(fill="x", pady=4)
-        ttk.Label(mf, text="RRUFF (infrared)", font=("Helvetica", 8, "bold")).pack(anchor="w")
-        ds_row = ttk.Frame(mf)
-        ds_row.pack(fill="x", pady=2)
-        ttk.Label(ds_row, text="Set:", font=("Helvetica", 8)).pack(side="left")
-        self.combo_rruff_dataset = ttk.Combobox(ds_row, state="readonly", width=16, values=RRUFF_DATASETS)
-        self.combo_rruff_dataset.current(0)
-        self.combo_rruff_dataset.pack(side="left", fill="x", expand=True, padx=(3, 0))
-        self.btn_rruff_download = ttk.Button(mf, text="⬇️ Download / Update Set", command=self.rruff_download_selected)
-        self.btn_rruff_download.pack(fill="x", pady=2)
-        ttk.Button(mf, text="📂 Use Local RRUFF Folder", command=self.rruff_pick_local_folder).pack(fill="x", pady=2)
-        ttk.Button(mf, text="📚 Open RRUFF .h5 Library", command=self.rruff_open_library).pack(fill="x", pady=2)
 
         ttk.Separator(mf, orient="horizontal").pack(fill="x", pady=4)
         ttk.Label(mf, text="NIST WebBook (online)", font=("Helvetica", 8, "bold")).pack(anchor="w")
@@ -1266,7 +1231,6 @@ class FTIRPlotterGUI:
         self.lib_frame = self.db_sources_frame
         self.lib_cfg_path = os.path.join(os.path.expanduser("~"), ".ftir_plotter_libraries.json")
         self._nist_scan_cancel = False
-        self.rruff_local_dir = None
         self.rruff_lib = None
         self._lib_load_config()
         self.db_refresh()
@@ -1888,40 +1852,6 @@ class FTIRPlotterGUI:
         """Superseded by db_update_status; also picks up new RRUFF sources."""
         self.db_refresh()
 
-    def rruff_download_selected(self):
-        ds = self.combo_rruff_dataset.get()
-        self.btn_rruff_download.config(state="disabled")
-        self.rruff_status_var.set(f"RRUFF: preparing to download '{ds}' ...")
-
-        def worker():
-            try:
-                def prog(msg): self.root.after(0, lambda: self.rruff_status_var.set(f"RRUFF: {msg}"))
-                count = rruff_download_dataset(ds, progress_cb=prog)
-                self.rruff_local_dir = None
-                self.root.after(0, lambda: self.rruff_status_var.set(f"RRUFF: '{ds}' ready ({count} spectra). Search above."))
-            except Exception as e:
-                self.root.after(0, lambda err=str(e): messagebox.showerror(
-                    "RRUFF Download Failed",
-                    f"Could not download '{ds}'.\n\n{err}\n\n"
-                    f"You can also download archives manually from\n{RRUFF_BASE_URL}\n"
-                    f"and point the tool at the folder with 'Use Local RRUFF Folder'."))
-                self.root.after(0, self._refresh_rruff_status)
-            finally:
-                self.root.after(0, lambda: self.btn_rruff_download.config(state="normal"))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def rruff_pick_local_folder(self):
-        d = filedialog.askdirectory(title="Select a folder of RRUFF .txt spectra")
-        if not d:
-            return
-        if not any(fn.lower().endswith('.txt') for fn in os.listdir(d)):
-            messagebox.showwarning("No Spectra", "That folder contains no .txt spectra.")
-            return
-        self.rruff_local_dir = d
-        self.rruff_lib = None  # folder takes precedence when chosen
-        self._refresh_rruff_status()
-
     def rruff_open_library(self):
         path = filedialog.askopenfilename(
             title="Open a consolidated RRUFF .h5 library",
@@ -1933,7 +1863,6 @@ class FTIRPlotterGUI:
         except Exception as e:
             messagebox.showerror("Library Error", f"Could not open library:\n{e}")
             return
-        self.rruff_local_dir = None  # library takes precedence
         n = len(self.rruff_lib['entries'])
         self.rruff_status_var.set(f"RRUFF library: {n} spectra (precomputed peaks). Search or Match.")
 
@@ -1973,23 +1902,6 @@ class FTIRPlotterGUI:
             hits = [{'name': e['name'], 'id': e['id'], 'group': e['group'], 'url': e.get('url')}
                     for e in self.rruff_lib['entries']
                     if not q or q in f"{e['name']} {e['id']}".lower()]
-        elif self.rruff_local_dir:
-            hits = []
-            q = query.lower()
-            for fn in sorted(os.listdir(self.rruff_local_dir)):
-                if not fn.lower().endswith('.txt'):
-                    continue
-                parts = fn.split('__')
-                name = parts[0] if parts else fn
-                rid = parts[1] if len(parts) > 1 else ''
-                if not q or q in f"{name} {rid} {fn}".lower():
-                    hits.append({'name': name, 'id': rid, 'path': os.path.join(self.rruff_local_dir, fn)})
-        else:
-            ds = self.combo_rruff_dataset.get()
-            if not rruff_is_cached(ds):
-                messagebox.showinfo("Download First", f"RRUFF set '{ds}' is not downloaded yet.\nUse 'Download / Update Set' or point to a local folder.")
-                return
-            hits = rruff_search_cached(ds, query)
         if not hits:
             self.rruff_status_var.set("RRUFF: no matches.")
             return
@@ -2031,28 +1943,6 @@ class FTIRPlotterGUI:
             self.replot_and_refresh_canvas()
             self.rruff_status_var.set(f"RRUFF: overlaid {added} reference spectrum(s).")
 
-    def _rruff_candidate_files(self, query=""):
-        """Returns [(name, id, path)] for the active RRUFF source, optional filter."""
-        if self.rruff_local_dir and os.path.isdir(self.rruff_local_dir):
-            base = self.rruff_local_dir
-        else:
-            ds = self.combo_rruff_dataset.get()
-            base = rruff_dataset_dir(ds) if ds else None
-        out = []
-        if not base or not os.path.isdir(base):
-            return out
-        q = (query or "").strip().lower()
-        for fn in sorted(os.listdir(base)):
-            if not fn.lower().endswith('.txt'):
-                continue
-            parts = fn.split('__')
-            name = parts[0] if parts else fn
-            rid = parts[1] if len(parts) > 1 else ''
-            if q and q not in f"{name} {rid} {fn}".lower():
-                continue
-            out.append((name, rid, os.path.join(base, fn)))
-        return out
-
     def rruff_match_by_peaks(self):
         """Rank RRUFF references by how well their peaks match the marked peaks."""
         if not self.peak_guesses:
@@ -2082,41 +1972,12 @@ class FTIRPlotterGUI:
             self._show_rruff_match_results(scored[:100], len(exp_peaks), tolerance)
             return
 
-        candidates = self._rruff_candidate_files(self.ent_rruff_query.get())
-        if not candidates:
-            messagebox.showinfo(
-                "No RRUFF Data",
-                "Open a RRUFF .h5 library, download a set, or point to a local RRUFF folder first.\n"
-                "A search-box term, if present, restricts which references are scanned.")
-            return
+        # The raw-.txt folder path is gone: RRUFF arrives as an .h5 like
+        # every other source, so there is nothing left to scan here.
+        messagebox.showinfo(
+            "No RRUFF Library",
+            "Add a RRUFF .h5 library first (Manage sources -> Add .h5 librar(ies)).")
 
-        self.btn_rruff_match.config(state="disabled")
-        self.rruff_status_var.set(f"Matching {len(candidates)} references ...")
-
-        def worker():
-            scored = []
-            total = len(candidates)
-            for i, (name, rid, path) in enumerate(candidates):
-                try:
-                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                        x, y, _ = _parse_two_column_text(f.read(), name)
-                    if len(x) < 5:
-                        continue
-                    ref_peaks = detect_reference_peaks(x, y)
-                    score, avg, matched = peak_match_score(ref_peaks, exp_peaks, tolerance)
-                    if matched > 0:
-                        scored.append({'score': score, 'avg': avg, 'matched': matched,
-                                       'name': name, 'id': rid, 'path': path})
-                except Exception:
-                    continue
-                if (i % 200) == 0:
-                    self.root.after(0, lambda i=i: self.rruff_status_var.set(
-                        f"Matching {i}/{total} references ..."))
-            scored.sort(key=lambda t: (-t['score'], t['avg']))
-            self.root.after(0, lambda: self._show_rruff_match_results(scored[:100], len(exp_peaks), tolerance))
-            self.root.after(0, lambda: self.btn_rruff_match.config(state="normal"))
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def _show_rruff_match_results(self, scored, n_exp, tolerance):
         if not scored:
@@ -2420,16 +2281,6 @@ class FTIRPlotterGUI:
             out.append({'key': 'rruff-lib', 'label': 'RRUFF library', 'kind': 'rruff',
                         'count': len(self.rruff_lib['entries']),
                         'entries': self.rruff_lib['entries']})
-        elif self.rruff_local_dir:
-            files = [f for f in os.listdir(self.rruff_local_dir) if f.lower().endswith('.txt')]
-            out.append({'key': 'rruff-folder', 'label': 'RRUFF folder', 'kind': 'folder',
-                        'count': len(files), 'entries': None})
-        else:
-            ds = self.combo_rruff_dataset.get()
-            if rruff_is_cached(ds):
-                n = len([f for f in os.listdir(rruff_dataset_dir(ds)) if f.lower().endswith('.txt')])
-                out.append({'key': 'rruff-set', 'label': f'RRUFF {ds}', 'kind': 'folder',
-                            'count': n, 'entries': None})
         for i, lib in enumerate(self.spec_libs):
             src = (lib['entries'][0].get('source') if lib['entries'] else '') or 'Library'
             out.append({'key': f'lib-{i}', 'label': f"{src} — {lib['name']}", 'kind': 'lib',
@@ -2497,7 +2348,7 @@ class FTIRPlotterGUI:
 
     @staticmethod
     def _db_tag(kind, e):
-        if kind in ('rruff', 'folder'):
+        if kind == 'rruff':
             return 'RRUFF'
         src = (e.get('source') if isinstance(e, dict) else None) or 'LIB'
         return 'SPECY' if src == 'OpenSpecy' else src.upper()[:6]
@@ -2516,11 +2367,6 @@ class FTIRPlotterGUI:
         for s in sources:
             if s['kind'] == 'online':
                 continue                      # handled asynchronously below
-            if s['kind'] == 'folder':
-                for name, rid, path in self._rruff_candidate_files(query):
-                    self.db_hits.append({'kind': 'folder', 'tag': 'RRUFF',
-                                         'rec': {'name': name, 'id': rid, 'path': path}})
-                continue
             for e in s['entries']:
                 if q and q not in self._db_haystack(s['kind'], e):
                     continue
@@ -2690,37 +2536,6 @@ class FTIRPlotterGUI:
         for s in sources:
             if s['kind'] == 'online':
                 continue                       # bounded online scan stays separate
-            if s['kind'] == 'folder':
-                for name, rid, path in self._rruff_candidate_files(self.ent_db_query.get()):
-                    try:
-                        with open(path, 'r', encoding='utf-8', errors='ignore') as fh:
-                            x, y, _ = _parse_two_column_text(fh.read(), name)
-                        if len(x) < 5:
-                            continue
-                        peaks = detect_reference_peaks(x, y)
-                    except Exception:                        # noqa: BLE001
-                        continue
-                    scanned += 1
-                    if exclusive:
-                        # intensity at each detected position, so the noise floor
-                        # applies to folder references too
-                        inten = [float(y[int(np.argmin(np.abs(np.asarray(x) - pk)))])
-                                 for pk in peaks]
-                        (score, avg, matched, recall, precision,
-                         extra, considered, have_int) = peak_match_exclusive(
-                            peaks, inten, exp_peaks, tolerance, xlo, xhi, floor_frac)
-                        if not have_int:
-                            no_inten += 1
-                    else:
-                        score, avg, matched = peak_match_score(peaks, exp_peaks, tolerance)
-                        recall = precision = extra = considered = None
-                    if matched > 0:
-                        scored.append({'score': score, 'avg': avg, 'matched': matched,
-                                       'recall': recall, 'precision': precision,
-                                       'extra': extra, 'considered': considered,
-                                       'name': name, 'id': rid, 'tag': 'RRUFF',
-                                       'kind': 'folder', 'path': path, 'detail': ''})
-                continue
             for e in s['entries']:
                 if q and q not in self._db_haystack(s['kind'], e):
                     continue
@@ -2898,6 +2713,45 @@ class FTIRPlotterGUI:
                    command=overlay_chosen).pack(side="left", padx=4)
 
     # ---------- Reference libraries (.h5, multi-library) ----------
+
+    def db_add_libraries(self):
+        """Add one or more .h5 reference libraries, whatever schema they use.
+
+        Every file is sniffed and handed to the loader that understands it, so a
+        COD, ROD, Open Specy, flat or RRUFF library all arrive through one door.
+        """
+        paths = filedialog.askopenfilenames(
+            title="Add reference .h5 librar(ies) — ROD, Open Specy, COD, RRUFF or flat",
+            filetypes=[("Reference library", ("*.h5", "*.hdf5")), ("All Files", "*.*")])
+        if not paths:
+            return
+        added, rruff_loaded, problems = 0, 0, []
+        for path in paths:
+            base = os.path.basename(path)
+            kind = sniff_library_kind(path)
+            if kind == 'rruff':
+                try:
+                    self.rruff_lib = load_rruff_h5_library(path)
+                    rruff_loaded += 1
+                except Exception as e:
+                    problems.append('%s: %s' % (base, e))
+            elif kind in ('library', 'flat'):
+                try:
+                    if self._lib_load_path(path, active=True):
+                        added += 1
+                    else:
+                        problems.append('%s: could not be added' % base)
+                except Exception as e:
+                    problems.append('%s: %s' % (base, e))
+            else:
+                problems.append('%s: not one of our libraries (no /spectra group '
+                                'and no peaks_all/offsets)' % base)
+        self.db_refresh()
+        if problems:
+            messagebox.showerror(
+                "Library Error",
+                "Loaded %d librar(ies).\n\nProblems:\n  %s"
+                % (added + rruff_loaded, '\n  '.join(problems)))
 
     def lib_add(self):
         paths = filedialog.askopenfilenames(
