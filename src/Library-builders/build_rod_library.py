@@ -696,7 +696,9 @@ def build_library(ids, args, cfg):
                 flat_convert = None
         if flat_convert is not None:
             before = os.path.getsize(args.out)
-            flat_convert(args.out)
+            # Verify a sample against the file we just wrote, while the
+            # group-per-entry original still exists to compare with.
+            flat_convert(args.out, verify=200)
             after = os.path.getsize(args.out)
             print("  --flat: %.1f MB -> %.1f MB (%.1fx smaller)"
                   % (before / 1e6, after / 1e6, before / max(1, after)))

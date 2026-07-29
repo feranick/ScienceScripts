@@ -223,6 +223,58 @@ def write_flat(src, names, dest, file_attrs, src_name, drop, max_peaks, t0):
     return int(offs[-1])
 
 
+def check_library(path):
+    """Report entries whose data cannot be read. Returns a shell exit code.
+
+    Corrupt gzip chunks are invisible until something reads them: a library can
+    sit on a server for weeks looking fine. rod_raman_library.h5 had 8 bad
+    entries out of 1,133 and no symptom other than the app refusing to load it.
+    """
+    bad, empty, ok = [], 0, 0
+    with h5py.File(path, 'r') as f:
+        if 'spectra' in f:
+            names = entry_names(f)
+            for nm in names:
+                damaged = []
+                px, _ = entry_peaks(f['spectra'][nm], damaged)
+                if damaged:
+                    bad.append((nm, damaged[0][1]))
+                elif px is None:
+                    empty += 1
+                else:
+                    ok += 1
+            total = len(names)
+        elif 'peaks_all' in f and 'offsets' in f:
+            # a flat library: one read either works or the file is unusable
+            try:
+                n_pk = f['peaks_all'].shape[0]
+                offs = f['offsets'][:]
+                ok = max(0, offs.size - 1)
+                total = ok
+                if int(offs[-1]) != n_pk:
+                    bad.append(('<offsets>', 'last offset %d != peaks_all length %d'
+                                % (int(offs[-1]), n_pk)))
+            except OSError as e:
+                bad.append(('<arrays>', str(e).split('(')[0].strip()))
+                total = 0
+        else:
+            print('  not one of our libraries (no /spectra, no peaks_all)')
+            return 2
+    print('  readable: %s    no peaks: %s    UNREADABLE: %s   (of %s)'
+          % (format(ok, ','), format(empty, ','), format(len(bad), ','),
+             format(total, ',')))
+    for nm, why in bad[:20]:
+        print('    %-34s %s' % (nm[:34], why))
+    if len(bad) > 20:
+        print('    ... and %d more' % (len(bad) - 20))
+    if bad:
+        print('\n  The damage is in this file. Rebuild these ids, or rebuild the '
+              'library.')
+        return 1
+    print('  no damage found')
+    return 0
+
+
 def flat_convert(src_path, dest_path=None, drop=(), max_peaks=0, quiet=False,
                  verify=0, limit=0):
     """Convert a group-per-entry library to the flat layout, in place if asked.
@@ -305,6 +357,9 @@ def main():
     ap.add_argument('--verify', type=int, default=200,
                     help='re-read this many random entries and compare against '
                          'the source (0 to skip). Default 200')
+    ap.add_argument('--check', action='store_true',
+                    help='report unreadable entries and exit without writing. '
+                         'Use it after a build, or to audit a served library')
     ap.add_argument('--flat', action='store_true',
                     help='consolidated layout: one concatenated peaks array plus '
                          'an offset index. ~16x smaller than the group-per-entry '
@@ -319,6 +374,10 @@ def main():
 
     t0 = time.time()
     print('  source: %s   %s' % (args.src, human(src_size)))
+
+    if args.check:
+        sys.exit(check_library(args.src))
+
     print('  gzip: %s   drop attrs: %s   max-peaks: %s'
           % ('off' if args.no_compress else 'kept',
              ','.join(sorted(drop)) or 'none', args.max_peaks or 'all'))
