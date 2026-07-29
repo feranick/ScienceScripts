@@ -698,7 +698,12 @@ def build_library(ids, args, cfg):
             before = os.path.getsize(args.out)
             # Verify a sample against the file we just wrote, while the
             # group-per-entry original still exists to compare with.
-            flat_convert(args.out, verify=200)
+            try:
+                flat_convert(args.out, verify=200)
+            except Exception as e:
+                print('  --flat skipped: %s' % e)
+                print('  The ordinary library was written and is usable.')
+                return kept
             after = os.path.getsize(args.out)
             print("  --flat: %.1f MB -> %.1f MB (%.1fx smaller)"
                   % (before / 1e6, after / 1e6, before / max(1, after)))

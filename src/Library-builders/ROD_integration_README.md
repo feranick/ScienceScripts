@@ -88,20 +88,34 @@ Measured, extrapolated to 1133 entries:
 | native (`--step 0`) | ~38 MB | as deposited, typically ~0.5 cm⁻¹ |
 | `--step 1` | ~24 MB | **recommended** — ROD deposits are mostly 4 cm⁻¹ resolution, so this is lossless in practice |
 | `--step 2` | ~21 MB | diminishing returns; HDF5 per-group overhead dominates — which `--flat` removes outright |
-| `--step 1 --flat` | **~0.12 MB** | same bands; the consolidated layout removes HDF5's ~2 KB-per-group overhead |
+| `--step 1 --flat` | ~0.12 MB | **peaks only — the measured spectra are discarded.** Almost never what you want for ROD; see below |
 
-`--flat` is not a rounding difference: 24 MB → 0.12 MB, because ROD entries carry
-only a handful of bands each, so nearly the whole file was HDF5's ~2 KB-per-group
-bookkeeping. Measured on a real 1,133-entry build. The apps read it from
-`2026.07.28.1` onward; older versions cannot open it.
+### Do not use `--flat` for ROD
+
+`--flat` stores band positions and heights and **nothing else** — the measured
+spectra are dropped. A ROD entry averages 1,524 measured points and 8.7 detected
+bands, so a flat build replaces a real Raman spectrum with a Gaussian
+reconstruction from nine numbers. Overlays stop showing band shapes, widths,
+backgrounds and weak features, which for Raman is most of what you were looking
+at. ROD's value over a computed library is precisely that its spectra are
+measured.
+
+And there is nothing to buy with that loss: the whole database is ~24 MB, which
+loads in a browser tab without complaint. The size problem `--flat` exists to
+solve was a 1.4 GB peaks-only COD set, not a 24 MB curve library.
+
+So the recommended build is the plain one:
 
 ```bash
-# a browser-sized ROD library in one step
-python3 build_rod_library.py --all --step 1 --flat --out rod_raman_library.h5
-
-# or convert one you already have; verifies before replacing
-python3 repack_library.py rod_raman_library.h5 --flat -o rod_raman_library.h5
+python3 build_rod_library.py --all --step 1 --out rod_raman_library.h5
 ```
+
+Reach for `--flat` only if you have a peaks-only library large enough that the
+browser struggles — tens of thousands of entries. For those, discarding curves
+costs nothing because they were never stored.
+
+The apps read the flat layout from `2026.07.28.1` onward; older versions cannot
+open it.
 
 ### Checking a library for damage
 

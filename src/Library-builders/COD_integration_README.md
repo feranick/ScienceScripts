@@ -112,8 +112,14 @@ Two results in that table are counter-intuitive and both are measured:
   regular `x` grid) are still compressed, where gzip genuinely saves ~39%.
 - **`--flat` is 16× smaller again** — 3.1 → 0.46 KB per phase. It stores every
   phase's reflections in one concatenated array with an offset index instead of
-  one HDF5 group each, which removes the per-group overhead entirely. Read by
-  the apps from `2026.07.28.1` onward; older app versions cannot open it.
+  one HDF5 group each, removing the per-group overhead entirely. Read by the apps
+  from `2026.07.28.1` onward; older versions cannot open it.
+
+  It holds **no curves**, so it pairs with `--peaks-only` and nothing else.
+  Converting a full-curve or measured-spectrum library would swap real profiles
+  for Gaussian reconstructions, so `repack_library.py` and the builders refuse
+  unless you pass `--drop-curves`. For measured libraries — RRUFF, ROD — that is
+  usually the wrong trade; see the ROD README.
 
 - **`xrd_plotter.py` (desktop)** reads `x`/`y` lazily through h5py, one phase at
   a time. Size is irrelevant; a multi-GB curve library is fine.

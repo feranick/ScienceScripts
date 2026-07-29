@@ -275,8 +275,24 @@ def check_library(path):
     return 0
 
 
+def library_has_curves(path, sample=20):
+    """True when entries store measured x/y curves, which flat cannot hold."""
+    with h5py.File(path, 'r') as f:
+        if 'spectra' not in f:
+            return False
+        for nm in list(f['spectra'].keys())[:sample]:
+            g = f['spectra'][nm]
+            if 'x' in g and 'y' in g:
+                return True
+    return False
+
+
+class CurvesWouldBeLost(Exception):
+    """Raised rather than silently turning measured spectra into Gaussians."""
+
+
 def flat_convert(src_path, dest_path=None, drop=(), max_peaks=0, quiet=False,
-                 verify=0, limit=0):
+                 verify=0, limit=0, drop_curves=False):
     """Convert a group-per-entry library to the flat layout, in place if asked.
 
     ALWAYS writes to a temporary file first, even when the destination differs
@@ -287,6 +303,19 @@ def flat_convert(src_path, dest_path=None, drop=(), max_peaks=0, quiet=False,
     Verification happens before the replace, while the original is still intact:
     afterwards there is nothing left to compare against.
     """
+    # The flat layout has nowhere to put a curve, so converting a library of
+    # measured spectra replaces them with a Gaussian reconstruction from a
+    # handful of band positions -- for ROD, 1,524 measured points traded for 9
+    # numbers. The guard lives here, not in the CLI, because the builders call
+    # this function directly for their own --flat.
+    if not drop_curves and library_has_curves(src_path):
+        raise CurvesWouldBeLost(
+            '%s stores measured curves (x/y), which the flat layout cannot hold: '
+            'overlays would become Gaussian reconstructions from the band '
+            'positions alone. If the curves matter -- they usually do for measured '
+            'spectra -- leave this library as it is; one that already fits in a '
+            'browser tab has nothing to gain here. Pass --drop-curves / '
+            'drop_curves=True to convert anyway.' % os.path.basename(src_path))
     same = dest_path is None or os.path.abspath(dest_path) == os.path.abspath(src_path)
     final = src_path if same else dest_path
     tmp = final + '.flat.tmp'
@@ -360,6 +389,9 @@ def main():
     ap.add_argument('--check', action='store_true',
                     help='report unreadable entries and exit without writing. '
                          'Use it after a build, or to audit a served library')
+    ap.add_argument('--drop-curves', action='store_true',
+                    help='allow --flat on a library that stores measured x/y '
+                         'curves, accepting that they are discarded')
     ap.add_argument('--flat', action='store_true',
                     help='consolidated layout: one concatenated peaks array plus '
                          'an offset index. ~16x smaller than the group-per-entry '
@@ -392,8 +424,12 @@ def main():
                      'flat layout is small enough that sharding is pointless.')
         want_flat = args.out or os.path.join(
             os.path.dirname(os.path.abspath(args.src)), stem + '_flat.h5')
-        final = flat_convert(args.src, want_flat, drop, args.max_peaks,
-                             quiet=True, verify=args.verify, limit=args.limit)
+        try:
+            final = flat_convert(args.src, want_flat, drop, args.max_peaks,
+                                 quiet=True, verify=args.verify, limit=args.limit,
+                                 drop_curves=args.drop_curves)
+        except CurvesWouldBeLost as e:
+            sys.exit('  %s' % e)
         sz = os.path.getsize(final)
         with h5py.File(final, 'r') as h:
             n = int(h.attrs.get('count', 0))
