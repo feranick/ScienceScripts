@@ -28,7 +28,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "ftir-v2026.07.29.1"
+VERSION_TAG = "ftir-v2026.07.29.2"
 
 # RRUFF reference database (open FTIR spectra of minerals).
 # Data are distributed as per-quality zip archives of two-column .txt files.
@@ -1346,6 +1346,12 @@ class FTIRPlotterGUI:
         for key, data in list(self.active_datasets.items()):
             row_frame = ttk.Frame(self.panel_fit_targets)
             row_frame.pack(side="top", fill="x", pady=2, expand=True)
+            # Packed before the label for the same reason as the source rows: Tk
+            # allocates in pack order, so a long dataset name left this button a
+            # sliver. "✕" also renders in the default font, where "❌" often does not.
+            btn_del = ttk.Button(row_frame, text="✕", width=3,
+                                 command=lambda k=key: self.remove_specific_dataset(k))
+            btn_del.pack(side="right", anchor="e", padx=(4, 0))
             if not key.startswith("__fit_") and not key.startswith("__ref_"):
                 if key not in self.target_checkbox_vars:
                     self.target_checkbox_vars[key] = tk.BooleanVar(value=True)
@@ -1362,8 +1368,6 @@ class FTIRPlotterGUI:
                 else:
                     lbl = ttk.Label(row_frame, text=data['label'], font=("Helvetica", 9, "italic"), foreground="#555555")
                 lbl.pack(side="left", anchor="w", padx=4)
-            btn_del = ttk.Button(row_frame, text="❌", width=2, command=lambda k=key: self.remove_specific_dataset(k))
-            btn_del.pack(side="right", anchor="e")
 
     def remove_specific_dataset(self, key_to_remove):
         self.save_to_history()
@@ -2305,13 +2309,24 @@ class FTIRPlotterGUI:
             row.pack(fill="x", pady=1)
             var = tk.BooleanVar(value=s['key'] not in self.db_disabled)
             label = s['label'] + (f" · {s['count']:,}" if s['count'] else "")
-            ttk.Checkbutton(row, text=label, variable=var,
-                            command=lambda k=s['key'], v=var, s=s: self._db_toggle_source(k, v, s)
-                            ).pack(side="left", anchor="w")
+            # The remove button is packed BEFORE the checkbutton. Tk hands space
+            # out in pack order, so a long library name claimed the whole row and
+            # squeezed the right-packed button down to a sliver. Reserving its
+            # width first leaves the label with the remainder.
+            #
+            # "✕" rather than "❌": the emoji has no glyph in Tk's default font on
+            # most Linux systems, where it renders as a box or a pair of bars.
             if s['kind'] == 'lib':
-                ttk.Button(row, text="❌", width=2,
+                ttk.Button(row, text="✕", width=3,
                            command=lambda i=s['lib_index']: (self._lib_remove(i),
-                                                             self.db_refresh())).pack(side="right")
+                                                             self.db_refresh())
+                           ).pack(side="right", padx=(4, 0))
+            # Truncated so the row cannot demand more width than the sidebar has;
+            # the full name stays available in the status line.
+            shown = label if len(label) <= 34 else label[:33] + "…"
+            ttk.Checkbutton(row, text=shown, variable=var,
+                            command=lambda k=s['key'], v=var, s=s: self._db_toggle_source(k, v, s)
+                            ).pack(side="left", anchor="w", fill="x", expand=True)
             row._db_var = var          # keep a reference so Tk does not GC it
         self.db_update_status()
 

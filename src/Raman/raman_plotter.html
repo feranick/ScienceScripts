@@ -260,7 +260,7 @@
             <div id="db-manage" style="display: none; flex-direction: column; gap: 6px;">
                 <label class="btn-crop" for="db-h5" style="text-align: center; cursor: pointer; font-size: 0.8rem;">📚 Add .h5 librar(ies)</label>
                 <input type="file" id="db-h5" accept=".h5,.hdf5" multiple style="display:none;" onchange="addDbLibrary(event)">
-                <button class="btn-crop" style="font-size: 0.75rem; padding: 5px;" onclick="forgetSavedLibrary()">🗑 Forget saved RRUFF library</button>
+                <button class="btn-crop" style="font-size: 0.75rem; padding: 5px;" onclick="forgetSavedLibrary()">🗑 Forget saved libraries</button>
                 <div style="border-top: 1px dashed #e9ecef; padding-top: 6px;">
                     <div style="font-size: 0.78rem; color: #495057; font-weight: bold; margin-bottom: 4px;">🔗 SDBS (organic compounds)</div>
                     <p class="info-text" style="margin: 0 0 4px;">Opens SDBS in a new tab; download a spectrum there and load the .jdx. SDBS does not permit automated downloads.</p>
@@ -332,7 +332,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "raman-v2026.07.29.1";
+        const VERSION_TAG = "raman-v2026.07.29.2";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -1164,11 +1164,29 @@
             });
         }
 
+        // Clears every remembered library, which is what the button now says.
+        // It used to delete one legacy key ("library_h5") holding a single cached
+        // RRUFF blob -- and nothing has written that key since the multi-library
+        // system arrived, so the button had become a no-op while the real cache
+        // (one blob per library plus an index) had no reset at all.
         async function forgetSavedLibrary() {
-            try { await idbClear(); } catch (e) { /* ignore */ }
+            try {
+                const db = await idbOpen();
+                await new Promise((res, rej) => {
+                    const tx = db.transaction(IDB_STORE, "readwrite");
+                    tx.objectStore(IDB_STORE).clear();
+                    tx.oncomplete = () => { db.close(); res(); };
+                    tx.onerror = () => rej(tx.error);
+                });
+            } catch (e) { /* nothing cached, or storage unavailable */ }
             rruffLibrary = [];
+            rodLibraries.length = 0;
+            try { refreshRodLibsPanel(); } catch (e) {}
+            try { updateRodPanelState(); } catch (e) {}
             updateRruffPanelState();
-            document.getElementById('db-status').innerText = "Saved library cleared. Load a folder (📂) or an .h5 library (📚).";
+            if (typeof dbRefresh === 'function') dbRefresh();
+            document.getElementById('db-status').innerText =
+                "Saved libraries cleared. Add one with \u{1F4DA} Add .h5 librar(ies).";
         }
 
         // Fetch an ArrayBuffer with a timeout and (when possible) streamed
@@ -1447,7 +1465,7 @@
                     const existing = rodLibraries.findIndex(l => l.key === key || l.file === file.name);
                     if (existing >= 0) rodLibraries.splice(existing, 1);   // reloading replaces
                     rodLibraries.push({ name: file.name, file: file.name, key, entries, active: true });
-                    if (buf.byteLength <= LIB_IDB_MAX_BYTES) { if (buf.byteLength <= LIB_IDB_MAX_BYTES) { try { await idbSaveKey(key, buf); } catch (e) {} } }
+                    if (buf.byteLength <= LIB_IDB_MAX_BYTES) { try { await idbSaveKey(key, buf); } catch (e) {} }
                 } catch (err) {
                     statusEl.innerText = "Could not open " + file.name + ": " + err.message;
                     if (/too large for a browser tab/.test(err.message)) alert(err.message);
