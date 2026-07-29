@@ -59,26 +59,40 @@ def entry_names(src):
     return list(src['spectra'].keys())
 
 
-def entry_peaks(g):
+def entry_peaks(g, damaged=None):
     """(peaks, intensities) for one group, whichever way they are stored.
 
     The RRUFF builders keep peaks in a group ATTRIBUTE, not a dataset -- and
     intensities not at all. The loaders have always accepted both forms; this
     tool did not, so --flat crashed with a bare KeyError on any RRUFF library.
-    Returns (None, None) when an entry carries no peaks at all.
+
+    A per-entry read can also fail outright: rod_raman_library.h5 had 8 entries
+    whose gzip chunks were corrupt, and HDF5 answers "filter returned failure
+    during read". One bad entry must not cost the other 1125, so the failure is
+    recorded in `damaged` and the entry skipped. Returns (None, None) when an
+    entry has no peaks or cannot be read.
     """
-    px = None
-    if 'peaks' in g:
-        px = np.asarray(g['peaks'][:], dtype='float32')
-    elif 'peaks' in g.attrs:
-        px = np.atleast_1d(np.asarray(g.attrs['peaks'], dtype='float32'))
-    if px is None or px.size == 0:
+    def _rd(name):
+        # OSError covers the HDF5 filter/IO failures; ValueError/KeyError cover
+        # a malformed dataset. Anything else is a bug and should surface.
+        try:
+            if name in g:
+                return np.asarray(g[name][:], dtype='float32')
+            if name in g.attrs:
+                return np.atleast_1d(np.asarray(g.attrs[name], dtype='float32'))
+        except (OSError, ValueError, KeyError) as e:
+            if damaged is not None:
+                damaged.append((g.name.split('/')[-1], '%s: %s'
+                                % (name, str(e).split('(')[0].strip())))
+            return 'ERR'
+        return None
+
+    px = _rd('peaks')
+    if px is None or isinstance(px, str) or px.size == 0:
         return None, None
-    py = None
-    if 'intensities' in g:
-        py = np.asarray(g['intensities'][:], dtype='float32')
-    elif 'intensities' in g.attrs:
-        py = np.atleast_1d(np.asarray(g.attrs['intensities'], dtype='float32'))
+    py = _rd('intensities')
+    if isinstance(py, str):
+        py = None
     if py is None or py.size != px.size:
         # No stored heights: treat every reflection as equally strong rather
         # than inventing a ranking. peak_index_rank already handles this.
@@ -138,12 +152,13 @@ def write_flat(src, names, dest, file_attrs, src_name, drop, max_peaks, t0):
     # position, not by source position -- otherwise a skipped entry leaves a
     # zero-length hole and every later entry reads the wrong slice.
     kept = []
+    damaged = []
     cols = {field: [] for field, _ in STR_FIELDS}
     for i, nm in enumerate(names):
         g = src['spectra'][nm]
-        px, py = entry_peaks(g)
+        px, py = entry_peaks(g, damaged)
         if px is None:
-            continue                      # nothing to carry for this entry
+            continue                      # no peaks, or unreadable -- see `damaged`
         if max_peaks and px.size > max_peaks:
             keep = np.sort(np.argsort(py)[::-1][:max_peaks])
             px, py = px[keep], py[keep]
@@ -173,6 +188,8 @@ def write_flat(src, names, dest, file_attrs, src_name, drop, max_peaks, t0):
         h.attrs['count'] = n_kept
         if n_kept != n:
             h.attrs['skipped_no_peaks'] = n - n_kept
+        if damaged:
+            h.attrs['skipped_unreadable'] = len(damaged)
         h.attrs['repacked_from'] = os.path.basename(src_name)
         pk = np.concatenate(peaks_parts) if peaks_parts else np.zeros(0, 'float32')
         it = np.concatenate(inten_parts) if inten_parts else np.zeros(0, 'float32')
@@ -194,6 +211,15 @@ def write_flat(src, names, dest, file_attrs, src_name, drop, max_peaks, t0):
             h.create_dataset(field, dtype='S%d' % w, compression='gzip',
                              data=np.array([v.encode('utf-8') for v in vals],
                                            dtype='S%d' % w))
+    if damaged:
+        print('\n  WARNING: %d of %d entries could not be read and were left out.'
+              % (len(damaged), n))
+        print('  Their data is corrupt in the SOURCE file, not lost by this tool.')
+        for nm, why in damaged[:10]:
+            print('    %-30s %s' % (nm[:30], why))
+        if len(damaged) > 10:
+            print('    ... and %d more' % (len(damaged) - 10))
+        print('  Rebuild just these ids to recover them.')
     return int(offs[-1])
 
 

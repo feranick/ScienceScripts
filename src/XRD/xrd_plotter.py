@@ -47,7 +47,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.07.28.2"
+VERSION_TAG = "v2026.07.28.4"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 # RRUFF powder reference library (patterns calculated for Cu radiation, i.e. the
@@ -515,9 +515,32 @@ def rruff_url(name, rid, stored_url=None):
     return None
 
 
+def entry_readable(grp, names=('peaks',)):
+    """True when the named datasets in this group can actually be read.
+
+    A single corrupt entry used to make an entire library unloadable: HDF5 says
+    "filter returned failure during read" and the exception escaped the loader,
+    so rod_raman_library.h5 -- 1,125 of 1,133 entries perfectly fine -- failed
+    outright. Probing the datasets the loader needs eagerly lets the good
+    entries load and the bad ones be counted.
+
+    Only eagerly-read datasets are probed. A corrupt x/y curve still surfaces
+    later, when that reference is actually overlaid.
+    """
+    for nm in names:
+        if nm not in grp:
+            continue
+        try:
+            grp[nm][:1]
+        except (OSError, ValueError, KeyError):
+            return False
+    return True
+
+
 def load_rruff_powder_h5_library(path):
     """Reads a consolidated RRUFF powder library .h5 (from build_rruff_powder_library.py).
     Returns {'path', 'entries': [{group, name, id, url, peaks(np.array)}]}."""
+    _damaged_entries = 0
     if not H5_AVAILABLE:
         raise ImportError("Reading .h5 libraries requires 'h5py' (pip install h5py).")
     entries = []
@@ -527,6 +550,11 @@ def load_rruff_powder_h5_library(path):
         sp = f['spectra']
         for gname in sp:
             a = sp[gname].attrs
+            # Skip an entry whose data cannot be decompressed rather than
+            # losing the whole library to it (see entry_readable).
+            if not entry_readable(a):
+                _damaged_entries += 1
+                continue
             def dec(v):
                 return v.decode('latin1') if isinstance(v, bytes) else str(v)
             peaks = np.asarray(a['peaks'], dtype=float) if 'peaks' in a else np.array([])
@@ -569,6 +597,7 @@ def cod_url(cod_id):
 def load_cod_powder_h5_library(path):
     """Read a COD powder .h5 built by build_cod_powder_library.py.
     Returns {'path', 'entries': [{group, name, id(cod), url, peaks, formula, sg}]}."""
+    _damaged_entries = 0
     if not H5_AVAILABLE:
         raise ImportError("Reading .h5 libraries requires 'h5py' (pip install h5py).")
     entries = []
@@ -598,6 +627,11 @@ def load_cod_powder_h5_library(path):
         has_curve = False
         for gname in sp:
             grp = sp[gname]
+            # Skip an entry whose data cannot be decompressed rather than
+            # losing the whole library to it (see entry_readable).
+            if not entry_readable(grp):
+                _damaged_entries += 1
+                continue
             a = grp.attrs
             # peaks/intensities may be datasets (new) or attributes (older files)
             if 'peaks' in grp:

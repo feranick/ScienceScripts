@@ -29,7 +29,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "raman-v2026.07.28.2"
+VERSION_TAG = "raman-v2026.07.28.4"
 
 # RRUFF reference database (open Raman spectra of minerals).
 # Data are distributed as per-quality zip archives of two-column .txt files.
@@ -658,10 +658,33 @@ def rruff_search_cached(dataset, query):
     return results
 
 
+def entry_readable(grp, names=('peaks',)):
+    """True when the named datasets in this group can actually be read.
+
+    A single corrupt entry used to make an entire library unloadable: HDF5 says
+    "filter returned failure during read" and the exception escaped the loader,
+    so rod_raman_library.h5 -- 1,125 of 1,133 entries perfectly fine -- failed
+    outright. Probing the datasets the loader needs eagerly lets the good
+    entries load and the bad ones be counted.
+
+    Only eagerly-read datasets are probed. A corrupt x/y curve still surfaces
+    later, when that reference is actually overlaid.
+    """
+    for nm in names:
+        if nm not in grp:
+            continue
+        try:
+            grp[nm][:1]
+        except (OSError, ValueError, KeyError):
+            return False
+    return True
+
+
 def load_rruff_h5_library(path):
     """Reads a consolidated RRUFF library .h5 (built by build_rruff_library.py).
     Returns {'path', 'entries': [{group, name, id, quality, peaks(np.array)}]}.
     Spectra x/y are read lazily from the file when a reference is overlaid."""
+    _damaged_entries = 0
     if not H5_AVAILABLE:
         raise ImportError("Reading .h5 libraries requires 'h5py' (pip install h5py).")
     entries = []
@@ -671,6 +694,11 @@ def load_rruff_h5_library(path):
         sp = f['spectra']
         for gname in sp:
             g = sp[gname]
+            # Skip an entry whose data cannot be decompressed rather than
+            # losing the whole library to it (see entry_readable).
+            if not entry_readable(g):
+                _damaged_entries += 1
+                continue
             a = g.attrs
             peaks = np.asarray(a['peaks'], dtype=float) if 'peaks' in a else np.array([])
             entries.append({
@@ -718,6 +746,7 @@ def load_rod_h5_library(path):
     Returns {'path', 'source', 'entries': [{group, name, id, source, cod_id,
              formula, mineral, collection, laser, url, cod_url, peaks}]}.
     """
+    _damaged_entries = 0
     if not H5_AVAILABLE:
         raise ImportError("Reading .h5 libraries requires 'h5py' (pip install h5py).")
     entries = []
@@ -739,6 +768,11 @@ def load_rod_h5_library(path):
         sp = f['spectra']
         for gname in sp:
             g = sp[gname]
+            # Skip an entry whose data cannot be decompressed rather than
+            # losing the whole library to it (see entry_readable).
+            if not entry_readable(g):
+                _damaged_entries += 1
+                continue
             a = g.attrs
             if 'peaks' in g:                       # dataset (preferred)
                 peaks = np.asarray(g['peaks'][:], dtype=float)
