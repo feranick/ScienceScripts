@@ -87,7 +87,40 @@ Measured, extrapolated to 1133 entries:
 | --- | --- | --- |
 | native (`--step 0`) | ~38 MB | as deposited, typically ~0.5 cm⁻¹ |
 | `--step 1` | ~24 MB | **recommended** — ROD deposits are mostly 4 cm⁻¹ resolution, so this is lossless in practice |
-| `--step 2` | ~21 MB | diminishing returns; HDF5 per-group overhead dominates |
+| `--step 2` | ~21 MB | diminishing returns; HDF5 per-group overhead dominates — which `--flat` removes outright |
+| `--step 1 --flat` | **~0.12 MB** | same bands; the consolidated layout removes HDF5's ~2 KB-per-group overhead |
+
+`--flat` is not a rounding difference: 24 MB → 0.12 MB, because ROD entries carry
+only a handful of bands each, so nearly the whole file was HDF5's ~2 KB-per-group
+bookkeeping. Measured on a real 1,133-entry build. The apps read it from
+`2026.07.28.1` onward; older versions cannot open it.
+
+```bash
+# a browser-sized ROD library in one step
+python3 build_rod_library.py --all --step 1 --flat --out rod_raman_library.h5
+
+# or convert one you already have; verifies before replacing
+python3 repack_library.py rod_raman_library.h5 --flat -o rod_raman_library.h5
+```
+
+### Checking a library for damage
+
+Corrupt gzip chunks are silent — HDF5 only complains when something reads the
+damaged bytes, so a library can sit on a server looking healthy. This is not
+hypothetical: a 1,133-entry ROD build had 8 entries whose chunks were unreadable,
+and because the loader let the exception escape, **the whole library failed to
+load** with no indication which entry was at fault.
+
+```bash
+python3 repack_library.py rod_raman_library.h5 --check
+```
+
+It reports readable / no-peaks / unreadable counts, names the bad entries, and
+exits 1 if any are found, so it works in a script. From `2026.07.28.4` the app
+loaders skip an unreadable entry and load the rest rather than failing outright,
+and `--flat` conversions skip them with a warning naming the ids. Rebuild those
+ids with `--ids`, or rebuild the library — for ROD the whole database is only a
+few MB, so rebuilding is usually the cheaper choice.
 
 Run `--limit 20` first for a true figure on your selection — the numbers above
 extrapolate from smooth spectra and real noisy deposits compress worse.

@@ -79,23 +79,72 @@ Then pass `--mirror ./cod-cif-mirror` and parallelise with `--jobs N`.
 ### Sizing: build for the desktop app, or for the browser?
 
 **This is the decision that matters most, and getting it wrong produces a file
-the browser cannot open.** Storage mode drives size by a factor of ~70:
+the browser cannot open.** Two things drive size: whether you store curves, and
+which *layout* you store the reflections in.
 
-| Build | Per phase | 62k inorganic phases |
-| --- | --- | --- |
-| full curves (default, 4251 pts) | 33 KB | **2.1 GB** |
-| `--peaks-only` (all ~200 reflections) | 1.6 KB | 99 MB |
-| `--peaks-only --max-peaks 60` | 0.5 KB | **30 MB** |
-| `--peaks-only --max-peaks 30` | 0.2 KB | 15 MB |
+Figures below are measured on real builds, not estimated. An earlier version of
+this table quoted 0.5 KB per phase for a `--max-peaks 60` build and predicted
+30 MB for 62k phases. That was the **data payload** — 60 reflections × 2 arrays ×
+4 bytes = 480 bytes. What HDF5 actually writes is ~14× more, because a group per
+entry costs roughly 2 KB in object headers and B-tree nodes regardless of what
+you put in it. Measured: `cod_inorganic_web.h5` is 366 MB for 51,225 phases, not
+25 MB. If you built an organic set expecting ~100 MB and got 1.4 GB, that table
+is why.
+
+| Build | Per phase | 51,225 phases | 195,135 phases |
+| --- | --- | --- | --- |
+| full curves (default, 4251 pts) | ~33 KB | ~1.7 GB | ~6.4 GB |
+| `--peaks-only --max-peaks 60` | 7.1–7.3 KB | **366 MB** | **1423 MB** |
+| the same, `repack_library.py --no-compress` | ~3.1 KB | ~160 MB | **597 MB** |
+| `--peaks-only --max-peaks 60 --flat` | 0.4–0.5 KB | **~23 MB** | **~90 MB** |
+
+Sizes are decimal (1 MB = 10⁶ bytes). **Bold figures are measured files**; the
+rest follow from the per-phase cost. Per-phase varies a little with how long the
+formula and name strings are, hence the ranges — do not expect the rows to
+multiply out to the last MB.
+
+Two results in that table are counter-intuitive and both are measured:
+
+- **Turning gzip OFF makes the file smaller** — 7.3 → 3.1 KB per phase. A
+  60-value float32 dataset does not compress, and the chunk index plus filter
+  pipeline HDF5 stores per dataset costs more than the compression saves. The
+  builders now decide by array size, so curves (thousands of points, with a
+  regular `x` grid) are still compressed, where gzip genuinely saves ~39%.
+- **`--flat` is 16× smaller again** — 3.1 → 0.46 KB per phase. It stores every
+  phase's reflections in one concatenated array with an offset index instead of
+  one HDF5 group each, which removes the per-group overhead entirely. Read by
+  the apps from `2026.07.28.1` onward; older app versions cannot open it.
 
 - **`xrd_plotter.py` (desktop)** reads `x`/`y` lazily through h5py, one phase at
-  a time. Size is irrelevant; a 2.1 GB curve library is fine.
+  a time. Size is irrelevant; a multi-GB curve library is fine.
 - **`xrd_plotter.html` (browser)** must hold the library in the tab. Full-curve
   libraries above a few hundred MB **cannot work** — see the next section.
 
-So for anything large, build twice: full curves for the desktop, peaks-only for
-the browser. Peak positions and relative intensities are identical either way;
-only the stored profile differs, and the browser rebuilds it on overlay.
+So for anything large, build twice: full curves for the desktop, `--peaks-only
+--max-peaks 60 --flat` for the browser. Peak positions and relative intensities
+are identical either way; only the stored profile differs, and the browser
+rebuilds it on overlay.
+
+### Shrinking a library you already built
+
+`repack_library.py` reads an existing `.h5` and writes a new one. It never
+re-downloads or recomputes anything, so this is minutes rather than hours:
+
+```bash
+# 1423 MB -> 88 MB, in place
+python3 repack_library.py cod_organic.h5 --flat -o cod_organic.h5
+
+# same schema, no app changes needed at all: 1423 -> 597 MB
+python3 repack_library.py cod_organic.h5 --no-compress -o cod_organic_web.h5
+
+# audit a library for damage; exits 1 if any entry is unreadable
+python3 repack_library.py cod_organic.h5 --check
+```
+
+Both conversions verify a sample of entries against the source before replacing
+anything, and write to a temporary file first, so a failure leaves the original
+intact. `--check` exists because corrupt gzip chunks are silent: a library can
+sit on a server looking fine until something tries to read the damaged entry.
 
 ### Why the browser cannot take a multi-GB library
 
@@ -125,6 +174,11 @@ The apps now defend against this rather than crashing:
 Those guards make an oversized file fail cleanly. They are not a substitute for
 building peaks-only.
 
+A `--flat` library sidesteps most of this arithmetic. The 195k-phase organic set
+is 88 MB on disk, and its entries are zero-copy views into two typed arrays
+rather than two JS arrays per phase, so the third row above — historically the
+one that killed the tab — becomes a single 94 MB allocation.
+
 ### The recommended library set
 
 With the mirror in place, these are sensible defaults (adjust `--jobs` to your
@@ -132,16 +186,16 @@ CPU). Note the inorganic and minerals sets are built twice:
 
 ```bash
 # 1) Inorganic — no C/H (~62k)
-#    desktop: full curves (2.1 GB)
+#    desktop: full curves (~1.7 GB)
 python build_cod_powder_library.py --db3 cod-260101.db3 --inorganic \
        --mirror ./cod-cif-mirror --jobs 8 --out cod_inorganic.h5
-#    browser: peaks-only (~30 MB)
+#    browser: peaks-only, flat (~23 MB)
 python build_cod_powder_library.py --db3 cod-260101.db3 --inorganic \
-       --mirror ./cod-cif-mirror --jobs 8 --peaks-only --max-peaks 60 \
+       --mirror ./cod-cif-mirror --jobs 8 --peaks-only --max-peaks 60 --flat \
        --out cod_inorganic_web.h5
 
 # 2) Minerals — entries with a mineral name (~16k)
-#    desktop: full curves (~540 MB); browser: peaks-only (~8 MB)
+#    desktop: full curves (~540 MB); browser: peaks-only + --flat (~7 MB)
 python build_cod_powder_library.py --db3 cod-260101.db3 --minerals-only \
        --mirror ./cod-cif-mirror --jobs 8 --out cod_minerals.h5
 python build_cod_powder_library.py --db3 cod-260101.db3 --minerals-only \
