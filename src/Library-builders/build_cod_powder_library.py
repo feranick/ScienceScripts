@@ -89,6 +89,22 @@ _ELEMENT_TOKEN = re.compile(r"([A-Z][a-z]?)(\d*\.?\d*)")
 # Selection: query the Profex COD db3 (metadata search index)
 # ============================================================================
 
+
+def _ds(group, name, data, gzip_min=1024):
+    """Create a dataset, compressing only when the array is big enough to gain.
+
+    gzip on a 60-value array is a net loss: HDF5 stores a chunk index and filter
+    pipeline per dataset, which outweighs any compression of so few values. A
+    195k-entry peaks library measured 1423 MB compressed and 597 MB not. Curves
+    run to thousands of points and do compress, hence the size test rather than
+    dropping compression outright.
+    """
+    arr = np.asarray(data)
+    if arr.size >= gzip_min:
+        return group.create_dataset(name, data=arr, compression="gzip")
+    return group.create_dataset(name, data=arr)
+
+
 def elements_in_formula(formula):
     """Return the set of chemical-element symbols found in a COD formula string.
     COD formulae look like '- O2 Si -' or '- C5 H17 Al N2 O8 P2 -'."""
@@ -381,8 +397,8 @@ def build_library(rows, args):
                 g.attrs["url"] = COD_PAGE_URL.format(cid=cid)
                 # peaks/intensities as DATASETS (attributes are capped at 64 KB by
                 # HDF5; low-symmetry cells can exceed that with many reflections).
-                g.create_dataset("peaks", data=px, compression="gzip")
-                g.create_dataset("intensities", data=py, compression="gzip")
+                _ds(g, "peaks", px)
+                _ds(g, "intensities", py)
                 g.attrs["formula"] = meta["formula"]
                 g.attrs["sg"] = meta["sg"]
                 g.attrs["wavelength"] = args.wavelength
@@ -393,6 +409,25 @@ def build_library(rows, args):
 
     mode = "peaks-only" if args.peaks_only else "curve+peaks"
     print(f"\nDone: {kept} pattern(s) -> {args.out}  ({failed} skipped, storage={mode})")
+    # --flat: hand the finished file to the repack converter rather than
+    # duplicating it here, so the layout has one implementation and one test.
+    if getattr(args, "flat", False):
+        try:
+            from .repack_library import flat_convert
+        except ImportError:
+            try:
+                from repack_library import flat_convert
+            except ImportError:
+                print("  --flat needs repack_library.py alongside this script; "
+                      "the ordinary library was written and is usable.")
+                flat_convert = None
+        if flat_convert is not None:
+            before = os.path.getsize(args.out)
+            flat_convert(args.out)
+            after = os.path.getsize(args.out)
+            print("  --flat: %.1f MB -> %.1f MB (%.1fx smaller)"
+                  % (before / 1e6, after / 1e6, before / max(1, after)))
+
     if kept == 0:
         print("WARNING: no patterns were written. Check your selection / mirror / network.")
 
@@ -440,6 +475,11 @@ def parse_args(argv=None):
                       help="Gaussian broadening sigma (default 0.10)")
 
     store = p.add_argument_group("storage / performance")
+    p.add_argument("--flat", action="store_true",
+                   help="write the consolidated layout (one concatenated peaks "
+                        "array plus an offset index): ~16x smaller than one "
+                        "group per entry, and read by the apps from "
+                        "2026.07.28.1 onward")
     store.add_argument("--peaks-only", dest="peaks_only", action="store_true",
                        help="store only reflection peaks (no broadened curve); ~5-10x smaller, "
                             "browser-friendly. Apps rebuild the curve on load. Ideal for huge sets.")

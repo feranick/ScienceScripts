@@ -59,9 +59,37 @@ def entry_names(src):
     return list(src['spectra'].keys())
 
 
+def entry_peaks(g):
+    """(peaks, intensities) for one group, whichever way they are stored.
+
+    The RRUFF builders keep peaks in a group ATTRIBUTE, not a dataset -- and
+    intensities not at all. The loaders have always accepted both forms; this
+    tool did not, so --flat crashed with a bare KeyError on any RRUFF library.
+    Returns (None, None) when an entry carries no peaks at all.
+    """
+    px = None
+    if 'peaks' in g:
+        px = np.asarray(g['peaks'][:], dtype='float32')
+    elif 'peaks' in g.attrs:
+        px = np.atleast_1d(np.asarray(g.attrs['peaks'], dtype='float32'))
+    if px is None or px.size == 0:
+        return None, None
+    py = None
+    if 'intensities' in g:
+        py = np.asarray(g['intensities'][:], dtype='float32')
+    elif 'intensities' in g.attrs:
+        py = np.atleast_1d(np.asarray(g.attrs['intensities'], dtype='float32'))
+    if py is None or py.size != px.size:
+        # No stored heights: treat every reflection as equally strong rather
+        # than inventing a ranking. peak_index_rank already handles this.
+        py = np.ones(px.size, dtype='float32')
+    return px, py
+
+
 def copy_entry(dst_spectra, name, g, drop, keep_gzip, max_peaks):
-    px = g['peaks'][:]
-    py = g['intensities'][:] if 'intensities' in g else None
+    px, py = entry_peaks(g)
+    if px is None:
+        return 0
     if max_peaks and px.size > max_peaks:
         # Keep the strongest, then restore ascending position order so the
         # loaders and the match code see the same convention as before.
@@ -86,8 +114,12 @@ def copy_entry(dst_spectra, name, g, drop, keep_gzip, max_peaks):
     return px.size
 
 
+# 'group' carries the source group name. Positional identity is not enough: an
+# entry with no peaks is dropped, after which flat slot j no longer corresponds
+# to source entry j -- which is exactly how the verifier first mis-reported a
+# correct file as corrupt.
 STR_FIELDS = (('name', 'name'), ('formula', 'formula'), ('sg', 'sg'),
-              ('url', 'url'), ('id', None))       # id: cod_id or rruff_id
+              ('url', 'url'), ('id', None), ('group', None))
 
 
 def write_flat(src, names, dest, file_attrs, src_name, drop, max_peaks, t0):
@@ -102,21 +134,28 @@ def write_flat(src, names, dest, file_attrs, src_name, drop, max_peaks, t0):
     n = len(names)
     offs = np.zeros(n + 1, dtype='uint32')
     peaks_parts, inten_parts = [], []
+    # Entries without peaks are dropped, so the offset array is filled by KEPT
+    # position, not by source position -- otherwise a skipped entry leaves a
+    # zero-length hole and every later entry reads the wrong slice.
+    kept = []
     cols = {field: [] for field, _ in STR_FIELDS}
     for i, nm in enumerate(names):
         g = src['spectra'][nm]
-        px = g['peaks'][:].astype('float32')
-        py = (g['intensities'][:].astype('float32') if 'intensities' in g
-              else np.ones(px.size, dtype='float32'))
+        px, py = entry_peaks(g)
+        if px is None:
+            continue                      # nothing to carry for this entry
         if max_peaks and px.size > max_peaks:
             keep = np.sort(np.argsort(py)[::-1][:max_peaks])
             px, py = px[keep], py[keep]
         peaks_parts.append(px)
         inten_parts.append(py)
-        offs[i + 1] = offs[i] + px.size
+        kept.append(i)
+        offs[len(kept)] = offs[len(kept) - 1] + px.size
         a = g.attrs
         for field, key in STR_FIELDS:
-            if field == 'id':
+            if field == 'group':
+                val = nm
+            elif field == 'id':
                 val = a.get('cod_id') or a.get('rod_id') or a.get('rruff_id') or nm
             else:
                 val = a.get(key, '')
@@ -125,16 +164,23 @@ def write_flat(src, names, dest, file_attrs, src_name, drop, max_peaks, t0):
             print('    ... %s/%s entries (%.0fs)'
                   % (format(i + 1, ','), format(n, ','), time.time() - t0))
 
+    n_kept = len(kept)
+    offs = offs[:n_kept + 1]
     with h5py.File(dest, 'w') as h:
         for k, v in file_attrs.items():
             h.attrs[k] = v
         h.attrs['schema'] = 'flat'
-        h.attrs['count'] = n
+        h.attrs['count'] = n_kept
+        if n_kept != n:
+            h.attrs['skipped_no_peaks'] = n - n_kept
         h.attrs['repacked_from'] = os.path.basename(src_name)
-        h.create_dataset('peaks_all', data=np.concatenate(peaks_parts),
-                         compression='gzip', chunks=(1 << 16,))
-        h.create_dataset('inten_all', data=np.concatenate(inten_parts),
-                         compression='gzip', chunks=(1 << 16,))
+        pk = np.concatenate(peaks_parts) if peaks_parts else np.zeros(0, 'float32')
+        it = np.concatenate(inten_parts) if inten_parts else np.zeros(0, 'float32')
+        # A chunk may not exceed the dataset, which a fixed 64 K breaks on any
+        # library smaller than ~1000 entries.
+        chunk = (max(1, min(1 << 16, pk.size)),)
+        h.create_dataset('peaks_all', data=pk, compression='gzip', chunks=chunk)
+        h.create_dataset('inten_all', data=it, compression='gzip', chunks=chunk)
         h.attrs['n_peaks'] = int(offs[-1])
         # uint32 rather than int64: h5wasm hands int64 back as BigInt64Array,
         # which every consumer would then have to convert. 4 G reflections is
@@ -149,6 +195,35 @@ def write_flat(src, names, dest, file_attrs, src_name, drop, max_peaks, t0):
                              data=np.array([v.encode('utf-8') for v in vals],
                                            dtype='S%d' % w))
     return int(offs[-1])
+
+
+def flat_convert(src_path, dest_path=None, drop=(), max_peaks=0, quiet=False):
+    """Convert a group-per-entry library to the flat layout, in place if asked.
+
+    Importable so the builders can offer --flat without duplicating any of this:
+    they write the ordinary schema, then call here. Writing to a temp file and
+    replacing means a failure leaves the original intact.
+    """
+    in_place = dest_path is None or os.path.abspath(dest_path) == os.path.abspath(src_path)
+    tmp = (src_path + '.flat.tmp') if in_place else dest_path
+    t0 = time.time()
+    with h5py.File(src_path, 'r') as src:
+        if 'spectra' not in src:
+            raise ValueError('%s has no /spectra group' % src_path)
+        names = entry_names(src)
+        npk = write_flat(src, names, tmp, dict(src.attrs), src_path,
+                         set(drop), max_peaks, t0)
+    if in_place:
+        os.replace(tmp, src_path)
+        final = src_path
+    else:
+        final = dest_path
+    if not quiet:
+        sz = os.path.getsize(final)
+        print('  flat layout: %s entries, %s reflections, %s  (%.2f KB/entry)'
+              % (format(len(names), ','), format(npk, ','), human(sz),
+                 sz / max(1, len(names)) / 1024))
+    return final
 
 
 def open_shard(path, file_attrs, src_name, shard, n_shards):
@@ -314,15 +389,19 @@ def verify_flat(src_path, dest, k, max_peaks):
         offs = out['offsets'][:]
         pa_all, ia_all = out['peaks_all'], out['inten_all']
         ids = out['id'][:] if 'id' in out else None
+        groups = out['group'][:] if 'group' in out else None
         n = int(out.attrs['count'])
-        # both files must agree on entry ORDER, since the flat layout has no
-        # names -- position in the arrays is the only identity there is.
-        if len(names) < n:
-            sys.exit('  source has fewer entries than the flat file claims')
+        if groups is None and len(names) != n:
+            sys.exit('  cannot verify: file predates the group column and entries '
+                     'were dropped, so slots cannot be matched to source entries')
         for j in rng.choice(n, size=min(k, n), replace=False):
-            nm = names[j]
+            # Look the source entry up by its recorded group name. Comparing by
+            # position silently drifts as soon as one entry is dropped.
+            nm = groups[j].decode() if groups is not None else names[j]
             g = src['spectra'][nm]
-            want = g['peaks'][:].astype('float32')
+            want, _ = entry_peaks(g)
+            if want is None:
+                continue           # dropped for having no peaks; nothing to compare
             got = pa_all[offs[j]:offs[j + 1]]
             if max_peaks and want.size > max_peaks:
                 if got.size != max_peaks or not np.isin(got, want).all():
@@ -364,7 +443,10 @@ def verify(src_path, finals, k, drop, max_peaks):
                 for j in pick:
                     nm = names[j]
                     a, b = src['spectra'][nm], out['spectra'][nm]
-                    pa, pb = a['peaks'][:], b['peaks'][:]
+                    pa, _ = entry_peaks(a)
+                    pb, _ = entry_peaks(b)
+                    if pa is None or pb is None:
+                        continue
                     if max_peaks:
                         if pb.size > max_peaks or not np.isin(pb, pa.astype('float32')).all():
                             bad += 1

@@ -118,6 +118,22 @@ DEFAULT_UA = ("Mozilla/5.0 (compatible; Raman-Toolkit-ROD-builder/1.0; "
 # HTTP with an on-disk cache
 # ============================================================================
 
+
+def _ds(group, name, data, gzip_min=1024):
+    """Create a dataset, compressing only when the array is big enough to gain.
+
+    gzip on a 60-value array is a net loss: HDF5 stores a chunk index and filter
+    pipeline per dataset, which outweighs any compression of so few values. A
+    195k-entry peaks library measured 1423 MB compressed and 597 MB not. Curves
+    run to thousands of points and do compress, hence the size test rather than
+    dropping compression outright.
+    """
+    arr = np.asarray(data)
+    if arr.size >= gzip_min:
+        return group.create_dataset(name, data=arr, compression="gzip")
+    return group.create_dataset(name, data=arr)
+
+
 def _cache_path(cache_dir, rid, ext):
     return os.path.join(cache_dir, f"{rid}.{ext}")
 
@@ -637,8 +653,8 @@ def build_library(ids, args, cfg):
             g = spectra.create_group(str(rid))
             g.create_dataset("x", data=x.astype("float32"), compression="gzip")
             g.create_dataset("y", data=y.astype("float32"), compression="gzip")
-            g.create_dataset("peaks", data=px.astype("float32"), compression="gzip")
-            g.create_dataset("intensities", data=py.astype("float32"), compression="gzip")
+            _ds(g, "peaks", px.astype("float32"))
+            _ds(g, "intensities", py.astype("float32"))
 
             g.attrs["name"] = meta["name"]
             g.attrs["rod_id"] = str(rid)
@@ -666,6 +682,25 @@ def build_library(ids, args, cfg):
 
     size_mb = os.path.getsize(args.out) / 1e6
     print(f"\nDone: {kept} spectra -> {args.out}  ({size_mb:.1f} MB, {failed} skipped)")
+    # --flat: hand the finished file to the repack converter rather than
+    # duplicating it here, so the layout has one implementation and one test.
+    if getattr(args, "flat", False):
+        try:
+            from .repack_library import flat_convert
+        except ImportError:
+            try:
+                from repack_library import flat_convert
+            except ImportError:
+                print("  --flat needs repack_library.py alongside this script; "
+                      "the ordinary library was written and is usable.")
+                flat_convert = None
+        if flat_convert is not None:
+            before = os.path.getsize(args.out)
+            flat_convert(args.out)
+            after = os.path.getsize(args.out)
+            print("  --flat: %.1f MB -> %.1f MB (%.1fx smaller)"
+                  % (before / 1e6, after / 1e6, before / max(1, after)))
+
     if skipped_reasons:
         print("Skip reasons:")
         for reason, count in sorted(skipped_reasons.items(), key=lambda t: -t[1]):
@@ -738,6 +773,11 @@ def parse_args(argv=None):
 
     p.add_argument("--limit", type=int, default=0, help="cap number of entries")
     p.add_argument("--verbose", action="store_true", help="report every skip")
+    p.add_argument("--flat", action="store_true",
+                   help="write the consolidated layout (one concatenated peaks "
+                        "array plus an offset index): ~16x smaller than one "
+                        "group per entry, and read by the apps from "
+                        "2026.07.28.1 onward")
     p.add_argument("--out", default="rod_raman_library.h5", help="output .h5 path")
     return p.parse_args(argv)
 

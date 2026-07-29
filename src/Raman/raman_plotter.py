@@ -29,7 +29,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "raman-v2026.07.28.1"
+VERSION_TAG = "raman-v2026.07.28.2"
 
 # RRUFF reference database (open Raman spectra of minerals).
 # Data are distributed as per-quality zip archives of two-column .txt files.
@@ -268,6 +268,7 @@ def flat_entries(f, file_source, decode, url_for=None, id_keys=('id',)):
     if n < 0:
         return []
 
+    groups = flat_string_col(f, 'group', n, decode)
     names = flat_string_col(f, 'name', n, decode)
     forms = flat_string_col(f, 'formula', n, decode)
     ids = flat_string_col(f, 'id', n, decode)
@@ -279,7 +280,8 @@ def flat_entries(f, file_source, decode, url_for=None, id_keys=('id',)):
         lo, hi = int(offs[i]), int(offs[i + 1])
         ident = (ids[i] if ids else str(i)) or str(i)
         entries.append({
-            'group': ident,
+            # the source group name when the file records it, else the id
+            'group': (groups[i] if groups else '') or ident,
             'name': (names[i] if names else '') or ident,
             'id': ident,
             'source': file_source,

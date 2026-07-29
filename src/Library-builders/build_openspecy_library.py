@@ -139,6 +139,22 @@ ID_COLUMNS = ("sample_id", "spectrum_id", "id")
 # Download / decode
 # ============================================================================
 
+
+def _ds(group, name, data, gzip_min=1024):
+    """Create a dataset, compressing only when the array is big enough to gain.
+
+    gzip on a 60-value array is a net loss: HDF5 stores a chunk index and filter
+    pipeline per dataset, which outweighs any compression of so few values. A
+    195k-entry peaks library measured 1423 MB compressed and 597 MB not. Curves
+    run to thousands of points and do compress, hence the size test rather than
+    dropping compression outright.
+    """
+    arr = np.asarray(data)
+    if arr.size >= gzip_min:
+        return group.create_dataset(name, data=arr, compression="gzip")
+    return group.create_dataset(name, data=arr)
+
+
 def download_rds(lib_type, cache_dir, use_aws=True, offline=False, ua=DEFAULT_UA,
                  timeout=300):
     os.makedirs(cache_dir, exist_ok=True)
@@ -429,8 +445,8 @@ def build(wav, spectra, meta_rows, args):
             g = grp.create_group(gid)
             g.create_dataset("x", data=x.astype("float32"), compression="gzip")
             g.create_dataset("y", data=y.astype("float32"), compression="gzip")
-            g.create_dataset("peaks", data=px.astype("float32"), compression="gzip")
-            g.create_dataset("intensities", data=py.astype("float32"), compression="gzip")
+            _ds(g, "peaks", px.astype("float32"))
+            _ds(g, "intensities", py.astype("float32"))
 
             g.attrs["name"] = name
             g.attrs["rod_id"] = ""
@@ -456,6 +472,25 @@ def build(wav, spectra, meta_rows, args):
 
     size_mb = os.path.getsize(args.out) / 1e6
     print(f"\nDone: {kept} spectra -> {args.out}  ({size_mb:.1f} MB)")
+    # --flat: hand the finished file to the repack converter rather than
+    # duplicating it here, so the layout has one implementation and one test.
+    if getattr(args, "flat", False):
+        try:
+            from .repack_library import flat_convert
+        except ImportError:
+            try:
+                from repack_library import flat_convert
+            except ImportError:
+                print("  --flat needs repack_library.py alongside this script; "
+                      "the ordinary library was written and is usable.")
+                flat_convert = None
+        if flat_convert is not None:
+            before = os.path.getsize(args.out)
+            flat_convert(args.out)
+            after = os.path.getsize(args.out)
+            print("  --flat: %.1f MB -> %.1f MB (%.1fx smaller)"
+                  % (before / 1e6, after / 1e6, before / max(1, after)))
+
     if skipped_type:
         print(f"  {skipped_type} skipped as not '{want}' (use --only both to keep everything)")
     if skipped_filter:
@@ -516,6 +551,11 @@ def parse_args(argv=None):
     proc.add_argument("--require-peaks", dest="require_peaks", action="store_true",
                       help="skip spectra where no band clears the threshold")
 
+    p.add_argument("--flat", action="store_true",
+                   help="write the consolidated layout (one concatenated peaks "
+                        "array plus an offset index): ~16x smaller than one "
+                        "group per entry, and read by the apps from "
+                        "2026.07.28.1 onward")
     p.add_argument("--out", default="openspecy_raman.h5", help="output .h5 path")
     return p.parse_args(argv)
 

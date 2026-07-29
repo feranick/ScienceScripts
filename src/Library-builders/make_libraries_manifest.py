@@ -82,6 +82,25 @@ def inspect_library(path):
     try:
         with h5py.File(path, "r") as f:
             if "spectra" not in f:
+                # Flat-schema library (repack_library.py --flat): no /spectra
+                # group, so the entry count comes from the offset index. Only
+                # the attribute block is read either way, so this stays fast.
+                if "peaks_all" in f and "offsets" in f:
+                    a = f.attrs
+                    n = int(a.get("count", 0)) or max(0, int(f["offsets"].shape[0]) - 1)
+                    return {
+                        "count": n,
+                        "source": _decode(a.get("source")),
+                        "database": _decode(a.get("database")),
+                        "technique": _decode(a.get("technique")),
+                        "license": _decode(a.get("license")),
+                        "storage": _decode(a.get("storage")) or "peaks",
+                        "built": _decode(a.get("built")),
+                        "library_type": _decode(a.get("library_type")),
+                        "wavelength": _decode(a.get("wavelength")),
+                        "units_x": _decode(a.get("units_x")),
+                        "schema": "flat",
+                    }
                 return None                          # not one of our libraries
             a = f.attrs
             info = {

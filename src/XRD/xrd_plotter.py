@@ -47,7 +47,7 @@ except ImportError:
 # ==========================================
 # GLOBAL CONFIGURATIONS & CONSTANTS
 # ==========================================
-VERSION_TAG = "v2026.07.28.1"
+VERSION_TAG = "v2026.07.28.2"
 KEY_FILE_NAME = "mp_api_key.txt"
 
 # RRUFF powder reference library (patterns calculated for Cu radiation, i.e. the
@@ -300,6 +300,7 @@ def flat_entries(f, file_source, decode, url_for=None, id_keys=('id',)):
     if n < 0:
         return []
 
+    groups = flat_string_col(f, 'group', n, decode)
     names = flat_string_col(f, 'name', n, decode)
     forms = flat_string_col(f, 'formula', n, decode)
     ids = flat_string_col(f, 'id', n, decode)
@@ -311,7 +312,8 @@ def flat_entries(f, file_source, decode, url_for=None, id_keys=('id',)):
         lo, hi = int(offs[i]), int(offs[i + 1])
         ident = (ids[i] if ids else str(i)) or str(i)
         entries.append({
-            'group': ident,
+            # the source group name when the file records it, else the id
+            'group': (groups[i] if groups else '') or ident,
             'name': (names[i] if names else '') or ident,
             'id': ident,
             'source': file_source,

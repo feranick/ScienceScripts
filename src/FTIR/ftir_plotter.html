@@ -333,7 +333,7 @@
     </div>
 
     <script>
-        const VERSION_TAG = "ftir-v2026.07.28.1";
+        const VERSION_TAG = "ftir-v2026.07.28.2";
 
         let persistentDatasets = {};
         let fittingModeActive = false;
@@ -854,45 +854,48 @@
 
 
         function flatEntries(f, fileSource, urlFor) {
-            const pa = f.get("peaks_all"), of = f.get("offsets");
-            if (!pa || !of) return null;
-            const ia = f.get("inten_all");
-            const asF32 = v => (v instanceof Float32Array ? v : Float32Array.from(v));
-            const peaksAll = asF32(pa.value);
-            const intenAll = ia ? asF32(ia.value) : null;
-            const offs = of.value;
-            if (!offs || offs.length < 2) return null;
-            const n = offs.length - 1;
+    const pa = f.get("peaks_all"), of = f.get("offsets");
+    if (!pa || !of) return null;
+    const ia = f.get("inten_all");
+    const asF32 = v => (v instanceof Float32Array ? v : Float32Array.from(v));
+    const peaksAll = asF32(pa.value);
+    const intenAll = ia ? asF32(ia.value) : null;
+    const offs = of.value;
+    if (!offs || offs.length < 2) return null;
+    const n = offs.length - 1;
 
-            const names = flatStringCol(f, "name", n);
-            const forms = flatStringCol(f, "formula", n);
-            const ids = flatStringCol(f, "id", n);
-            const urls = flatStringCol(f, "url", n);
-            const sgs = flatStringCol(f, "sg", n);
+    const groups = flatStringCol(f, "group", n);
+    const names = flatStringCol(f, "name", n);
+    const forms = flatStringCol(f, "formula", n);
+    const ids = flatStringCol(f, "id", n);
+    const urls = flatStringCol(f, "url", n);
+    const sgs = flatStringCol(f, "sg", n);
 
-            const out = new Array(n);
-            for (let i = 0; i < n; i++) {
-                // Number(): offsets are uint32 here, but a file written with int64 comes
-                // back as BigInt64Array and would poison the arithmetic silently.
-                const lo = Number(offs[i]), hi = Number(offs[i + 1]);
-                const id = (ids && ids[i]) || String(i);
-                out[i] = {
-                    name: (names && names[i]) || id,
-                    id: id,
-                    source: fileSource,
-                    formula: (forms && forms[i]) || "",
-                    sg: (sgs && sgs[i]) || "",
-                    url: (urls && urls[i]) || (urlFor ? urlFor(id) : ""),
-                    peaks: peaksAll.subarray(lo, hi),
-                    intensities: intenAll ? intenAll.subarray(lo, hi) : new Float32Array(0),
-                    // Flat libraries are peaks-only by construction; the overlay path
-                    // rebuilds a profile from the reflections.
-                    x: new Float32Array(0),
-                    y: new Float32Array(0)
-                };
-            }
-            return out;
-        }
+    const out = new Array(n);
+    for (let i = 0; i < n; i++) {
+        // Number(): offsets are uint32 here, but a file written with int64 comes
+        // back as BigInt64Array and would poison the arithmetic silently.
+        const lo = Number(offs[i]), hi = Number(offs[i + 1]);
+        const id = (ids && ids[i]) || String(i);
+        out[i] = {
+            name: (names && names[i]) || id,
+            id: id,
+            // source group name when recorded, for provenance
+            group: (groups && groups[i]) || id,
+            source: fileSource,
+            formula: (forms && forms[i]) || "",
+            sg: (sgs && sgs[i]) || "",
+            url: (urls && urls[i]) || (urlFor ? urlFor(id) : ""),
+            peaks: peaksAll.subarray(lo, hi),
+            intensities: intenAll ? intenAll.subarray(lo, hi) : new Float32Array(0),
+            // Flat libraries are peaks-only by construction; the overlay path
+            // rebuilds a profile from the reflections.
+            x: new Float32Array(0),
+            y: new Float32Array(0)
+        };
+    }
+    return out;
+}
 
         function attrToString(a) {
             let v = attrRaw(a);
