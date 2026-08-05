@@ -171,8 +171,3 @@ too large with an explanation rather than crashing the tab.
 ## SEM/EDS
 1. **Summarizer**: Create a summary given the spectra and the images.
 
-## PyMol Plotter
-1. **plot_pymol_structures**: Plot a 'necklace' of spherical particles from a PACKMOL-style PDB file.
-
-## Build GMSH
-1. **Build_gmsh**: Bash script to compile [GMSH](https://gmsh.info/) for older system via miniconda3.
